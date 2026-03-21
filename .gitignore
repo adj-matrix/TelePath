@@ -1,3 +1,26 @@
+#==============================================================================#
+# This file specifies intentionally untracked files that git should ignore.
+#==============================================================================#
+
+.backup/
+.devcontainer/
+.download/
+.reference/
+.temp/
+.vscode/
+
+build
+
+docs/journal/
+docs/old/
+docs/sketch/
+
+support/personal/
+
+#==============================================================================#
+# C++
+#==============================================================================#
+
 # Prerequisites
 *.d
 

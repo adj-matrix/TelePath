@@ -1,0 +1,53 @@
+flowchart TB
+    subgraph Client["Client / Host Application"]
+        APP["TelePath SDK Consumer"]
+    end
+
+    subgraph DataPlane["Data Plane"]
+        BM["BufferManager"]
+        BH["BufferHandle"]
+        BD["BufferDescriptor / Frame Table"]
+        RP["Replacer Interface"]
+        CLOCK["ClockReplacer"]
+        LRU["LruReplacer"]
+    end
+
+    subgraph Storage["Storage Backend Layer"]
+        DB["DiskBackend"]
+        POSIX["PosixDiskBackend"]
+        FUTURE_IO["Future: UringDiskBackend"]
+    end
+
+    subgraph Observe["Observation Plane"]
+        TS["TelemetrySink"]
+        CTS["CounterTelemetrySink"]
+        NTS["NoOpTelemetrySink"]
+        FUTURE_EXP["Future: Shared Memory / Exporter / Metrics Bridge"]
+    end
+
+    subgraph Control["Benchmark / Control Plane"]
+        BENCH["Future Benchmark Driver"]
+        ANALYSIS["Future Analysis / Visualization"]
+    end
+
+    APP --> BM
+    BM --> BH
+    BM --> BD
+    BM --> RP
+    RP --> CLOCK
+    RP --> LRU
+
+    BM --> DB
+    DB --> POSIX
+    DB -.-> FUTURE_IO
+
+    BM --> TS
+    TS --> CTS
+    TS --> NTS
+    TS -.-> FUTURE_EXP
+
+    BENCH -.-> APP
+    ANALYSIS -.-> FUTURE_EXP
+
+    classDef future stroke-dasharray: 5 5;
+    class FUTURE_IO,FUTURE_EXP,BENCH,ANALYSIS future;
