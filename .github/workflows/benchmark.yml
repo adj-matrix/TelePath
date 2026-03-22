@@ -1,0 +1,70 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+concurrency:
+  group: benchmark-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Benchmark Sweep
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: sudo ./support/install_build_deps.sh
+
+      - name: Build debug benchmark target
+        run: ./scripts/build/debug.sh
+
+      - name: Run benchmark sweeps
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/benchmarks
+
+          for workload in hotspot uniform sequential; do
+            WORKLOAD="${workload}" \
+            THREADS="1 2 4" \
+            POOL_SIZE="256" \
+            BLOCK_COUNT="1024" \
+            OPS_PER_THREAD="10000" \
+            HOTSET_SIZE="64" \
+            HOT_ACCESS_PERCENT="80" \
+            ./scripts/bench/sweep.sh > "artifacts/benchmarks/${workload}.csv"
+          done
+
+      - name: Publish benchmark summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "# Benchmark Summary"
+            echo
+            echo "These results come from a shared GitHub-hosted runner and should be treated as trend data, not final performance ground truth."
+            echo
+            for report in artifacts/benchmarks/*.csv; do
+              name="$(basename "${report}" .csv)"
+              echo "## ${name}"
+              echo
+              echo '```csv'
+              cat "${report}"
+              echo '```'
+              echo
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: artifacts/benchmarks
+          if-no-files-found: error
+          retention-days: 14

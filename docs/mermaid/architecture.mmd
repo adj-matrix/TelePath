@@ -1,0 +1,75 @@
+flowchart TB
+    subgraph Client["Client / Host Application"]
+        APP["TelePath SDK Consumer"]
+        API["BufferManager API"]
+        OPTS["BufferManagerOptions"]
+    end
+
+    subgraph DataPlane["Data Plane"]
+        BM["BufferManager"]
+        BH["BufferHandle"]
+        FMP["FrameMemoryPool"]
+        PT["Striped Page Table"]
+        BD["BufferDescriptor<br/>state + pin + dirty generation"]
+        CL["Per-page Content Latch"]
+        RP["Replacer Interface"]
+        CLOCK["ClockReplacer"]
+        LRU["LruReplacer"]
+        LRUK["LruKReplacer"]
+    end
+
+    subgraph Storage["Storage Backend Layer"]
+        DB["DiskBackend"]
+        POSIX["PosixDiskBackend"]
+        WORKER["Background I/O Worker"]
+        CQ["Completion Queue"]
+        FUTURE_IO["Future: io_uring Backend"]
+    end
+
+    subgraph Observe["Observation Plane"]
+        TS["TelemetrySink"]
+        FAST["Fast-path Atomic Counters"]
+        CTS["CounterTelemetrySink"]
+        NTS["NoOpTelemetrySink"]
+        FUTURE_EXP["Future: Shared Memory Telemetry Pipeline"]
+    end
+
+    subgraph Tooling["Tooling / Validation"]
+        SCRIPTS["scripts/build test bench"]
+        CI["GitHub Actions CI"]
+        BENCH["GitHub Benchmark Workflow"]
+    end
+
+    APP --> API
+    OPTS --> API
+    API --> BM
+    BM --> BH
+    BM --> FMP
+    BM --> PT
+    BM --> BD
+    BH --> CL
+    BD --> CL
+    BM --> RP
+    RP --> CLOCK
+    RP --> LRU
+    RP --> LRUK
+
+    BM --> DB
+    DB --> POSIX
+    POSIX --> WORKER
+    WORKER --> CQ
+    DB -.-> FUTURE_IO
+
+    BM --> TS
+    TS --> FAST
+    TS --> CTS
+    TS --> NTS
+    TS -.-> FUTURE_EXP
+
+    SCRIPTS --> API
+    CI --> SCRIPTS
+    BENCH --> SCRIPTS
+    BENCH -.-> FUTURE_EXP
+
+    classDef future stroke-dasharray: 5 5;
+    class FUTURE_IO,FUTURE_EXP future;

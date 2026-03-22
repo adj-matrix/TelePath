@@ -14,8 +14,10 @@ Compared with State 1, the current implementation now includes:
 - cache-line-aware descriptor alignment preparation,
 - a less serialized hit path,
 - an async-ready disk abstraction with submit/poll semantics,
+- page-content latching for stable flush snapshots,
 - descriptor-level in-flight I/O coordination,
 - a baseline `LRU-K` implementation,
+- a configurable `BufferManagerOptions` entrypoint,
 - an initial benchmark skeleton,
 - broader tests for concurrency, eviction, and failure paths.
 
@@ -78,7 +80,7 @@ It now exposes:
 - `SubmitWrite`
 - `PollCompletion`
 
-The current POSIX backend still executes I/O in a simple synchronous manner internally, but the interface is now aligned with a future async backend rather than blocking the design in place.
+The current POSIX backend is still a transitional implementation, but it now runs requests through a background worker and completion queue. This keeps the public boundary aligned with a future async backend instead of hard-coding synchronous call/return behavior into the API.
 
 ### 5. Descriptor-Level Waiting
 
@@ -94,7 +96,7 @@ The current implementation is intentionally straightforward and correctness-orie
 
 ### 7. Benchmark Skeleton
 
-State 2 introduces a small but usable benchmark executable and scripts under `support/`.
+State 2 introduces a small but usable benchmark executable and scripts under `scripts/`.
 
 The current benchmark supports:
 
@@ -126,6 +128,7 @@ State 2 now validates the following categories:
 - wait/evict interleaving in small-capacity scenarios
 
 At the time of writing, the project test suite contains 12 tests and passes in both debug and ASAN configurations under the current development environment.
+At the time of writing, the project test suite contains 15 tests and passes in both debug and ASAN configurations under the current development environment.
 
 ## Current Limits
 

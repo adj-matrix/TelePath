@@ -84,7 +84,7 @@ This means TelePath now supports not only the basic buffer lifecycle, but also:
 
 ## Build
 
-TelePath keeps project-related environment scripts under `support/`.
+TelePath keeps environment bootstrap scripts under `support/` and day-to-day project entry scripts under `scripts/`.
 
 ### Minimal Build Dependencies
 
@@ -136,6 +136,7 @@ The main implementation currently lives under:
 - `src/cpp/lib`
 - `test/cpp`
 - `support`
+- `scripts`
 
 ## Roadmap
 
@@ -154,8 +155,9 @@ Recommended entry points:
 
 - [State 1 Summary](./docs/state1.md)
 - [State 2 Summary](./docs/state2.md)
+- [CI Guide](./docs/ci.md)
 - [Repository Tree Guide](./docs/tree.md)
-- [State 1 Architecture Mermaid](./docs/mermaid/architecture-state1.mmd)
+- [Architecture Mermaid](./docs/mermaid/architecture.mmd)
 
 > 📜 **License**
 >
