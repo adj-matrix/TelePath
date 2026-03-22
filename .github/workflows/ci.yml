@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gcc-debug:
+    name: GCC Debug
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo ./support/install_build_deps.sh
+
+      - name: Build debug
+        run: ./scripts/build/debug.sh
+
+      - name: Run debug tests
+        run: ./scripts/test/debug.sh
+
+  gcc-asan:
+    name: GCC ASAN
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo ./support/install_build_deps.sh
+
+      - name: Build ASAN
+        run: ./scripts/build/asan.sh
+
+      - name: Run ASAN tests
+        run: ./scripts/test/asan.sh
+
+  clang-debug:
+    name: Clang Debug
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo ./support/install_build_deps.sh
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build debug
+        run: ./scripts/build/debug.sh
+
+      - name: Run debug tests
+        run: ./scripts/test/debug.sh

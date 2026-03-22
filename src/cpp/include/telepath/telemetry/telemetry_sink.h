@@ -18,6 +18,8 @@ struct TelemetrySnapshot {
   uint64_t dirty_flushes{0};
 };
 
+// Fast-path counters used by in-process telemetry implementations that want to
+// avoid virtual dispatch on the cache hot path.
 struct TelemetryCounters {
   std::atomic<uint64_t> buffer_hits{0};
   std::atomic<uint64_t> buffer_misses{0};
@@ -31,6 +33,7 @@ class TelemetrySink {
  public:
   virtual ~TelemetrySink() = default;
 
+  // Records a cache hit for the given page access.
   void RecordHit(const BufferTag &tag) {
     if (fast_path_counters_ != nullptr) {
       fast_path_counters_->buffer_hits.fetch_add(1, std::memory_order_relaxed);
@@ -39,6 +42,7 @@ class TelemetrySink {
     DoRecordHit(tag);
   }
 
+  // Records a cache miss for the given page access.
   void RecordMiss(const BufferTag &tag) {
     if (fast_path_counters_ != nullptr) {
       fast_path_counters_->buffer_misses.fetch_add(1, std::memory_order_relaxed);
@@ -47,6 +51,7 @@ class TelemetrySink {
     DoRecordMiss(tag);
   }
 
+  // Records a completed disk read.
   void RecordDiskRead(const BufferTag &tag) {
     if (fast_path_counters_ != nullptr) {
       fast_path_counters_->disk_reads.fetch_add(1, std::memory_order_relaxed);
@@ -55,6 +60,7 @@ class TelemetrySink {
     DoRecordDiskRead(tag);
   }
 
+  // Records a completed disk write.
   void RecordDiskWrite(const BufferTag &tag) {
     if (fast_path_counters_ != nullptr) {
       fast_path_counters_->disk_writes.fetch_add(1, std::memory_order_relaxed);
@@ -63,6 +69,7 @@ class TelemetrySink {
     DoRecordDiskWrite(tag);
   }
 
+  // Records an eviction of a resident page.
   void RecordEviction(const BufferTag &tag) {
     if (fast_path_counters_ != nullptr) {
       fast_path_counters_->evictions.fetch_add(1, std::memory_order_relaxed);
@@ -71,6 +78,7 @@ class TelemetrySink {
     DoRecordEviction(tag);
   }
 
+  // Records a dirty-page flush event.
   void RecordDirtyFlush(const BufferTag &tag) {
     if (fast_path_counters_ != nullptr) {
       fast_path_counters_->dirty_flushes.fetch_add(1, std::memory_order_relaxed);
@@ -79,6 +87,7 @@ class TelemetrySink {
     DoRecordDirtyFlush(tag);
   }
 
+  // Returns a point-in-time snapshot of all exported counters.
   TelemetrySnapshot Snapshot() const {
     if (fast_path_counters_ != nullptr) {
       return TelemetrySnapshot{
@@ -109,7 +118,9 @@ class TelemetrySink {
   TelemetryCounters *fast_path_counters_{nullptr};
 };
 
+// Returns a sink backed by in-process atomic counters.
 std::shared_ptr<TelemetrySink> MakeCounterTelemetrySink();
+// Returns a sink that intentionally drops all events.
 std::shared_ptr<TelemetrySink> MakeNoOpTelemetrySink();
 
 }  // namespace telepath

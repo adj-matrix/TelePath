@@ -34,11 +34,16 @@ class DiskBackend {
  public:
   virtual ~DiskBackend() = default;
 
+  // Enqueues an asynchronous page read into `out`. The returned request id must
+  // later be matched with PollCompletion().
   virtual Result<uint64_t> SubmitRead(const BufferTag &tag, std::byte *out,
                                       std::size_t size) = 0;
+  // Enqueues an asynchronous page write from `data`. The caller must keep the
+  // source buffer stable until the corresponding completion is observed.
   virtual Result<uint64_t> SubmitWrite(const BufferTag &tag,
                                        const std::byte *data,
                                        std::size_t size) = 0;
+  // Waits for and returns the next completed disk request.
   virtual Result<DiskCompletion> PollCompletion() = 0;
 };
 

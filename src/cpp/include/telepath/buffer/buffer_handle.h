@@ -30,12 +30,17 @@ class BufferHandle {
   FrameId frame_id() const { return frame_id_; }
   std::size_t size() const { return size_; }
 
+  // Returns read-only access to the page contents. The handle acquires and
+  // holds a shared content latch on first access.
   const std::byte *data() const;
+  // Returns writable access to the page contents. The handle upgrades to an
+  // exclusive content latch and holds it until Reset/destruction.
   std::byte *mutable_data();
   bool writable() const { return data_ != nullptr; }
 
   bool valid() const { return manager_ != nullptr; }
 
+  // Releases any held content latch and unpins the underlying frame.
   void Reset();
 
  private:

@@ -6,11 +6,15 @@
 
 namespace telepath {
 
+// Runtime configuration for BufferManager construction.
 struct BufferManagerOptions {
   std::size_t pool_size{0};
   std::size_t page_size{0};
+  // Number of striped latches protecting the page table. Set to zero to let
+  // the library derive a machine-sensitive default.
   std::size_t page_table_stripe_count{0};
 
+  // Returns the effective stripe count after applying the default policy.
   std::size_t ResolvePageTableStripeCount() const {
     if (page_table_stripe_count != 0) {
       return page_table_stripe_count;

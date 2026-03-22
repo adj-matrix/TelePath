@@ -34,24 +34,35 @@ struct FrameReservation {
 
 class BufferManager {
  public:
+  // Builds a buffer manager from explicit options. Initialization failures are
+  // surfaced through subsequent API calls as Status values.
   BufferManager(const BufferManagerOptions &options,
                 std::unique_ptr<DiskBackend> disk_backend,
                 std::unique_ptr<Replacer> replacer,
                 std::shared_ptr<TelemetrySink> telemetry_sink);
+  // Convenience overload for callers that only want pool/page sizing.
   BufferManager(std::size_t pool_size, std::size_t page_size,
                 std::unique_ptr<DiskBackend> disk_backend,
                 std::unique_ptr<Replacer> replacer,
                 std::shared_ptr<TelemetrySink> telemetry_sink);
   ~BufferManager();
 
+  // Pins the requested page in memory and returns a scoped handle to it. The
+  // page may be loaded from disk or served from the resident cache.
   Result<BufferHandle> ReadBuffer(FileId file_id, BlockId block_id);
+  // Explicitly releases a handle before it goes out of scope.
   Status ReleaseBuffer(BufferHandle &&handle);
+  // Marks the page referenced by the handle as dirty so that it will be
+  // written back before eviction or during an explicit flush.
   Status MarkBufferDirty(const BufferHandle &handle);
+  // Flushes the page referenced by the handle to the backing store.
   Status FlushBuffer(const BufferHandle &handle);
+  // Flushes every currently resident dirty page.
   Status FlushAll();
 
   std::size_t pool_size() const { return pool_size_; }
   std::size_t page_size() const { return page_size_; }
+  // Returns the resolved runtime options, including derived defaults.
   const BufferManagerOptions &options() const { return options_; }
 
  private:
