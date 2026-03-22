@@ -38,6 +38,14 @@ target_link_libraries(telepath_memory_layout_test PRIVATE telepath)
 
 add_test(NAME telepath_memory_layout_test COMMAND telepath_memory_layout_test)
 
+add_executable(telepath_options_test
+  cpp/options_test.cc
+)
+
+target_link_libraries(telepath_options_test PRIVATE telepath)
+
+add_test(NAME telepath_options_test COMMAND telepath_options_test)
+
 add_executable(telepath_concurrency_test
   cpp/concurrency_test.cc
 )
@@ -93,6 +101,22 @@ add_executable(telepath_wait_evict_interleave_test
 target_link_libraries(telepath_wait_evict_interleave_test PRIVATE telepath)
 
 add_test(NAME telepath_wait_evict_interleave_test COMMAND telepath_wait_evict_interleave_test)
+
+add_executable(telepath_completion_order_test
+  cpp/completion_order_test.cc
+)
+
+target_link_libraries(telepath_completion_order_test PRIVATE telepath)
+
+add_test(NAME telepath_completion_order_test COMMAND telepath_completion_order_test)
+
+add_executable(telepath_flush_consistency_test
+  cpp/flush_consistency_test.cc
+)
+
+target_link_libraries(telepath_flush_consistency_test PRIVATE telepath)
+
+add_test(NAME telepath_flush_consistency_test COMMAND telepath_flush_consistency_test)
 
 add_executable(telepath_benchmark
   cpp/benchmark_main.cc

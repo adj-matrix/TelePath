@@ -6,14 +6,17 @@ namespace telepath {
 
 class NoOpTelemetrySink : public TelemetrySink {
  public:
-  void RecordHit(const BufferTag &) override {}
-  void RecordMiss(const BufferTag &) override {}
-  void RecordDiskRead(const BufferTag &) override {}
-  void RecordDiskWrite(const BufferTag &) override {}
-  void RecordEviction(const BufferTag &) override {}
-  void RecordDirtyFlush(const BufferTag &) override {}
+  NoOpTelemetrySink() = default;
 
-  TelemetrySnapshot Snapshot() const override { return TelemetrySnapshot{}; }
+ protected:
+  void DoRecordHit(const BufferTag &) override {}
+  void DoRecordMiss(const BufferTag &) override {}
+  void DoRecordDiskRead(const BufferTag &) override {}
+  void DoRecordDiskWrite(const BufferTag &) override {}
+  void DoRecordEviction(const BufferTag &) override {}
+  void DoRecordDirtyFlush(const BufferTag &) override {}
+
+  TelemetrySnapshot DoSnapshot() const override { return TelemetrySnapshot{}; }
 };
 
 std::shared_ptr<TelemetrySink> MakeNoOpTelemetrySink() {

@@ -22,6 +22,7 @@ fi
 apt-get update
 apt-get install -y \
   clang \
+  clangd \
   clang-format \
   clang-tidy \
   doxygen \
@@ -33,6 +34,7 @@ cat <<'EOF'
 Installed TelePath development tools.
 
 Notes:
+- clangd is included for IDE/LSP support and code navigation.
 - ASAN and LSAN are compiler/runtime sanitizers, not standalone apt packages.
 - Enable them with CMake options, for example:
     cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=Debug \

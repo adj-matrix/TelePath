@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <shared_mutex>
 
 #include "telepath/common/types.h"
 
@@ -28,8 +30,8 @@ class BufferHandle {
   FrameId frame_id() const { return frame_id_; }
   std::size_t size() const { return size_; }
 
-  const std::byte *data() const { return data_; }
-  std::byte *mutable_data() { return data_; }
+  const std::byte *data() const;
+  std::byte *mutable_data();
   bool writable() const { return data_ != nullptr; }
 
   bool valid() const { return manager_ != nullptr; }
@@ -44,6 +46,8 @@ class BufferHandle {
   BufferTag tag_{};
   std::byte *data_{nullptr};
   std::size_t size_{0};
+  mutable std::shared_lock<std::shared_mutex> read_lock_;
+  std::unique_lock<std::shared_mutex> write_lock_;
 };
 
 }  // namespace telepath

@@ -3,6 +3,7 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <shared_mutex>
 
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
@@ -18,9 +19,11 @@ enum class BufferFrameState {
 struct alignas(kCacheLineSize) BufferDescriptor {
   mutable std::condition_variable io_cv;
   mutable std::mutex latch;
+  mutable std::shared_mutex content_latch;
   BufferTag tag{};
   FrameId frame_id{kInvalidFrameId};
   uint32_t pin_count{0};
+  uint64_t dirty_generation{0};
   bool is_dirty{false};
   bool is_valid{false};
   bool io_in_flight{false};

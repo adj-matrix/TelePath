@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BENCH="${ROOT_DIR}/support/bench.sh"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BENCH="${ROOT_DIR}/scripts/bench/run.sh"
 
 THREADS="${THREADS:-1 2 4 8}"
 WORKLOAD="${WORKLOAD:-hotspot}"

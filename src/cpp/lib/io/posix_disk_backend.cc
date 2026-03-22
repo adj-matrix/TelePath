@@ -20,7 +20,21 @@ std::string BuildErrnoMessage(const std::string &prefix) {
 }  // namespace
 
 PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size)
-    : root_path_(std::move(root_path)), page_size_(page_size) {}
+    : root_path_(std::move(root_path)),
+      page_size_(page_size),
+      worker_(&PosixDiskBackend::WorkerLoop, this) {}
+
+PosixDiskBackend::~PosixDiskBackend() {
+  {
+    std::lock_guard<std::mutex> guard(queue_latch_);
+    shutdown_ = true;
+  }
+  request_cv_.notify_all();
+  completion_cv_.notify_all();
+  if (worker_.joinable()) {
+    worker_.join();
+  }
+}
 
 Result<uint64_t> PosixDiskBackend::SubmitRead(const BufferTag &tag, std::byte *out,
                                               std::size_t size) {
@@ -31,6 +45,7 @@ Result<uint64_t> PosixDiskBackend::SubmitRead(const BufferTag &tag, std::byte *o
   const uint64_t request_id = next_request_id_++;
   pending_requests_.push_back(
       DiskRequest{request_id, DiskOperation::kRead, tag, out, nullptr, size});
+  request_cv_.notify_one();
   return request_id;
 }
 
@@ -44,29 +59,21 @@ Result<uint64_t> PosixDiskBackend::SubmitWrite(const BufferTag &tag,
   const uint64_t request_id = next_request_id_++;
   pending_requests_.push_back(
       DiskRequest{request_id, DiskOperation::kWrite, tag, nullptr, data, size});
+  request_cv_.notify_one();
   return request_id;
 }
 
 Result<DiskCompletion> PosixDiskBackend::PollCompletion() {
-  DiskRequest request;
-  {
-    std::lock_guard<std::mutex> guard(queue_latch_);
-    if (pending_requests_.empty()) {
-      return Status::Unavailable("no pending disk request");
-    }
-    request = pending_requests_.front();
-    pending_requests_.pop_front();
+  std::unique_lock<std::mutex> lock(queue_latch_);
+  completion_cv_.wait(lock, [this]() {
+    return shutdown_ || !completed_requests_.empty();
+  });
+  if (completed_requests_.empty()) {
+    return Status::Unavailable("disk backend is shutting down");
   }
-
-  Status status = Status::Ok();
-  if (request.operation == DiskOperation::kRead) {
-    status = ExecuteRead(request.tag, request.mutable_buffer, request.size);
-  } else {
-    status = ExecuteWrite(request.tag, request.const_buffer, request.size);
-  }
-
-  return DiskCompletion{request.request_id, request.operation, request.tag,
-                        std::move(status)};
+  DiskCompletion completion = completed_requests_.front();
+  completed_requests_.pop_front();
+  return completion;
 }
 
 Status PosixDiskBackend::ExecuteRead(const BufferTag &tag, std::byte *out,
@@ -138,6 +145,37 @@ Result<int> PosixDiskBackend::OpenFile(FileId file_id, int flags) const {
 
 std::string PosixDiskBackend::BuildPath(FileId file_id) const {
   return root_path_ + "/file_" + std::to_string(file_id) + ".tp";
+}
+
+void PosixDiskBackend::WorkerLoop() {
+  while (true) {
+    DiskRequest request;
+    {
+      std::unique_lock<std::mutex> lock(queue_latch_);
+      request_cv_.wait(lock, [this]() {
+        return shutdown_ || !pending_requests_.empty();
+      });
+      if (shutdown_ && pending_requests_.empty()) {
+        return;
+      }
+      request = pending_requests_.front();
+      pending_requests_.pop_front();
+    }
+
+    Status status = Status::Ok();
+    if (request.operation == DiskOperation::kRead) {
+      status = ExecuteRead(request.tag, request.mutable_buffer, request.size);
+    } else {
+      status = ExecuteWrite(request.tag, request.const_buffer, request.size);
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(queue_latch_);
+      completed_requests_.push_back(DiskCompletion{
+          request.request_id, request.operation, request.tag, std::move(status)});
+    }
+    completion_cv_.notify_one();
+  }
 }
 
 }  // namespace telepath

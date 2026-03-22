@@ -12,6 +12,7 @@
 
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
+#include "telepath/options/buffer_manager_options.h"
 #include "telepath/replacer/replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
 
@@ -159,8 +160,10 @@ int main(int argc, char **argv) {
   auto disk_backend =
       std::make_unique<PosixDiskBackend>(root.string(), options.page_size);
   auto replacer = telepath::MakeLruKReplacer(options.pool_size, 2);
-  BufferManager manager(options.pool_size, options.page_size,
-                        std::move(disk_backend), std::move(replacer), telemetry);
+  const telepath::BufferManagerOptions manager_options{
+      options.pool_size, options.page_size, 0};
+  BufferManager manager(manager_options, std::move(disk_backend),
+                        std::move(replacer), telemetry);
 
   for (BlockId block_id = 0; block_id < options.block_count; ++block_id) {
     auto result = manager.ReadBuffer(1, block_id);

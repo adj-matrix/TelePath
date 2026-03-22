@@ -103,15 +103,15 @@ This installs tools such as `clang`, `clang-format`, `clang-tidy`, `lldb`, and `
 ### Debug Build
 
 ```bash
-./support/build_debug.sh
-./support/test.sh
+./scripts/build/debug.sh
+./scripts/test/debug.sh
 ```
 
 ### ASAN Build
 
 ```bash
-./support/build_asan.sh
-./support/test_asan.sh
+./scripts/build/asan.sh
+./scripts/test/asan.sh
 ```
 
 ### LSAN Notes
@@ -119,7 +119,7 @@ This installs tools such as `clang`, `clang-format`, `clang-tidy`, `lldb`, and `
 `LeakSanitizer` support is prepared through:
 
 ```bash
-./support/build_lsan.sh
+./scripts/build/lsan.sh
 ```
 
 However, LSAN execution may fail in ptrace-constrained or restricted WSL-style environments. That limitation is environmental rather than a known TelePath correctness issue.

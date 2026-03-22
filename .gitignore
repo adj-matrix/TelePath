@@ -9,7 +9,8 @@
 .temp/
 .vscode/
 
-build
+build/
+!scripts/build/
 
 docs/journal/
 docs/old/

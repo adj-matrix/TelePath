@@ -103,15 +103,15 @@ sudo ./support/install_dev_tools.sh
 ### Debug 构建
 
 ```bash
-./support/build_debug.sh
-./support/test.sh
+./scripts/build/debug.sh
+./scripts/test/debug.sh
 ```
 
 ### ASAN 构建
 
 ```bash
-./support/build_asan.sh
-./support/test_asan.sh
+./scripts/build/asan.sh
+./scripts/test/asan.sh
 ```
 
 ### LSAN 说明
@@ -119,7 +119,7 @@ sudo ./support/install_dev_tools.sh
 LSAN 的构建入口为：
 
 ```bash
-./support/build_lsan.sh
+./scripts/build/lsan.sh
 ```
 
 但在部分受限环境或 WSL 风格环境中，LeakSanitizer 在执行阶段可能因 `ptrace` 限制而失败。这更偏向运行环境限制，而非当前已知 TelePath 代码错误。

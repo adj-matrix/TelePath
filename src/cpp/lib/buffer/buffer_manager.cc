@@ -1,7 +1,7 @@
 #include "telepath/buffer/buffer_manager.h"
 
 #include <algorithm>
-#include <stdexcept>
+#include <cstring>
 #include <utility>
 
 #include "frame_memory_pool.h"
@@ -12,21 +12,6 @@
 namespace telepath {
 
 namespace {
-
-constexpr std::size_t kPageTableStripeCount = 64;
-
-Status WaitForDiskRequest(DiskBackend *disk_backend, uint64_t request_id) {
-  while (true) {
-    Result<DiskCompletion> completion_result = disk_backend->PollCompletion();
-    if (!completion_result.ok()) {
-      return completion_result.status();
-    }
-    DiskCompletion completion = completion_result.value();
-    if (completion.request_id == request_id) {
-      return completion.status;
-    }
-  }
-}
 
 }  // namespace
 
@@ -70,9 +55,29 @@ BufferHandle &BufferHandle::operator=(BufferHandle &&other) noexcept {
 
 BufferHandle::~BufferHandle() { Reset(); }
 
+const std::byte *BufferHandle::data() const {
+  if (manager_ == nullptr) {
+    return nullptr;
+  }
+  return manager_->AcquireReadPointer(const_cast<BufferHandle *>(this));
+}
+
+std::byte *BufferHandle::mutable_data() {
+  if (manager_ == nullptr) {
+    return nullptr;
+  }
+  return manager_->AcquireWritePointer(this);
+}
+
 void BufferHandle::Reset() {
   if (manager_ == nullptr) {
     return;
+  }
+  if (read_lock_.owns_lock()) {
+    read_lock_.unlock();
+  }
+  if (write_lock_.owns_lock()) {
+    write_lock_.unlock();
   }
   BufferManager *manager = manager_;
   manager_ = nullptr;
@@ -82,21 +87,25 @@ void BufferHandle::Reset() {
   size_ = 0;
 }
 
-BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
+BufferManager::BufferManager(const BufferManagerOptions &options,
                              std::unique_ptr<DiskBackend> disk_backend,
                              std::unique_ptr<Replacer> replacer,
                              std::shared_ptr<TelemetrySink> telemetry_sink)
-    : pool_size_(pool_size),
-      page_size_(page_size),
+    : pool_size_(options.pool_size),
+      page_size_(options.page_size),
+      options_(options),
       disk_backend_(std::move(disk_backend)),
       replacer_(std::move(replacer)),
       telemetry_sink_(std::move(telemetry_sink)),
-      frame_pool_(std::make_unique<FrameMemoryPool>(pool_size, page_size)),
-      descriptors_(pool_size),
-      page_table_latches_(kPageTableStripeCount) {
+      frame_pool_(std::make_unique<FrameMemoryPool>(options.pool_size,
+                                                    options.page_size)),
+      descriptors_(options.pool_size),
+      page_table_latches_(options.ResolvePageTableStripeCount()) {
+  options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
   const Status init_status = frame_pool_->Initialize();
   if (!init_status.ok()) {
-    throw std::runtime_error(init_status.message());
+    init_status_ = init_status;
+    return;
   }
 
   free_list_.reserve(pool_size_);
@@ -106,9 +115,21 @@ BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
   }
 }
 
+BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
+                             std::unique_ptr<DiskBackend> disk_backend,
+                             std::unique_ptr<Replacer> replacer,
+                             std::shared_ptr<TelemetrySink> telemetry_sink)
+    : BufferManager(BufferManagerOptions{pool_size, page_size, 0},
+                    std::move(disk_backend),
+                    std::move(replacer),
+                    std::move(telemetry_sink)) {}
+
 BufferManager::~BufferManager() = default;
 
 Result<BufferHandle> BufferManager::ReadBuffer(FileId file_id, BlockId block_id) {
+  if (!init_status_.ok()) {
+    return init_status_;
+  }
   const BufferTag tag{file_id, block_id};
 
   if (auto handle = TryReadResidentBuffer(tag); handle.has_value()) {
@@ -116,10 +137,11 @@ Result<BufferHandle> BufferManager::ReadBuffer(FileId file_id, BlockId block_id)
     return std::move(handle.value());
   }
 
+  FrameId existing_frame = kInvalidFrameId;
+  std::optional<FrameReservation> reservation;
   {
     std::lock_guard<std::mutex> miss_guard(miss_latch_);
     const std::size_t stripe = GetPageTableStripe(tag);
-    FrameId existing_frame = kInvalidFrameId;
     {
       std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
       auto it = page_table_.find(tag);
@@ -128,26 +150,37 @@ Result<BufferHandle> BufferManager::ReadBuffer(FileId file_id, BlockId block_id)
       }
     }
 
-    if (existing_frame != kInvalidFrameId) {
-      Result<BufferHandle> await_result = AwaitResidentBuffer(existing_frame, tag);
-      if (await_result.ok()) {
-        telemetry_sink_->RecordHit(tag);
+    if (existing_frame == kInvalidFrameId) {
+      telemetry_sink_->RecordMiss(tag);
+      Result<FrameReservation> reserve_result = ReserveFrameForTag(tag);
+      if (!reserve_result.ok()) {
+        return reserve_result.status();
       }
-      return await_result;
+      reservation = reserve_result.value();
     }
-
-    telemetry_sink_->RecordMiss(tag);
-    Result<FrameId> frame_result = AcquireFrame(tag);
-    if (!frame_result.ok()) {
-      return frame_result.status();
-    }
-
-    const FrameId frame_id = frame_result.value();
-    return BufferHandle(this, frame_id, tag, GetFrameData(frame_id), page_size_);
   }
+
+  if (existing_frame != kInvalidFrameId) {
+    Result<BufferHandle> await_result = AwaitResidentBuffer(existing_frame, tag);
+    if (await_result.ok()) {
+      telemetry_sink_->RecordHit(tag);
+    }
+    return await_result;
+  }
+
+  Result<FrameId> frame_result = CompleteReservation(tag, reservation.value());
+  if (!frame_result.ok()) {
+    return frame_result.status();
+  }
+
+  const FrameId frame_id = frame_result.value();
+  return BufferHandle(this, frame_id, tag, GetFrameData(frame_id), page_size_);
 }
 
 Status BufferManager::ReleaseBuffer(BufferHandle &&handle) {
+  if (!init_status_.ok()) {
+    return init_status_;
+  }
   if (!handle.valid()) {
     return Status::InvalidArgument("buffer handle is not valid");
   }
@@ -159,6 +192,9 @@ Status BufferManager::ReleaseBuffer(BufferHandle &&handle) {
 }
 
 Status BufferManager::MarkBufferDirty(const BufferHandle &handle) {
+  if (!init_status_.ok()) {
+    return init_status_;
+  }
   if (!ValidateHandle(handle)) {
     return Status::InvalidArgument("invalid buffer handle");
   }
@@ -168,18 +204,28 @@ Status BufferManager::MarkBufferDirty(const BufferHandle &handle) {
       descriptor.tag != handle.tag()) {
     return Status::InvalidArgument("buffer handle refers to an invalid frame");
   }
+  ++descriptor.dirty_generation;
   descriptor.is_dirty = true;
   return Status::Ok();
 }
 
 Status BufferManager::FlushBuffer(const BufferHandle &handle) {
+  if (!init_status_.ok()) {
+    return init_status_;
+  }
   if (!ValidateHandle(handle)) {
     return Status::InvalidArgument("invalid buffer handle");
+  }
+  if (handle.write_lock_.owns_lock() || handle.read_lock_.owns_lock()) {
+    return FlushFrameWithStableSource(handle.frame_id(), handle.data_);
   }
   return FlushFrame(handle.frame_id());
 }
 
 Status BufferManager::FlushAll() {
+  if (!init_status_.ok()) {
+    return init_status_;
+  }
   for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
     Status status = FlushFrame(frame_id);
     if (!status.ok()) {
@@ -210,12 +256,18 @@ Status BufferManager::ReleaseFrame(FrameId frame_id) {
 }
 
 Status BufferManager::FlushFrame(FrameId frame_id) {
+  return FlushFrameWithStableSource(frame_id, nullptr);
+}
+
+Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
+                                                 const std::byte *stable_data) {
   if (!ValidateFrame(frame_id)) {
     return Status::InvalidArgument("invalid frame id");
   }
 
   BufferTag tag;
   bool should_flush = false;
+  uint64_t dirty_generation = 0;
   {
     BufferDescriptor &descriptor = descriptors_[frame_id];
     std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
@@ -224,6 +276,7 @@ Status BufferManager::FlushFrame(FrameId frame_id) {
       return Status::Ok();
     }
     tag = descriptor.tag;
+    dirty_generation = descriptor.dirty_generation;
     should_flush = true;
   }
 
@@ -231,14 +284,23 @@ Status BufferManager::FlushFrame(FrameId frame_id) {
     return Status::Ok();
   }
 
+  std::vector<std::byte> flush_snapshot(page_size_);
+  if (stable_data != nullptr) {
+    std::memcpy(flush_snapshot.data(), stable_data, page_size_);
+  } else {
+    const BufferDescriptor &descriptor = descriptors_[frame_id];
+    std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch);
+    std::memcpy(flush_snapshot.data(), GetFrameData(frame_id), page_size_);
+  }
+
   Status status =
       [&]() -> Status {
         Result<uint64_t> submit_result =
-            disk_backend_->SubmitWrite(tag, GetFrameData(frame_id), page_size_);
+            disk_backend_->SubmitWrite(tag, flush_snapshot.data(), page_size_);
         if (!submit_result.ok()) {
           return submit_result.status();
         }
-        return WaitForDiskRequest(disk_backend_.get(), submit_result.value());
+        return WaitForDiskRequest(submit_result.value());
       }();
   if (!status.ok()) {
     return status;
@@ -247,124 +309,16 @@ Status BufferManager::FlushFrame(FrameId frame_id) {
   {
     BufferDescriptor &descriptor = descriptors_[frame_id];
     std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-    descriptor.is_dirty = false;
+    if (descriptor.is_valid && descriptor.state == BufferFrameState::kResident &&
+        descriptor.tag == tag &&
+        descriptor.dirty_generation == dirty_generation) {
+      descriptor.is_dirty = false;
+    }
   }
 
   telemetry_sink_->RecordDiskWrite(tag);
   telemetry_sink_->RecordDirtyFlush(tag);
   return Status::Ok();
-}
-
-Result<FrameId> BufferManager::AcquireFrame(const BufferTag &tag) {
-  FrameId frame_id = kInvalidFrameId;
-
-  while (true) {
-    {
-      std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
-      if (!free_list_.empty()) {
-        frame_id = free_list_.back();
-        free_list_.pop_back();
-      }
-    }
-
-    if (frame_id == kInvalidFrameId && !replacer_->Victim(&frame_id)) {
-      return Status::ResourceExhausted("no evictable frame available");
-    }
-
-    BufferDescriptor &descriptor = descriptors_[frame_id];
-    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-
-    if (descriptor.is_valid && descriptor.pin_count != 0) {
-      frame_id = kInvalidFrameId;
-      continue;
-    }
-
-    if (descriptor.is_valid) {
-      if (descriptor.is_dirty) {
-        Status flush_status =
-            [&]() -> Status {
-              Result<uint64_t> submit_result = disk_backend_->SubmitWrite(
-                  descriptor.tag, GetFrameData(frame_id), page_size_);
-              if (!submit_result.ok()) {
-                return submit_result.status();
-              }
-              return WaitForDiskRequest(disk_backend_.get(),
-                                        submit_result.value());
-            }();
-        if (!flush_status.ok()) {
-          return flush_status;
-        }
-        descriptor.is_dirty = false;
-        telemetry_sink_->RecordDiskWrite(descriptor.tag);
-        telemetry_sink_->RecordDirtyFlush(descriptor.tag);
-      }
-
-      const std::size_t old_stripe = GetPageTableStripe(descriptor.tag);
-      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
-      page_table_.erase(descriptor.tag);
-      telemetry_sink_->RecordEviction(descriptor.tag);
-    }
-
-    descriptor.state = BufferFrameState::kLoading;
-    descriptor.is_valid = false;
-    descriptor.is_dirty = false;
-    descriptor.pin_count = 1;
-    descriptor.io_in_flight = true;
-    descriptor.last_io_status = Status::Ok();
-    descriptor.tag = tag;
-
-    const std::size_t stripe = GetPageTableStripe(tag);
-    {
-      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-      page_table_[tag] = frame_id;
-    }
-
-    Status read_status =
-        [&]() -> Status {
-          Result<uint64_t> submit_result =
-              disk_backend_->SubmitRead(tag, GetFrameData(frame_id), page_size_);
-          if (!submit_result.ok()) {
-            return submit_result.status();
-          }
-          return WaitForDiskRequest(disk_backend_.get(), submit_result.value());
-        }();
-    if (!read_status.ok()) {
-      {
-        const std::size_t stripe = GetPageTableStripe(tag);
-        std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-        auto it = page_table_.find(tag);
-        if (it != page_table_.end() && it->second == frame_id) {
-          page_table_.erase(it);
-        }
-      }
-      descriptor.frame_id = frame_id;
-      descriptor.tag = BufferTag{};
-      descriptor.pin_count = 0;
-      descriptor.is_dirty = false;
-      descriptor.is_valid = false;
-      descriptor.state = BufferFrameState::kFree;
-      descriptor.io_in_flight = false;
-      descriptor.last_io_status = read_status;
-      descriptor.io_cv.notify_all();
-      {
-        std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
-        free_list_.push_back(frame_id);
-      }
-      return read_status;
-    }
-
-    descriptor.pin_count = 1;
-    descriptor.is_dirty = false;
-    descriptor.is_valid = true;
-    descriptor.state = BufferFrameState::kResident;
-    descriptor.io_in_flight = false;
-    descriptor.last_io_status = Status::Ok();
-    descriptor.io_cv.notify_all();
-    replacer_->RecordAccess(frame_id);
-    replacer_->SetEvictable(frame_id, false);
-    telemetry_sink_->RecordDiskRead(tag);
-    return frame_id;
-  }
 }
 
 bool BufferManager::ValidateFrame(FrameId frame_id) const {
@@ -445,6 +399,300 @@ std::byte *BufferManager::GetFrameData(FrameId frame_id) {
 
 const std::byte *BufferManager::GetFrameData(FrameId frame_id) const {
   return frame_pool_->GetFrameData(frame_id);
+}
+
+const std::byte *BufferManager::AcquireReadPointer(BufferHandle *handle) const {
+  if (handle == nullptr || !ValidateHandle(*handle)) {
+    return nullptr;
+  }
+  if (!handle->write_lock_.owns_lock() && !handle->read_lock_.owns_lock()) {
+    handle->read_lock_ = std::shared_lock<std::shared_mutex>(
+        descriptors_[handle->frame_id_].content_latch);
+  }
+  return handle->data_;
+}
+
+std::byte *BufferManager::AcquireWritePointer(BufferHandle *handle) {
+  if (handle == nullptr || !ValidateHandle(*handle)) {
+    return nullptr;
+  }
+  if (handle->write_lock_.owns_lock()) {
+    return handle->data_;
+  }
+  if (handle->read_lock_.owns_lock()) {
+    handle->read_lock_.unlock();
+  }
+  handle->write_lock_ = std::unique_lock<std::shared_mutex>(
+      descriptors_[handle->frame_id_].content_latch);
+  return handle->data_;
+}
+
+Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag) {
+  FrameId frame_id = kInvalidFrameId;
+  BufferTag evicted_tag{};
+  bool had_evicted_page = false;
+  bool evicted_dirty = false;
+  uint64_t evicted_dirty_generation = 0;
+
+  while (true) {
+    frame_id = kInvalidFrameId;
+    {
+      std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
+      if (!free_list_.empty()) {
+        frame_id = free_list_.back();
+        free_list_.pop_back();
+      }
+    }
+
+    if (frame_id == kInvalidFrameId && !replacer_->Victim(&frame_id)) {
+      return Status::ResourceExhausted("no evictable frame available");
+    }
+
+    BufferDescriptor &descriptor = descriptors_[frame_id];
+    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+    if (descriptor.pin_count != 0 || descriptor.io_in_flight) {
+      continue;
+    }
+
+    had_evicted_page = descriptor.is_valid;
+    if (had_evicted_page) {
+      evicted_tag = descriptor.tag;
+      evicted_dirty = descriptor.is_dirty;
+      evicted_dirty_generation = descriptor.dirty_generation;
+
+      const std::size_t old_stripe = GetPageTableStripe(descriptor.tag);
+      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
+      page_table_.erase(descriptor.tag);
+    } else {
+      evicted_dirty = false;
+      evicted_dirty_generation = 0;
+    }
+
+    descriptor.tag = tag;
+    descriptor.pin_count = 1;
+    descriptor.dirty_generation = 0;
+    descriptor.is_dirty = false;
+    descriptor.is_valid = false;
+    descriptor.state = BufferFrameState::kLoading;
+    descriptor.io_in_flight = false;
+    descriptor.last_io_status = Status::Ok();
+
+    const std::size_t stripe = GetPageTableStripe(tag);
+    {
+      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
+      page_table_[tag] = frame_id;
+    }
+    return FrameReservation{frame_id, had_evicted_page, evicted_tag, evicted_dirty,
+                            evicted_dirty_generation};
+  }
+}
+
+Result<FrameId> BufferManager::CompleteReservation(
+    const BufferTag &tag, const FrameReservation &reservation) {
+  const FrameId frame_id = reservation.frame_id;
+
+  if (reservation.had_evicted_page && reservation.evicted_dirty) {
+    std::vector<std::byte> evicted_snapshot(page_size_);
+    {
+      const BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch);
+      std::memcpy(evicted_snapshot.data(), GetFrameData(frame_id), page_size_);
+    }
+    {
+      BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      descriptor.io_in_flight = true;
+      descriptor.last_io_status = Status::Ok();
+    }
+
+    Result<uint64_t> write_submit = disk_backend_->SubmitWrite(
+        reservation.evicted_tag, evicted_snapshot.data(), page_size_);
+    if (!write_submit.ok()) {
+      {
+        BufferDescriptor &descriptor = descriptors_[frame_id];
+        std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+        descriptor.io_in_flight = false;
+      }
+      RestoreFrameAfterFailedEviction(frame_id, reservation.evicted_tag,
+                                      reservation.evicted_dirty,
+                                      reservation.evicted_dirty_generation);
+      return write_submit.status();
+    }
+
+    Status flush_status = WaitForDiskRequest(write_submit.value());
+    {
+      BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      descriptor.io_in_flight = false;
+      descriptor.last_io_status = flush_status;
+    }
+    if (!flush_status.ok()) {
+      RestoreFrameAfterFailedEviction(frame_id, reservation.evicted_tag,
+                                      reservation.evicted_dirty,
+                                      reservation.evicted_dirty_generation);
+      return flush_status;
+    }
+    telemetry_sink_->RecordDiskWrite(reservation.evicted_tag);
+    telemetry_sink_->RecordDirtyFlush(reservation.evicted_tag);
+  }
+
+  {
+    BufferDescriptor &descriptor = descriptors_[frame_id];
+    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+    descriptor.io_in_flight = true;
+    descriptor.last_io_status = Status::Ok();
+  }
+
+  Result<uint64_t> read_submit =
+      disk_backend_->SubmitRead(tag, GetFrameData(frame_id), page_size_);
+  if (!read_submit.ok()) {
+    BufferDescriptor &descriptor = descriptors_[frame_id];
+    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+    const std::size_t stripe = GetPageTableStripe(tag);
+    {
+      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
+      auto it = page_table_.find(tag);
+      if (it != page_table_.end() && it->second == frame_id) {
+        page_table_.erase(it);
+      }
+    }
+    descriptor.frame_id = frame_id;
+    descriptor.tag = BufferTag{};
+    descriptor.pin_count = 0;
+    descriptor.dirty_generation = 0;
+    descriptor.is_dirty = false;
+    descriptor.is_valid = false;
+    descriptor.state = BufferFrameState::kFree;
+    descriptor.io_in_flight = false;
+    descriptor.last_io_status = read_submit.status();
+    descriptor.io_cv.notify_all();
+    {
+      std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
+      free_list_.push_back(frame_id);
+    }
+    return read_submit.status();
+  }
+
+  Status read_status = WaitForDiskRequest(read_submit.value());
+  BufferDescriptor &descriptor = descriptors_[frame_id];
+  std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+  if (!read_status.ok()) {
+    const std::size_t stripe = GetPageTableStripe(tag);
+    {
+      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
+      auto it = page_table_.find(tag);
+      if (it != page_table_.end() && it->second == frame_id) {
+        page_table_.erase(it);
+      }
+    }
+    descriptor.frame_id = frame_id;
+    descriptor.tag = BufferTag{};
+    descriptor.pin_count = 0;
+    descriptor.dirty_generation = 0;
+    descriptor.is_dirty = false;
+    descriptor.is_valid = false;
+    descriptor.state = BufferFrameState::kFree;
+    descriptor.io_in_flight = false;
+    descriptor.last_io_status = read_status;
+    descriptor.io_cv.notify_all();
+    {
+      std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
+      free_list_.push_back(frame_id);
+    }
+    return read_status;
+  }
+
+  descriptor.pin_count = 1;
+  descriptor.dirty_generation = 0;
+  descriptor.is_dirty = false;
+  descriptor.is_valid = true;
+  descriptor.state = BufferFrameState::kResident;
+  descriptor.io_in_flight = false;
+  descriptor.last_io_status = Status::Ok();
+  descriptor.io_cv.notify_all();
+
+  replacer_->RecordAccess(frame_id);
+  replacer_->SetEvictable(frame_id, false);
+  telemetry_sink_->RecordDiskRead(tag);
+  if (reservation.had_evicted_page) {
+    telemetry_sink_->RecordEviction(reservation.evicted_tag);
+  }
+  return frame_id;
+}
+
+Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
+                                                      const BufferTag &old_tag,
+                                                      bool was_dirty,
+                                                      uint64_t dirty_generation) {
+  BufferDescriptor &descriptor = descriptors_[frame_id];
+  std::lock_guard<std::mutex> miss_guard(miss_latch_);
+  std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+
+  const std::size_t new_stripe = GetPageTableStripe(descriptor.tag);
+  {
+    std::lock_guard<std::mutex> page_table_guard(page_table_latches_[new_stripe]);
+    auto it = page_table_.find(descriptor.tag);
+    if (it != page_table_.end() && it->second == frame_id) {
+      page_table_.erase(it);
+    }
+  }
+
+  descriptor.tag = old_tag;
+  descriptor.pin_count = 0;
+  descriptor.is_dirty = was_dirty;
+  descriptor.dirty_generation = dirty_generation;
+  descriptor.is_valid = true;
+  descriptor.state = BufferFrameState::kResident;
+  descriptor.io_in_flight = false;
+  descriptor.last_io_status = Status::IoError("eviction flush failed");
+  descriptor.io_cv.notify_all();
+
+  const std::size_t old_stripe = GetPageTableStripe(old_tag);
+  {
+    std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
+    page_table_[old_tag] = frame_id;
+  }
+  replacer_->RecordAccess(frame_id);
+  replacer_->SetEvictable(frame_id, true);
+  return descriptor.last_io_status;
+}
+
+Status BufferManager::WaitForDiskRequest(uint64_t request_id) {
+  while (true) {
+    {
+      std::lock_guard<std::mutex> guard(completion_latch_);
+      auto it = completion_cache_.find(request_id);
+      if (it != completion_cache_.end()) {
+        Status status = it->second.status;
+        completion_cache_.erase(it);
+        return status;
+      }
+    }
+
+    std::lock_guard<std::mutex> poll_guard(poll_latch_);
+    {
+      std::lock_guard<std::mutex> guard(completion_latch_);
+      auto it = completion_cache_.find(request_id);
+      if (it != completion_cache_.end()) {
+        Status status = it->second.status;
+        completion_cache_.erase(it);
+        return status;
+      }
+    }
+
+    Result<DiskCompletion> completion_result = disk_backend_->PollCompletion();
+    if (!completion_result.ok()) {
+      return completion_result.status();
+    }
+
+    DiskCompletion completion = completion_result.value();
+    std::lock_guard<std::mutex> guard(completion_latch_);
+    if (completion.request_id == request_id) {
+      return completion.status;
+    }
+    completion_cache_[completion.request_id] = std::move(completion);
+    completion_cv_.notify_all();
+  }
 }
 
 }  // namespace telepath
