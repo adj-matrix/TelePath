@@ -31,5 +31,37 @@ int main() {
     assert(victim == 0);
   }
 
+  {
+    std::unique_ptr<telepath::Replacer> replacer =
+        telepath::MakeLruKReplacer(4, 2);
+    replacer->RecordAccess(0);
+    replacer->RecordAccess(1);
+    replacer->RecordAccess(2);
+    replacer->RecordAccess(1);
+    replacer->RecordAccess(2);
+    replacer->RecordAccess(3);
+    replacer->SetEvictable(0, true);
+    replacer->SetEvictable(1, true);
+    replacer->SetEvictable(2, true);
+    replacer->SetEvictable(3, true);
+    telepath::FrameId victim = telepath::kInvalidFrameId;
+    assert(replacer->Victim(&victim));
+    assert(victim == 0);
+  }
+
+  {
+    std::unique_ptr<telepath::Replacer> replacer =
+        telepath::MakeLruKReplacer(4, 2);
+    replacer->RecordAccess(0);
+    replacer->RecordAccess(1);
+    replacer->RecordAccess(2);
+    replacer->SetEvictable(0, true);
+    replacer->SetEvictable(1, true);
+    replacer->SetEvictable(2, true);
+    telepath::FrameId victim = telepath::kInvalidFrameId;
+    assert(replacer->Victim(&victim));
+    assert(victim == 0);
+  }
+
   return 0;
 }

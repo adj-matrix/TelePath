@@ -55,24 +55,26 @@ TelePath does **not** currently aim to include:
 - WAL or crash recovery,
 - production-grade monitoring integrations in the first milestone.
 
-## State 1 Status
+## State 2 Status
 
-The current implementation already includes a working State 1 skeleton:
+The current implementation has moved beyond the original State 1 skeleton and now includes a first State 2 milestone:
 
 - `BufferManager`, `BufferHandle`, and `BufferDescriptor`
-- `DiskBackend` and `PosixDiskBackend`
-- `Replacer` abstraction with `ClockReplacer` and `LruReplacer`
-- `TelemetrySink` abstraction with counter-based and no-op sinks
-- CMake-based debug and sanitizer build scripts
-- smoke, replacer, handle, and telemetry tests
+- contiguous frame memory allocation
+- `DiskBackend` and `PosixDiskBackend` with submit/poll semantics
+- `Replacer` abstraction with `ClockReplacer`, `LruReplacer`, and `LruKReplacer`
+- descriptor-level coordination for in-flight page loads
+- counter-based and no-op telemetry sinks
+- benchmark skeleton and helper scripts
+- debug and ASAN build/test paths
 
-This means the project already has a minimal but functioning end-to-end loop:
+This means TelePath now supports not only the basic buffer lifecycle, but also:
 
-1. load a block through the buffer manager,
-2. access page memory through a controlled handle,
-3. mark and flush dirty data through the backend,
-4. observe basic telemetry counters,
-5. validate behavior through tests.
+1. contiguous frame-backed page access,
+2. an async-ready storage abstraction while preserving synchronous external buffer semantics,
+3. initial same-page miss coordination,
+4. early experimental throughput measurement,
+5. richer correctness coverage around concurrency, eviction, and failure paths.
 
 ## Architecture
 
@@ -138,9 +140,9 @@ The main implementation currently lives under:
 ## Roadmap
 
 - Phase 1: establish a stable, testable buffer pool skeleton
-- Phase 2: strengthen buffer lifecycle semantics and expand test coverage
-- Phase 3: add richer replacement policies and benchmark scaffolding
-- Phase 4: introduce async backends and external observability integrations
+- Phase 2: strengthen concurrent lifecycle semantics, async-ready I/O boundaries, and benchmark scaffolding
+- Phase 3: introduce a real async backend and stronger observability plumbing
+- Phase 4: continue toward larger-scale experimentation and external tooling integration
 
 The current implementation is still early-stage. The main focus is architectural correctness, stable interfaces, and controlled extensibility rather than premature performance claims.
 
@@ -151,6 +153,7 @@ Public project documentation lives under `docs/`.
 Recommended entry points:
 
 - [State 1 Summary](./docs/state1.md)
+- [State 2 Summary](./docs/state2.md)
 - [Repository Tree Guide](./docs/tree.md)
 - [State 1 Architecture Mermaid](./docs/mermaid/architecture-state1.mmd)
 

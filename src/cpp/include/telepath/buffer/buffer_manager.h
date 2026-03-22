@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -16,6 +17,7 @@
 namespace telepath {
 
 class DiskBackend;
+class FrameMemoryPool;
 class Replacer;
 class TelemetrySink;
 
@@ -25,7 +27,7 @@ class BufferManager {
                 std::unique_ptr<DiskBackend> disk_backend,
                 std::unique_ptr<Replacer> replacer,
                 std::shared_ptr<TelemetrySink> telemetry_sink);
-  ~BufferManager() = default;
+  ~BufferManager();
 
   Result<BufferHandle> ReadBuffer(FileId file_id, BlockId block_id);
   Status ReleaseBuffer(BufferHandle &&handle);
@@ -44,6 +46,11 @@ class BufferManager {
   Result<FrameId> AcquireFrame(const BufferTag &tag);
   bool ValidateFrame(FrameId frame_id) const;
   bool ValidateHandle(const BufferHandle &handle) const;
+  Result<BufferHandle> AwaitResidentBuffer(FrameId frame_id, const BufferTag &tag);
+  std::optional<BufferHandle> TryReadResidentBuffer(const BufferTag &tag);
+  std::size_t GetPageTableStripe(const BufferTag &tag) const;
+  std::byte *GetFrameData(FrameId frame_id);
+  const std::byte *GetFrameData(FrameId frame_id) const;
 
   std::size_t pool_size_{0};
   std::size_t page_size_{0};
@@ -51,10 +58,12 @@ class BufferManager {
   std::unique_ptr<Replacer> replacer_;
   std::shared_ptr<TelemetrySink> telemetry_sink_;
 
-  std::vector<std::vector<std::byte>> frames_;
+  std::unique_ptr<FrameMemoryPool> frame_pool_;
   std::vector<BufferDescriptor> descriptors_;
 
-  std::mutex manager_latch_;
+  std::mutex miss_latch_;
+  std::mutex free_list_latch_;
+  std::vector<std::mutex> page_table_latches_;
   std::unordered_map<BufferTag, FrameId, BufferTagHash> page_table_;
   std::vector<FrameId> free_list_;
 };

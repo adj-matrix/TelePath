@@ -22,8 +22,55 @@ std::string BuildErrnoMessage(const std::string &prefix) {
 PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size)
     : root_path_(std::move(root_path)), page_size_(page_size) {}
 
-Status PosixDiskBackend::ReadBlock(const BufferTag &tag, std::byte *out,
-                                   std::size_t size) {
+Result<uint64_t> PosixDiskBackend::SubmitRead(const BufferTag &tag, std::byte *out,
+                                              std::size_t size) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("read buffer must not be null");
+  }
+  std::lock_guard<std::mutex> guard(queue_latch_);
+  const uint64_t request_id = next_request_id_++;
+  pending_requests_.push_back(
+      DiskRequest{request_id, DiskOperation::kRead, tag, out, nullptr, size});
+  return request_id;
+}
+
+Result<uint64_t> PosixDiskBackend::SubmitWrite(const BufferTag &tag,
+                                               const std::byte *data,
+                                               std::size_t size) {
+  if (data == nullptr) {
+    return Status::InvalidArgument("write buffer must not be null");
+  }
+  std::lock_guard<std::mutex> guard(queue_latch_);
+  const uint64_t request_id = next_request_id_++;
+  pending_requests_.push_back(
+      DiskRequest{request_id, DiskOperation::kWrite, tag, nullptr, data, size});
+  return request_id;
+}
+
+Result<DiskCompletion> PosixDiskBackend::PollCompletion() {
+  DiskRequest request;
+  {
+    std::lock_guard<std::mutex> guard(queue_latch_);
+    if (pending_requests_.empty()) {
+      return Status::Unavailable("no pending disk request");
+    }
+    request = pending_requests_.front();
+    pending_requests_.pop_front();
+  }
+
+  Status status = Status::Ok();
+  if (request.operation == DiskOperation::kRead) {
+    status = ExecuteRead(request.tag, request.mutable_buffer, request.size);
+  } else {
+    status = ExecuteWrite(request.tag, request.const_buffer, request.size);
+  }
+
+  return DiskCompletion{request.request_id, request.operation, request.tag,
+                        std::move(status)};
+}
+
+Status PosixDiskBackend::ExecuteRead(const BufferTag &tag, std::byte *out,
+                                     std::size_t size) {
   if (size != page_size_) {
     return Status::InvalidArgument("read size does not match page size");
   }
@@ -48,8 +95,9 @@ Status PosixDiskBackend::ReadBlock(const BufferTag &tag, std::byte *out,
   return Status::Ok();
 }
 
-Status PosixDiskBackend::WriteBlock(const BufferTag &tag, const std::byte *data,
-                                    std::size_t size) {
+Status PosixDiskBackend::ExecuteWrite(const BufferTag &tag,
+                                      const std::byte *data,
+                                      std::size_t size) {
   if (size != page_size_) {
     return Status::InvalidArgument("write size does not match page size");
   }

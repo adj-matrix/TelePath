@@ -21,6 +21,8 @@ class Replacer {
 
 std::unique_ptr<Replacer> MakeClockReplacer(std::size_t capacity);
 std::unique_ptr<Replacer> MakeLruReplacer(std::size_t capacity);
+std::unique_ptr<Replacer> MakeLruKReplacer(std::size_t capacity,
+                                           std::size_t history_length);
 
 }  // namespace telepath
 

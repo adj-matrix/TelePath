@@ -12,6 +12,7 @@ using BlockId = uint64_t;
 using FrameId = uint32_t;
 
 constexpr std::size_t kDefaultPageSize = 4096;
+constexpr std::size_t kCacheLineSize = 64;
 constexpr FrameId kInvalidFrameId = static_cast<FrameId>(-1);
 
 struct BufferTag {

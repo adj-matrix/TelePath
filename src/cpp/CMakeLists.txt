@@ -4,6 +4,7 @@ add_library(telepath
   lib/buffer/buffer_manager.cc
   lib/io/posix_disk_backend.cc
   lib/replacer/clock_replacer.cc
+  lib/replacer/lru_k_replacer.cc
   lib/replacer/lru_replacer.cc
   lib/telemetry/counter_telemetry_sink.cc
   lib/telemetry/noop_telemetry_sink.cc
