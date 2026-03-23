@@ -127,8 +127,7 @@ State 2 now validates the following categories:
 - failure paths for read and write I/O
 - wait/evict interleaving in small-capacity scenarios
 
-At the time of writing, the project test suite contains 12 tests and passes in both debug and ASAN configurations under the current development environment.
-At the time of writing, the project test suite contains 15 tests and passes in both debug and ASAN configurations under the current development environment.
+At the time of writing, the project test suite contains 17 tests and passes in both debug and ASAN configurations under the current development environment.
 
 ## Current Limits
 

@@ -1,12 +1,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <random>
-#include <string>
 #include <thread>
 #include <vector>
 
@@ -15,94 +13,25 @@
 #include "telepath/options/buffer_manager_options.h"
 #include "telepath/replacer/replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
+#include "benchmark_support.h"
 
 namespace {
+using telepath::benchmark_support::BenchmarkMetadata;
+using telepath::benchmark_support::BenchmarkOptions;
+using telepath::benchmark_support::ChooseBlock;
+using telepath::benchmark_support::LoadMetadata;
+using telepath::benchmark_support::NormalizeWorkloadName;
+using telepath::benchmark_support::ParseArgs;
 
-struct BenchmarkOptions {
-  std::string workload{"hotspot"};
-  std::string output_format{"text"};
-  std::size_t pool_size{256};
-  std::size_t page_size{4096};
-  std::size_t block_count{1024};
-  std::size_t thread_count{4};
-  std::size_t ops_per_thread{5000};
-  std::size_t hotset_size{64};
-  std::size_t hot_access_percent{80};
-};
-
-std::size_t ParsePositive(const char *value, std::size_t fallback) {
-  if (value == nullptr) {
-    return fallback;
-  }
-  try {
-    const unsigned long long parsed = std::stoull(value);
-    return parsed == 0 ? fallback : static_cast<std::size_t>(parsed);
-  } catch (...) {
-    return fallback;
-  }
-}
-
-BenchmarkOptions ParseArgs(int argc, char **argv) {
-  BenchmarkOptions options;
-  for (int i = 1; i < argc; ++i) {
-    const std::string arg = argv[i];
-    if (arg == "--workload" && i + 1 < argc) {
-      options.workload = argv[++i];
-    } else if (arg == "--output-format" && i + 1 < argc) {
-      options.output_format = argv[++i];
-    } else if (arg == "--pool-size" && i + 1 < argc) {
-      options.pool_size = ParsePositive(argv[++i], options.pool_size);
-    } else if (arg == "--block-count" && i + 1 < argc) {
-      options.block_count = ParsePositive(argv[++i], options.block_count);
-    } else if (arg == "--threads" && i + 1 < argc) {
-      options.thread_count = ParsePositive(argv[++i], options.thread_count);
-    } else if (arg == "--ops-per-thread" && i + 1 < argc) {
-      options.ops_per_thread = ParsePositive(argv[++i], options.ops_per_thread);
-    } else if (arg == "--hotset-size" && i + 1 < argc) {
-      options.hotset_size = ParsePositive(argv[++i], options.hotset_size);
-    } else if (arg == "--hot-access-percent" && i + 1 < argc) {
-      options.hot_access_percent =
-          ParsePositive(argv[++i], options.hot_access_percent);
-      if (options.hot_access_percent > 100) {
-        options.hot_access_percent = 100;
-      }
-    }
-  }
-  if (options.hotset_size > options.block_count) {
-    options.hotset_size = options.block_count;
-  }
-  return options;
-}
-
-telepath::BlockId ChooseBlock(std::mt19937_64 *rng,
-                              std::size_t op_index,
-                              const BenchmarkOptions &options) {
-  if (options.workload == "uniform") {
-    std::uniform_int_distribution<std::size_t> dist(0, options.block_count - 1);
-    return static_cast<telepath::BlockId>(dist(*rng));
-  }
-
-  if (options.workload == "sequential") {
-    return static_cast<telepath::BlockId>(op_index % options.block_count);
-  }
-
-  std::uniform_int_distribution<std::size_t> percent_dist(0, 99);
-  const bool choose_hot = percent_dist(*rng) < options.hot_access_percent;
-
-  if (choose_hot && options.hotset_size > 0) {
-    std::uniform_int_distribution<std::size_t> hot_dist(0, options.hotset_size - 1);
-    return static_cast<telepath::BlockId>(hot_dist(*rng));
-  }
-
-  std::uniform_int_distribution<std::size_t> cold_dist(0, options.block_count - 1);
-  return static_cast<telepath::BlockId>(cold_dist(*rng));
-}
-
-void PrintTextSummary(const BenchmarkOptions &options, std::size_t total_ops,
-                      double seconds, double throughput, uint64_t hits,
-                      uint64_t misses, double hit_rate) {
+void PrintTextSummary(const BenchmarkOptions &options,
+                      const BenchmarkMetadata &metadata,
+                      std::size_t total_ops, double seconds, double throughput,
+                      uint64_t hits, uint64_t misses, double hit_rate) {
   std::cout << "telepath_benchmark\n";
-  std::cout << "workload=" << options.workload << "\n";
+  std::cout << "workload=" << NormalizeWorkloadName(options.workload) << "\n";
+  std::cout << "commit_sha=" << metadata.commit_sha << "\n";
+  std::cout << "runner_os=" << metadata.runner_os << "\n";
+  std::cout << "runner_arch=" << metadata.runner_arch << "\n";
   std::cout << "threads=" << options.thread_count << "\n";
   std::cout << "pool_size=" << options.pool_size << "\n";
   std::cout << "block_count=" << options.block_count << "\n";
@@ -117,14 +46,18 @@ void PrintTextSummary(const BenchmarkOptions &options, std::size_t total_ops,
   std::cout << "hit_rate=" << hit_rate << "\n";
 }
 
-void PrintCsvSummary(const BenchmarkOptions &options, std::size_t total_ops,
-                     double seconds, double throughput, uint64_t hits,
-                     uint64_t misses, double hit_rate) {
+void PrintCsvSummary(const BenchmarkOptions &options,
+                     const BenchmarkMetadata &metadata,
+                     std::size_t total_ops, double seconds, double throughput,
+                     uint64_t hits, uint64_t misses, double hit_rate) {
   std::cout
-      << "workload,threads,pool_size,block_count,ops_per_thread,hotset_size,"
-         "hot_access_percent,total_ops,seconds,throughput_ops_per_sec,"
-         "buffer_hits,buffer_misses,hit_rate\n";
-  std::cout << options.workload << ","
+      << "workload,commit_sha,runner_os,runner_arch,threads,pool_size,"
+         "block_count,ops_per_thread,hotset_size,hot_access_percent,total_ops,"
+         "seconds,throughput_ops_per_sec,buffer_hits,buffer_misses,hit_rate\n";
+  std::cout << NormalizeWorkloadName(options.workload) << ","
+            << metadata.commit_sha << ","
+            << metadata.runner_os << ","
+            << metadata.runner_arch << ","
             << options.thread_count << ","
             << options.pool_size << ","
             << options.block_count << ","
@@ -148,6 +81,7 @@ int main(int argc, char **argv) {
   using telepath::PosixDiskBackend;
 
   const BenchmarkOptions options = ParseArgs(argc, argv);
+  const BenchmarkMetadata metadata = LoadMetadata();
   const auto unique_suffix =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const fs::path root =
@@ -194,7 +128,7 @@ int main(int argc, char **argv) {
     workers.emplace_back([&manager, &options, thread_index]() {
       std::mt19937_64 rng(0xBADC0FFEEULL + thread_index);
       for (std::size_t op = 0; op < options.ops_per_thread; ++op) {
-        const BlockId block_id = ChooseBlock(&rng, op, options);
+        const BlockId block_id = ChooseBlock(&rng, op, thread_index, options);
         auto result = manager.ReadBuffer(1, block_id);
         if (!result.ok()) {
           continue;
@@ -223,10 +157,10 @@ int main(int argc, char **argv) {
       (hits + misses) > 0 ? static_cast<double>(hits) / (hits + misses) : 0.0;
 
   if (options.output_format == "csv") {
-    PrintCsvSummary(options, total_ops, seconds, throughput, hits, misses,
+    PrintCsvSummary(options, metadata, total_ops, seconds, throughput, hits, misses,
                     hit_rate);
   } else {
-    PrintTextSummary(options, total_ops, seconds, throughput, hits, misses,
+    PrintTextSummary(options, metadata, total_ops, seconds, throughput, hits, misses,
                      hit_rate);
   }
 

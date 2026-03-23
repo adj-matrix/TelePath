@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/benchmarks
 
-          for workload in hotspot uniform sequential; do
+          for workload in hotspot uniform sequential_shared sequential_disjoint; do
             WORKLOAD="${workload}" \
             THREADS="1 2 4" \
             POOL_SIZE="256" \

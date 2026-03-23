@@ -43,7 +43,7 @@ The benchmark workflow:
 - runs on `workflow_dispatch`,
 - runs on a nightly `schedule`,
 - builds the debug benchmark target,
-- executes workload sweeps for `hotspot`, `uniform`, and `sequential`,
+- executes workload sweeps for `hotspot`, `uniform`, `sequential_shared`, and `sequential_disjoint`,
 - uploads CSV results as GitHub Actions artifacts,
 - publishes a compact workflow summary directly in the Actions UI.
 

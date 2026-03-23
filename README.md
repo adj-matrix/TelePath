@@ -154,8 +154,9 @@ Public project documentation lives under `docs/`.
 Recommended entry points:
 
 - [State 1 Summary](./docs/state1.md)
-- [State 2 Summary](./docs/state2.md)
+- [State 2 Summary](./docs/state.md)
 - [CI Guide](./docs/ci.md)
+- [Test Guide](./docs/test.md)
 - [Repository Tree Guide](./docs/tree.md)
 - [Architecture Mermaid](./docs/mermaid/architecture.mmd)
 
