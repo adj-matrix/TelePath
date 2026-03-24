@@ -24,6 +24,8 @@ class NoOpDiskBackend : public telepath::DiskBackend {
   telepath::Result<telepath::DiskCompletion> PollCompletion() override {
     return telepath::Status::Unavailable("not expected");
   }
+
+  void Shutdown() override {}
 };
 
 }  // namespace

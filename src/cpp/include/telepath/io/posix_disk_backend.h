@@ -22,6 +22,7 @@ class PosixDiskBackend : public DiskBackend {
   Result<uint64_t> SubmitWrite(const BufferTag &tag, const std::byte *data,
                                std::size_t size) override;
   Result<DiskCompletion> PollCompletion() override;
+  void Shutdown() override;
 
  private:
   Status ExecuteRead(const BufferTag &tag, std::byte *out, std::size_t size);

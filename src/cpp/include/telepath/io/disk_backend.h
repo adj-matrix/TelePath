@@ -45,6 +45,8 @@ class DiskBackend {
                                        std::size_t size) = 0;
   // Waits for and returns the next completed disk request.
   virtual Result<DiskCompletion> PollCompletion() = 0;
+  // Stops the backend and unblocks any thread waiting in PollCompletion().
+  virtual void Shutdown() = 0;
 };
 
 }  // namespace telepath

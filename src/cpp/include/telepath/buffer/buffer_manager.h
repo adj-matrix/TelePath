@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <condition_variable>
@@ -66,6 +67,11 @@ class BufferManager {
   const BufferManagerOptions &options() const { return options_; }
 
  private:
+  struct RequestCompletionState {
+    bool completed{false};
+    Status status{};
+  };
+
   friend class BufferHandle;
 
   Status ReleaseFrame(FrameId frame_id);
@@ -84,6 +90,8 @@ class BufferManager {
   std::optional<BufferHandle> TryReadResidentBuffer(const BufferTag &tag);
   std::size_t GetPageTableStripe(const BufferTag &tag) const;
   Status WaitForDiskRequest(uint64_t request_id);
+  void RegisterDiskRequest(uint64_t request_id);
+  void CompletionDispatcherLoop();
   const std::byte *AcquireReadPointer(BufferHandle *handle) const;
   std::byte *AcquireWritePointer(BufferHandle *handle);
   std::byte *GetFrameData(FrameId frame_id);
@@ -102,10 +110,14 @@ class BufferManager {
 
   std::mutex miss_latch_;
   std::mutex free_list_latch_;
-  std::mutex poll_latch_;
   mutable std::mutex completion_latch_;
   std::condition_variable completion_cv_;
-  std::unordered_map<uint64_t, DiskCompletion> completion_cache_;
+  std::unordered_map<uint64_t, RequestCompletionState> completion_states_;
+  std::size_t outstanding_disk_requests_{0};
+  bool completion_shutdown_{false};
+  Status completion_shutdown_status_{Status::Unavailable(
+      "completion dispatcher stopped")};
+  std::thread completion_thread_;
   std::vector<std::mutex> page_table_latches_;
   std::unordered_map<BufferTag, FrameId, BufferTagHash> page_table_;
   std::vector<FrameId> free_list_;

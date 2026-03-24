@@ -73,6 +73,8 @@ class FailingDiskBackend : public telepath::DiskBackend {
                                     request.tag, telepath::Status::Ok()};
   }
 
+  void Shutdown() override {}
+
   void set_fail_reads(bool value) { fail_reads_ = value; }
   void set_fail_writes(bool value) { fail_writes_ = value; }
 

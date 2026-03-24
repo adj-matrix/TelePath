@@ -53,7 +53,12 @@ int main() {
     flush_finished.store(true);
   });
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(200);
+  while (!flush_finished.load() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   assert(flush_finished.load());
   flush_thread.join();
   assert(flush_status.ok());

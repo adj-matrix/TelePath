@@ -113,6 +113,18 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
     descriptors_[frame_id].frame_id = frame_id;
     free_list_.push_back(frame_id);
   }
+
+  if (disk_backend_ == nullptr) {
+    init_status_ = Status::InvalidArgument("disk backend must not be null");
+    return;
+  }
+
+  try {
+    completion_thread_ =
+        std::thread(&BufferManager::CompletionDispatcherLoop, this);
+  } catch (...) {
+    init_status_ = Status::Unavailable("failed to start completion dispatcher");
+  }
 }
 
 BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
@@ -124,7 +136,21 @@ BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
                     std::move(replacer),
                     std::move(telemetry_sink)) {}
 
-BufferManager::~BufferManager() = default;
+BufferManager::~BufferManager() {
+  {
+    std::lock_guard<std::mutex> guard(completion_latch_);
+    completion_shutdown_ = true;
+    completion_shutdown_status_ =
+        Status::Unavailable("buffer manager is shutting down");
+  }
+  completion_cv_.notify_all();
+  if (disk_backend_ != nullptr) {
+    disk_backend_->Shutdown();
+  }
+  if (completion_thread_.joinable()) {
+    completion_thread_.join();
+  }
+}
 
 Result<BufferHandle> BufferManager::ReadBuffer(FileId file_id, BlockId block_id) {
   if (!init_status_.ok()) {
@@ -300,6 +326,7 @@ Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
         if (!submit_result.ok()) {
           return submit_result.status();
         }
+        RegisterDiskRequest(submit_result.value());
         return WaitForDiskRequest(submit_result.value());
       }();
   if (!status.ok()) {
@@ -519,6 +546,7 @@ Result<FrameId> BufferManager::CompleteReservation(
       return write_submit.status();
     }
 
+    RegisterDiskRequest(write_submit.value());
     Status flush_status = WaitForDiskRequest(write_submit.value());
     {
       BufferDescriptor &descriptor = descriptors_[frame_id];
@@ -573,6 +601,7 @@ Result<FrameId> BufferManager::CompleteReservation(
     return read_submit.status();
   }
 
+  RegisterDiskRequest(read_submit.value());
   Status read_status = WaitForDiskRequest(read_submit.value());
   BufferDescriptor &descriptor = descriptors_[frame_id];
   std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
@@ -658,39 +687,64 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
 }
 
 Status BufferManager::WaitForDiskRequest(uint64_t request_id) {
+  std::unique_lock<std::mutex> lock(completion_latch_);
+  if (completion_states_.find(request_id) == completion_states_.end()) {
+    return Status::InvalidArgument("disk request was not registered");
+  }
+  completion_cv_.wait(lock, [&]() {
+    auto state_it = completion_states_.find(request_id);
+    return completion_shutdown_ ||
+           (state_it != completion_states_.end() && state_it->second.completed);
+  });
+  auto state_it = completion_states_.find(request_id);
+  if (state_it == completion_states_.end()) {
+    return Status::Internal("registered disk request disappeared");
+  }
+  if (!state_it->second.completed) {
+    completion_states_.erase(state_it);
+    return completion_shutdown_status_;
+  }
+
+  Status status = state_it->second.status;
+  completion_states_.erase(state_it);
+  return status;
+}
+
+void BufferManager::RegisterDiskRequest(uint64_t request_id) {
+  std::lock_guard<std::mutex> guard(completion_latch_);
+  completion_states_.try_emplace(request_id);
+  ++outstanding_disk_requests_;
+  completion_cv_.notify_all();
+}
+
+void BufferManager::CompletionDispatcherLoop() {
   while (true) {
     {
-      std::lock_guard<std::mutex> guard(completion_latch_);
-      auto it = completion_cache_.find(request_id);
-      if (it != completion_cache_.end()) {
-        Status status = it->second.status;
-        completion_cache_.erase(it);
-        return status;
-      }
-    }
-
-    std::lock_guard<std::mutex> poll_guard(poll_latch_);
-    {
-      std::lock_guard<std::mutex> guard(completion_latch_);
-      auto it = completion_cache_.find(request_id);
-      if (it != completion_cache_.end()) {
-        Status status = it->second.status;
-        completion_cache_.erase(it);
-        return status;
+      std::unique_lock<std::mutex> lock(completion_latch_);
+      completion_cv_.wait(lock, [this]() {
+        return completion_shutdown_ || outstanding_disk_requests_ > 0;
+      });
+      if (completion_shutdown_) {
+        return;
       }
     }
 
     Result<DiskCompletion> completion_result = disk_backend_->PollCompletion();
+    std::lock_guard<std::mutex> guard(completion_latch_);
     if (!completion_result.ok()) {
-      return completion_result.status();
+      completion_shutdown_ = true;
+      completion_shutdown_status_ = completion_result.status();
+      completion_cv_.notify_all();
+      return;
     }
 
     DiskCompletion completion = completion_result.value();
-    std::lock_guard<std::mutex> guard(completion_latch_);
-    if (completion.request_id == request_id) {
-      return completion.status;
+    auto &state = completion_states_[completion.request_id];
+    state.completed = true;
+    state.status = completion.status;
+    if (outstanding_disk_requests_ > 0) {
+      --outstanding_disk_requests_;
     }
-    completion_cache_[completion.request_id] = std::move(completion);
     completion_cv_.notify_all();
   }
 }

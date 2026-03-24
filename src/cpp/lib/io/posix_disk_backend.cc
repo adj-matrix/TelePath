@@ -25,12 +25,7 @@ PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size)
       worker_(&PosixDiskBackend::WorkerLoop, this) {}
 
 PosixDiskBackend::~PosixDiskBackend() {
-  {
-    std::lock_guard<std::mutex> guard(queue_latch_);
-    shutdown_ = true;
-  }
-  request_cv_.notify_all();
-  completion_cv_.notify_all();
+  Shutdown();
   if (worker_.joinable()) {
     worker_.join();
   }
@@ -74,6 +69,15 @@ Result<DiskCompletion> PosixDiskBackend::PollCompletion() {
   DiskCompletion completion = completed_requests_.front();
   completed_requests_.pop_front();
   return completion;
+}
+
+void PosixDiskBackend::Shutdown() {
+  {
+    std::lock_guard<std::mutex> guard(queue_latch_);
+    shutdown_ = true;
+  }
+  request_cv_.notify_all();
+  completion_cv_.notify_all();
 }
 
 Status PosixDiskBackend::ExecuteRead(const BufferTag &tag, std::byte *out,

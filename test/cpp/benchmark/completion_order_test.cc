@@ -23,12 +23,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
       : page_size_(page_size), worker_(&ReorderingDiskBackend::WorkerLoop, this) {}
 
   ~ReorderingDiskBackend() override {
-    {
-      std::lock_guard<std::mutex> guard(latch_);
-      shutdown_ = true;
-    }
-    request_cv_.notify_all();
-    completion_cv_.notify_all();
+    Shutdown();
     worker_.join();
   }
 
@@ -71,6 +66,15 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     telepath::DiskCompletion completion = completed_.front();
     completed_.pop_front();
     return completion;
+  }
+
+  void Shutdown() override {
+    {
+      std::lock_guard<std::mutex> guard(latch_);
+      shutdown_ = true;
+    }
+    request_cv_.notify_all();
+    completion_cv_.notify_all();
   }
 
  private:

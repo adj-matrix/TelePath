@@ -86,6 +86,15 @@ target_link_libraries(telepath_read_zero_fill_test PRIVATE telepath)
 
 add_test(NAME telepath_read_zero_fill_test COMMAND telepath_read_zero_fill_test)
 
+add_executable(telepath_completion_dispatcher_idle_test
+  cpp/io/completion_dispatcher_idle_test.cc
+)
+
+target_link_libraries(telepath_completion_dispatcher_idle_test PRIVATE telepath)
+
+add_test(NAME telepath_completion_dispatcher_idle_test
+         COMMAND telepath_completion_dispatcher_idle_test)
+
 add_executable(telepath_same_page_miss_test
   cpp/buffer/same_page_miss_test.cc
 )
