@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "telepath/buffer/buffer_manager.h"
-#include "telepath/io/posix_disk_backend.h"
+#include "telepath/io/disk_backend_factory.h"
 #include "telepath/options/buffer_manager_options.h"
 #include "telepath/replacer/replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
@@ -24,11 +24,12 @@ using telepath::benchmark_support::NormalizeWorkloadName;
 using telepath::benchmark_support::ParseArgs;
 
 void PrintTextSummary(const BenchmarkOptions &options,
-                      const BenchmarkMetadata &metadata,
+                      const BenchmarkMetadata &metadata, const char *backend_kind,
                       std::size_t total_ops, double seconds, double throughput,
                       uint64_t hits, uint64_t misses, double hit_rate) {
   std::cout << "telepath_benchmark\n";
   std::cout << "workload=" << NormalizeWorkloadName(options.workload) << "\n";
+  std::cout << "disk_backend=" << backend_kind << "\n";
   std::cout << "commit_sha=" << metadata.commit_sha << "\n";
   std::cout << "runner_os=" << metadata.runner_os << "\n";
   std::cout << "runner_arch=" << metadata.runner_arch << "\n";
@@ -47,14 +48,15 @@ void PrintTextSummary(const BenchmarkOptions &options,
 }
 
 void PrintCsvSummary(const BenchmarkOptions &options,
-                     const BenchmarkMetadata &metadata,
+                     const BenchmarkMetadata &metadata, const char *backend_kind,
                      std::size_t total_ops, double seconds, double throughput,
                      uint64_t hits, uint64_t misses, double hit_rate) {
   std::cout
-      << "workload,commit_sha,runner_os,runner_arch,threads,pool_size,"
+      << "workload,disk_backend,commit_sha,runner_os,runner_arch,threads,pool_size,"
          "block_count,ops_per_thread,hotset_size,hot_access_percent,total_ops,"
          "seconds,throughput_ops_per_sec,buffer_hits,buffer_misses,hit_rate\n";
   std::cout << NormalizeWorkloadName(options.workload) << ","
+            << backend_kind << ","
             << metadata.commit_sha << ","
             << metadata.runner_os << ","
             << metadata.runner_arch << ","
@@ -78,7 +80,6 @@ int main(int argc, char **argv) {
   namespace fs = std::filesystem;
   using telepath::BlockId;
   using telepath::BufferManager;
-  using telepath::PosixDiskBackend;
 
   const BenchmarkOptions options = ParseArgs(argc, argv);
   const BenchmarkMetadata metadata = LoadMetadata();
@@ -91,12 +92,21 @@ int main(int argc, char **argv) {
   fs::create_directories(root);
 
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  auto disk_backend =
-      std::make_unique<PosixDiskBackend>(root.string(), options.page_size);
+  const telepath::DiskBackendOptions disk_backend_options{};
+  auto disk_backend_result =
+      telepath::CreateDiskBackend(root.string(), options.page_size,
+                                  disk_backend_options);
+  if (!disk_backend_result.ok()) {
+    std::cerr << "backend creation failed: "
+              << disk_backend_result.status().message() << "\n";
+    return 1;
+  }
+  const auto disk_backend_capabilities =
+      disk_backend_result.value()->GetCapabilities();
   auto replacer = telepath::MakeLruKReplacer(options.pool_size, 2);
   const telepath::BufferManagerOptions manager_options{
-      options.pool_size, options.page_size, 0};
-  BufferManager manager(manager_options, std::move(disk_backend),
+      options.pool_size, options.page_size, 0, disk_backend_options};
+  BufferManager manager(manager_options, std::move(disk_backend_result.value()),
                         std::move(replacer), telemetry);
 
   for (BlockId block_id = 0; block_id < options.block_count; ++block_id) {
@@ -156,12 +166,18 @@ int main(int argc, char **argv) {
   const double hit_rate =
       (hits + misses) > 0 ? static_cast<double>(hits) / (hits + misses) : 0.0;
 
+  const char *backend_kind =
+      disk_backend_capabilities.kind == telepath::DiskBackendKind::kIoUring
+          ? (disk_backend_capabilities.is_fallback_backend ? "io_uring_fallback"
+                                                           : "io_uring")
+          : (disk_backend_capabilities.is_fallback_backend ? "posix_fallback"
+                                                           : "posix");
   if (options.output_format == "csv") {
-    PrintCsvSummary(options, metadata, total_ops, seconds, throughput, hits, misses,
-                    hit_rate);
+    PrintCsvSummary(options, metadata, backend_kind, total_ops, seconds,
+                    throughput, hits, misses, hit_rate);
   } else {
-    PrintTextSummary(options, metadata, total_ops, seconds, throughput, hits, misses,
-                     hit_rate);
+    PrintTextSummary(options, metadata, backend_kind, total_ops, seconds,
+                     throughput, hits, misses, hit_rate);
   }
 
   fs::remove_all(root);

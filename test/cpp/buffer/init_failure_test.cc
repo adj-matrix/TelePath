@@ -26,6 +26,10 @@ class NoOpDiskBackend : public telepath::DiskBackend {
   }
 
   void Shutdown() override {}
+
+  telepath::DiskBackendCapabilities GetCapabilities() const override {
+    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
+  }
 };
 
 }  // namespace

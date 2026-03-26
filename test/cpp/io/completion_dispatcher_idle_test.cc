@@ -50,6 +50,10 @@ class IdleAwareDiskBackend : public telepath::DiskBackend {
     cv_.notify_all();
   }
 
+  telepath::DiskBackendCapabilities GetCapabilities() const override {
+    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
+  }
+
  private:
   std::shared_ptr<IdleBackendState> state_;
   std::mutex latch_;

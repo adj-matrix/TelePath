@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <thread>
 
+#include "telepath/io/disk_backend_options.h"
+
 namespace telepath {
 
 // Runtime configuration for BufferManager construction.
@@ -13,6 +15,7 @@ struct BufferManagerOptions {
   // Number of striped latches protecting the page table. Set to zero to let
   // the library derive a machine-sensitive default.
   std::size_t page_table_stripe_count{0};
+  DiskBackendOptions disk_backend{};
 
   // Returns the effective stripe count after applying the default policy.
   std::size_t ResolvePageTableStripeCount() const {

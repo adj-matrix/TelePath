@@ -75,6 +75,10 @@ class FailingDiskBackend : public telepath::DiskBackend {
 
   void Shutdown() override {}
 
+  telepath::DiskBackendCapabilities GetCapabilities() const override {
+    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
+  }
+
   void set_fail_reads(bool value) { fail_reads_ = value; }
   void set_fail_writes(bool value) { fail_writes_ = value; }
 

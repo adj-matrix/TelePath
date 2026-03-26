@@ -77,6 +77,10 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     completion_cv_.notify_all();
   }
 
+  telepath::DiskBackendCapabilities GetCapabilities() const override {
+    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
+  }
+
  private:
   void CompleteRead(const telepath::DiskRequest &request) {
     for (std::size_t i = 0; i < request.size; ++i) {

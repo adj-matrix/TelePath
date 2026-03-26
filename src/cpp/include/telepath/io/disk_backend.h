@@ -6,6 +6,7 @@
 
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
+#include "telepath/io/disk_backend_options.h"
 
 namespace telepath {
 
@@ -30,6 +31,14 @@ struct DiskCompletion {
   Status status{};
 };
 
+struct DiskBackendCapabilities {
+  DiskBackendKind kind{DiskBackendKind::kPosix};
+  bool supports_submit_batching{false};
+  bool supports_completion_batching{false};
+  std::size_t recommended_queue_depth{1};
+  bool is_fallback_backend{false};
+};
+
 class DiskBackend {
  public:
   virtual ~DiskBackend() = default;
@@ -47,6 +56,8 @@ class DiskBackend {
   virtual Result<DiskCompletion> PollCompletion() = 0;
   // Stops the backend and unblocks any thread waiting in PollCompletion().
   virtual void Shutdown() = 0;
+  // Describes the backend implementation and key async capabilities.
+  virtual DiskBackendCapabilities GetCapabilities() const = 0;
 };
 
 }  // namespace telepath

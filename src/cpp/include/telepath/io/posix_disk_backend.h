@@ -14,7 +14,8 @@ namespace telepath {
 
 class PosixDiskBackend : public DiskBackend {
  public:
-  explicit PosixDiskBackend(std::string root_path, std::size_t page_size);
+  explicit PosixDiskBackend(std::string root_path, std::size_t page_size,
+                            bool is_fallback_backend = false);
   ~PosixDiskBackend() override;
 
   Result<uint64_t> SubmitRead(const BufferTag &tag, std::byte *out,
@@ -23,6 +24,7 @@ class PosixDiskBackend : public DiskBackend {
                                std::size_t size) override;
   Result<DiskCompletion> PollCompletion() override;
   void Shutdown() override;
+  DiskBackendCapabilities GetCapabilities() const override;
 
  private:
   Status ExecuteRead(const BufferTag &tag, std::byte *out, std::size_t size);
@@ -39,6 +41,7 @@ class PosixDiskBackend : public DiskBackend {
   std::deque<DiskCompletion> completed_requests_;
   uint64_t next_request_id_{1};
   bool shutdown_{false};
+  bool is_fallback_backend_{false};
   std::string root_path_;
   std::size_t page_size_{0};
   std::thread worker_;

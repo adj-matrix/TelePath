@@ -78,6 +78,15 @@ target_link_libraries(telepath_disk_backend_test PRIVATE telepath)
 
 add_test(NAME telepath_disk_backend_test COMMAND telepath_disk_backend_test)
 
+add_executable(telepath_disk_backend_factory_test
+  cpp/io/disk_backend_factory_test.cc
+)
+
+target_link_libraries(telepath_disk_backend_factory_test PRIVATE telepath)
+
+add_test(NAME telepath_disk_backend_factory_test
+         COMMAND telepath_disk_backend_factory_test)
+
 add_executable(telepath_read_zero_fill_test
   cpp/io/read_zero_fill_test.cc
 )

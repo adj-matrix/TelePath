@@ -2,6 +2,8 @@ set(TELEPATH_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_library(telepath
   lib/buffer/buffer_manager.cc
+  lib/io/disk_backend_factory.cc
+  lib/io/io_uring_disk_backend.cc
   lib/io/posix_disk_backend.cc
   lib/replacer/clock_replacer.cc
   lib/replacer/lru_k_replacer.cc

@@ -131,7 +131,7 @@ BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
                              std::unique_ptr<DiskBackend> disk_backend,
                              std::unique_ptr<Replacer> replacer,
                              std::shared_ptr<TelemetrySink> telemetry_sink)
-    : BufferManager(BufferManagerOptions{pool_size, page_size, 0},
+    : BufferManager(BufferManagerOptions{pool_size, page_size, 0, {}},
                     std::move(disk_backend),
                     std::move(replacer),
                     std::move(telemetry_sink)) {}

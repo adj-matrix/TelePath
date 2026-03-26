@@ -19,8 +19,10 @@ std::string BuildErrnoMessage(const std::string &prefix) {
 
 }  // namespace
 
-PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size)
-    : root_path_(std::move(root_path)),
+PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size,
+                                   bool is_fallback_backend)
+    : is_fallback_backend_(is_fallback_backend),
+      root_path_(std::move(root_path)),
       page_size_(page_size),
       worker_(&PosixDiskBackend::WorkerLoop, this) {}
 
@@ -78,6 +80,16 @@ void PosixDiskBackend::Shutdown() {
   }
   request_cv_.notify_all();
   completion_cv_.notify_all();
+}
+
+DiskBackendCapabilities PosixDiskBackend::GetCapabilities() const {
+  return DiskBackendCapabilities{
+      DiskBackendKind::kPosix,
+      false,
+      false,
+      1,
+      is_fallback_backend_,
+  };
 }
 
 Status PosixDiskBackend::ExecuteRead(const BufferTag &tag, std::byte *out,
