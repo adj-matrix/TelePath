@@ -65,11 +65,15 @@ int main() {
       backend.SubmitWrite(first_write_tag, first_page.data(), first_page.size());
   assert(first_write.ok());
 
-  auto second_write_while_full =
-      backend.SubmitWrite(second_write_tag, second_page.data(), second_page.size());
-  assert(!second_write_while_full.ok());
-  assert(second_write_while_full.status().code() ==
-         telepath::StatusCode::kResourceExhausted);
+  auto null_read = backend.SubmitRead(second_write_tag, nullptr, 4096);
+  assert(!null_read.ok());
+  assert(null_read.status().code() == telepath::StatusCode::kInvalidArgument);
+
+  auto wrong_size_write =
+      backend.SubmitWrite(second_write_tag, second_page.data(), 1024);
+  assert(!wrong_size_write.ok());
+  assert(wrong_size_write.status().code() ==
+         telepath::StatusCode::kInvalidArgument);
 
   auto first_write_completion = backend.PollCompletion();
   assert(first_write_completion.ok());

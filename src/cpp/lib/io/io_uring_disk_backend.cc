@@ -259,6 +259,19 @@ Result<uint64_t> IoUringDiskBackend::SubmitRequest(
     return Status::Unavailable("io_uring backend is shutting down");
   }
 
+  if (next_submit_result_for_test_.has_value()) {
+    const int submit_result = *next_submit_result_for_test_;
+    next_submit_result_for_test_.reset();
+    if (submit_result == 1) {
+      return Status::Internal("test submit override must not report success");
+    }
+    if (submit_result == 0) {
+      return Status::IoError("io_uring submit accepted no requests");
+    }
+    return Status::IoError(
+        BuildNegativeErrnoMessage("io_uring submit failed", submit_result));
+  }
+
   io_uring_sqe *sqe = io_uring_get_sqe(&impl_->ring);
   if (sqe == nullptr) {
     return Status::ResourceExhausted("io_uring submission queue is full");
@@ -288,13 +301,7 @@ Result<uint64_t> IoUringDiskBackend::SubmitRequest(
 
   const uint64_t request_id = context->request_id;
   impl_->in_flight_requests.emplace(request_id, std::move(context));
-  int submit_result = 0;
-  if (next_submit_result_for_test_.has_value()) {
-    submit_result = *next_submit_result_for_test_;
-    next_submit_result_for_test_.reset();
-  } else {
-    submit_result = io_uring_submit(&impl_->ring);
-  }
+  const int submit_result = io_uring_submit(&impl_->ring);
   if (submit_result != 1) {
     auto it = impl_->in_flight_requests.find(request_id);
     if (it != impl_->in_flight_requests.end()) {
