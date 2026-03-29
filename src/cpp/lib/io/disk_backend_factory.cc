@@ -29,12 +29,20 @@ Result<std::unique_ptr<DiskBackend>> MakeIoUringBackend(std::string root_path,
   std::unique_ptr<DiskBackend> backend =
       std::make_unique<IoUringDiskBackend>(std::move(root_path), page_size,
                                            queue_depth);
+  auto *io_uring_backend = static_cast<IoUringDiskBackend *>(backend.get());
+  if (!io_uring_backend->initialization_status().ok()) {
+    return io_uring_backend->initialization_status();
+  }
   return backend;
 }
 
 }  // namespace
 
+#if TELEPATH_HAS_LIBURING
+bool IsIoUringBackendSupported() { return true; }
+#else
 bool IsIoUringBackendSupported() { return false; }
+#endif
 
 Result<std::unique_ptr<DiskBackend>> CreateDiskBackend(
     std::string root_path, std::size_t page_size,

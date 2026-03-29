@@ -87,6 +87,80 @@ target_link_libraries(telepath_disk_backend_factory_test PRIVATE telepath)
 add_test(NAME telepath_disk_backend_factory_test
          COMMAND telepath_disk_backend_factory_test)
 
+if(TELEPATH_HAS_LIBURING)
+  add_executable(telepath_io_uring_backend_test
+    cpp/io/io_uring_backend_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_backend_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_backend_test
+           COMMAND telepath_io_uring_backend_test)
+
+  add_executable(telepath_io_uring_shutdown_wait_test
+    cpp/io/io_uring_shutdown_wait_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_shutdown_wait_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_shutdown_wait_test
+           COMMAND telepath_io_uring_shutdown_wait_test)
+
+  add_executable(telepath_io_uring_multi_inflight_test
+    cpp/io/io_uring_multi_inflight_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_multi_inflight_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_multi_inflight_test
+           COMMAND telepath_io_uring_multi_inflight_test)
+
+  add_executable(telepath_io_uring_edge_cases_test
+    cpp/io/io_uring_edge_cases_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_edge_cases_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_edge_cases_test
+           COMMAND telepath_io_uring_edge_cases_test)
+
+  add_executable(telepath_io_uring_shutdown_drain_test
+    cpp/io/io_uring_shutdown_drain_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_shutdown_drain_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_shutdown_drain_test
+           COMMAND telepath_io_uring_shutdown_drain_test)
+
+  add_executable(telepath_io_uring_failure_paths_test
+    cpp/io/io_uring_failure_paths_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_failure_paths_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_failure_paths_test
+           COMMAND telepath_io_uring_failure_paths_test)
+
+  set_tests_properties(
+    telepath_io_uring_backend_test
+    telepath_io_uring_shutdown_wait_test
+    telepath_io_uring_multi_inflight_test
+    telepath_io_uring_edge_cases_test
+    telepath_io_uring_shutdown_drain_test
+    telepath_io_uring_failure_paths_test
+    PROPERTIES LABELS "native_io_uring")
+else()
+  add_executable(telepath_io_uring_backend_stub_test
+    cpp/io/io_uring_backend_stub_test.cc
+  )
+
+  target_link_libraries(telepath_io_uring_backend_stub_test PRIVATE telepath)
+
+  add_test(NAME telepath_io_uring_backend_stub_test
+           COMMAND telepath_io_uring_backend_stub_test)
+endif()
+
 add_executable(telepath_read_zero_fill_test
   cpp/io/read_zero_fill_test.cc
 )

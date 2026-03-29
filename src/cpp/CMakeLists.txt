@@ -17,7 +17,16 @@ target_include_directories(telepath
     ${TELEPATH_INCLUDE_DIR}
 )
 
+if(TELEPATH_HAS_LIBURING)
+  target_include_directories(telepath PRIVATE ${TELEPATH_LIBURING_INCLUDE_DIR})
+  target_link_libraries(telepath PRIVATE ${TELEPATH_LIBURING_LIBRARY})
+endif()
+
 target_compile_features(telepath PUBLIC cxx_std_17)
+target_compile_definitions(telepath
+  PUBLIC
+    TELEPATH_HAS_LIBURING=$<BOOL:${TELEPATH_HAS_LIBURING}>
+)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(telepath PRIVATE -Werror)

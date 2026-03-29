@@ -23,6 +23,7 @@ apt-get update
 apt-get install -y \
   build-essential \
   cmake \
+  liburing-dev \
   pkg-config
 
 echo "Installed TelePath build dependencies."

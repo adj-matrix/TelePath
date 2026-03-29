@@ -18,6 +18,28 @@ endif()
 
 option(TELEPATH_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(TELEPATH_ENABLE_LSAN "Enable LeakSanitizer" OFF)
+option(TELEPATH_ENABLE_IO_URING "Enable liburing-backed build integration" OFF)
+
+set(TELEPATH_HAS_LIBURING OFF)
+set(TELEPATH_LIBURING_INCLUDE_DIR "")
+set(TELEPATH_LIBURING_LIBRARY "")
+
+if(TELEPATH_ENABLE_IO_URING)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(PC_LIBURING QUIET liburing)
+  if(PC_LIBURING_FOUND)
+    set(TELEPATH_LIBURING_INCLUDE_DIR ${PC_LIBURING_INCLUDE_DIRS})
+    set(TELEPATH_LIBURING_LIBRARY ${PC_LIBURING_LINK_LIBRARIES})
+  endif()
+  find_path(TELEPATH_LIBURING_INCLUDE_DIR liburing.h)
+  find_library(TELEPATH_LIBURING_LIBRARY uring)
+  if(TELEPATH_LIBURING_INCLUDE_DIR AND TELEPATH_LIBURING_LIBRARY)
+    set(TELEPATH_HAS_LIBURING ON)
+  else()
+    message(FATAL_ERROR
+      "TELEPATH_ENABLE_IO_URING=ON requires liburing headers and library")
+  endif()
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)

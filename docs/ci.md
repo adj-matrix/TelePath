@@ -8,6 +8,7 @@ The primary CI workflow lives at:
 
 - `.github/workflows/ci.yml`
 - `.github/workflows/benchmark.yml`
+- `.github/workflows/io_uring-native.yml`
 
 ## Triggers
 
@@ -24,6 +25,7 @@ The first CI iteration intentionally stays small and reliable. It currently runs
 - `GCC Debug`
 - `GCC ASAN`
 - `Clang Debug`
+- `io_uring Debug` in a separate native-storage workflow
 
 These jobs reuse the same repository scripts developers run locally:
 
@@ -33,6 +35,19 @@ These jobs reuse the same repository scripts developers run locally:
 - `./scripts/test/asan.sh`
 
 This keeps local and CI behavior aligned and reduces workflow drift.
+
+## Native io_uring Workflow
+
+`io_uring` validation now lives in a separate workflow so that native-kernel-sensitive checks do not get mixed into the baseline portability jobs.
+
+That workflow:
+
+- builds with `TELEPATH_ENABLE_IO_URING=ON`,
+- uses `./scripts/build/io_uring_debug.sh`,
+- runs only tests labeled `native_io_uring`,
+- sets `TELEPATH_REQUIRE_IO_URING_SUCCESS=1` so the job fails if the runner cannot execute the real `io_uring` path.
+
+This separation matters because the normal Linux/WSL development path must continue to validate fallback behavior even on systems where `io_uring` is blocked or unavailable.
 
 ## Benchmark Workflow
 
