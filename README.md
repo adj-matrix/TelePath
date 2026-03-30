@@ -20,8 +20,8 @@ It is not intended to be a full DBMS. The project is scoped as a reusable system
 
 - a concurrent buffer pool core,
 - pluggable replacement policies,
-- a stable POSIX storage backend for early development,
-- a future path toward `io_uring`,
+- a stable POSIX fallback backend,
+- a native `io_uring` backend path for supported Linux environments,
 - a low-overhead telemetry interface designed to stay off the hot path.
 
 TelePath is being developed with a deliberate split between the data plane and the observation plane so that instrumentation remains part of the architecture rather than an afterthought.
@@ -55,26 +55,29 @@ TelePath does **not** currently aim to include:
 - WAL or crash recovery,
 - production-grade monitoring integrations in the first milestone.
 
-## State 2 Status
+## State 3 Status
 
-The current implementation has moved beyond the original State 1 skeleton and now includes a first State 2 milestone:
+The current implementation has moved beyond the original State 1/2 skeleton and now includes a usable State 3 writeback core:
 
 - `BufferManager`, `BufferHandle`, and `BufferDescriptor`
 - contiguous frame memory allocation
-- `DiskBackend` and `PosixDiskBackend` with submit/poll semantics
-- `Replacer` abstraction with `ClockReplacer`, `LruReplacer`, and `LruKReplacer`
-- descriptor-level coordination for in-flight page loads
+- `DiskBackend`, `PosixDiskBackend`, `IoUringDiskBackend`, and `DiskBackendFactory`
+- miss coordination for concurrent same-page faults
+- centralized completion dispatch for submitted disk requests
+- asynchronous flush scheduling with worker threads
+- foreground/background flush queue separation with configurable batching
+- cleaner-backed dirty-page writeback with watermark-driven activation
+- `ClockReplacer`, `LruReplacer`, and `LruKReplacer`
 - counter-based and no-op telemetry sinks
-- benchmark skeleton and helper scripts
-- debug and ASAN build/test paths
+- benchmark and CI paths for fallback and native validation
 
 This means TelePath now supports not only the basic buffer lifecycle, but also:
 
-1. contiguous frame-backed page access,
-2. an async-ready storage abstraction while preserving synchronous external buffer semantics,
-3. initial same-page miss coordination,
-4. early experimental throughput measurement,
-5. richer correctness coverage around concurrency, eviction, and failure paths.
+1. synchronous external page access on top of internal async-style disk orchestration,
+2. explicit same-page miss ownership instead of duplicate load work,
+3. a real writeback path with completion routing and task waiting,
+4. cleaner-assisted dirty-page management,
+5. stronger regression coverage around flush correctness, failure handling, and scheduler behavior.
 
 ## Architecture
 
@@ -114,6 +117,15 @@ This installs tools such as `clang`, `clang-format`, `clang-tidy`, `lldb`, and `
 ./scripts/test/asan.sh
 ```
 
+### Native `io_uring` Validation
+
+On supported native Linux kernels, the dedicated `io_uring` path can be built and tested separately:
+
+```bash
+./scripts/build/io_uring_debug.sh
+./scripts/test/io_uring_native.sh
+```
+
 ### LSAN Notes
 
 `LeakSanitizer` support is prepared through:
@@ -142,8 +154,8 @@ The main implementation currently lives under:
 
 - Phase 1: establish a stable, testable buffer pool skeleton
 - Phase 2: strengthen concurrent lifecycle semantics, async-ready I/O boundaries, and benchmark scaffolding
-- Phase 3: introduce a real async backend and stronger observability plumbing
-- Phase 4: continue toward larger-scale experimentation and external tooling integration
+- Phase 3: deliver centralized completion ownership, async writeback scheduling, and cleaner-backed dirty-page management
+- Phase 4: continue toward shared-memory telemetry transport, deeper native backend optimization, and larger-scale experimentation
 
 The current implementation is still early-stage. The main focus is architectural correctness, stable interfaces, and controlled extensibility rather than premature performance claims.
 
@@ -153,8 +165,7 @@ Public project documentation lives under `docs/`.
 
 Recommended entry points:
 
-- [State 1 Summary](./docs/state1.md)
-- [State 2 Summary](./docs/state.md)
+- [State Summary](./docs/state.md)
 - [CI Guide](./docs/ci.md)
 - [Test Guide](./docs/test.md)
 - [Repository Tree Guide](./docs/tree.md)

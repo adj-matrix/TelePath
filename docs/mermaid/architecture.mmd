@@ -5,13 +5,20 @@ flowchart TB
         OPTS["BufferManagerOptions"]
     end
 
-    subgraph DataPlane["Data Plane"]
+    subgraph Core["Core Cache Engine"]
         BM["BufferManager"]
         BH["BufferHandle"]
         FMP["FrameMemoryPool"]
         PT["Striped Page Table"]
+        MISS["Miss Coordinator<br/>MissState shards"]
         BD["BufferDescriptor<br/>state + pin + dirty generation"]
         CL["Per-page Content Latch"]
+        FLUSH["Async Flush Scheduler"]
+        FGQ["Foreground Flush Queue"]
+        BGQ["Background Flush Queue"]
+        FW["Flush Worker(s)"]
+        CLEAN["Background Cleaner"]
+        DISP["Completion Dispatcher"]
         RP["Replacer Interface"]
         CLOCK["ClockReplacer"]
         LRU["LruReplacer"]
@@ -19,16 +26,16 @@ flowchart TB
     end
 
     subgraph Storage["Storage Backend Layer"]
+        FACTORY["DiskBackendFactory"]
         DB["DiskBackend"]
-        POSIX["PosixDiskBackend"]
-        WORKER["Background I/O Worker"]
-        CQ["Completion Queue"]
-        FUTURE_IO["Future: io_uring Backend"]
+        POSIX["PosixDiskBackend<br/>fallback path"]
+        URING["IoUringDiskBackend<br/>native Linux path"]
+        MEDIA["Page Files / Storage Media"]
     end
 
     subgraph Observe["Observation Plane"]
         TS["TelemetrySink"]
-        FAST["Fast-path Atomic Counters"]
+        FAST["Fast-path Counters"]
         CTS["CounterTelemetrySink"]
         NTS["NoOpTelemetrySink"]
         FUTURE_EXP["Future: Shared Memory Telemetry Pipeline"]
@@ -37,28 +44,47 @@ flowchart TB
     subgraph Tooling["Tooling / Validation"]
         SCRIPTS["scripts/build test bench"]
         CI["GitHub Actions CI"]
-        BENCH["GitHub Benchmark Workflow"]
+        NATIVE["Native io_uring Workflow"]
+        BENCH["Benchmark Workflow"]
     end
 
     APP --> API
     OPTS --> API
     API --> BM
+
     BM --> BH
     BM --> FMP
     BM --> PT
+    BM --> MISS
     BM --> BD
+    BM --> FLUSH
+    BM --> CLEAN
+    BM --> DISP
+    BM --> RP
     BH --> CL
     BD --> CL
-    BM --> RP
+
+    FLUSH --> FGQ
+    FLUSH --> BGQ
+    FGQ --> FW
+    BGQ --> FW
+    CLEAN --> BGQ
+    DISP --> FLUSH
+    DISP --> MISS
+
     RP --> CLOCK
     RP --> LRU
     RP --> LRUK
 
-    BM --> DB
+    BM --> FACTORY
+    FACTORY --> DB
     DB --> POSIX
-    POSIX --> WORKER
-    WORKER --> CQ
-    DB -.-> FUTURE_IO
+    DB --> URING
+    POSIX --> MEDIA
+    URING --> MEDIA
+    FW --> DB
+    DISP --> DB
+    MISS --> DB
 
     BM --> TS
     TS --> FAST
@@ -68,8 +94,11 @@ flowchart TB
 
     SCRIPTS --> API
     CI --> SCRIPTS
-    BENCH --> SCRIPTS
+    CI --> NATIVE
+    CI --> BENCH
+    NATIVE --> URING
+    BENCH --> API
     BENCH -.-> FUTURE_EXP
 
     classDef future stroke-dasharray: 5 5;
-    class FUTURE_IO,FUTURE_EXP future;
+    class FUTURE_EXP future;

@@ -28,14 +28,21 @@ The current suite covers:
 
 - smoke-path lifecycle behavior,
 - handle and pin/unpin semantics,
-- concurrent read and same-page miss coordination,
-- eviction and flush behavior,
+- concurrent read, same-page miss ownership, and miss recovery,
+- eviction, `FlushBuffer()`, and `FlushAll()` behavior,
+- async flush scheduling and fairness,
+- cleaner-triggered background writeback,
+- flush consistency under re-dirty races,
+- writeback failure handling at both submit time and completion time,
 - failure and resource exhaustion paths,
 - disk backend correctness,
+- completion dispatcher behavior,
 - replacer correctness,
 - telemetry correctness,
 - options resolution,
 - benchmark workload semantics.
+
+In addition to the baseline suite, native Linux CI runs a separate `io_uring`-only test group so that kernel-sensitive validation does not get mixed into the normal fallback path.
 
 ## How To Run
 
@@ -51,6 +58,13 @@ ASAN validation:
 ```bash
 ./scripts/build/asan.sh
 ./scripts/test/asan.sh
+```
+
+Native `io_uring` validation on supported Linux kernels:
+
+```bash
+./scripts/build/io_uring_debug.sh
+./scripts/test/io_uring_native.sh
 ```
 
 ## Benchmark Note
@@ -73,3 +87,9 @@ New tests should prefer one of the following:
 - a new workload semantic guarantee.
 
 Avoid adding tests that only restate behavior already proven elsewhere.
+
+Recent high-value examples include:
+
+- a batched flush where one page fails during `SubmitWrite()` and the other still persists correctly,
+- a `FlushAll()` caller waiting on cleaner-owned in-flight writeback without duplicate submission,
+- foreground/background flush interaction without brittle timing assumptions.

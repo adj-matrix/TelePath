@@ -1,29 +1,28 @@
-# TelePath State 2
+# TelePath State 3
 
 ## Overview
 
-State 2 is the phase where TelePath moves beyond a functional buffer pool skeleton and begins to behave like an extensible concurrent systems core.
+State 3 is the phase where TelePath stops being only "async-ready in shape" and starts behaving like a usable writeback-oriented concurrent buffer engine.
 
-The purpose of this stage is not to finalize every subsystem. The purpose is to remove the most obvious architectural limits left in State 1 and replace them with structures that can support future async I/O, richer replacement policies, and more realistic performance experiments.
+The goal of this stage is not to finish every long-term subsystem. The goal is to make the current architecture internally coherent enough that future `io_uring`, shared-memory telemetry, and higher-contention experiments can land on top of a working writeback pipeline rather than on top of placeholders.
 
-## What Was Added Beyond State 1
+## What Was Added Beyond State 2
 
-Compared with State 1, the current implementation now includes:
+Compared with State 2, the current implementation now includes:
 
-- contiguous frame memory allocation,
-- cache-line-aware descriptor alignment preparation,
-- a less serialized hit path,
-- an async-ready disk abstraction with submit/poll semantics,
-- page-content latching for stable flush snapshots,
-- descriptor-level in-flight I/O coordination,
-- a baseline `LRU-K` implementation,
-- a configurable `BufferManagerOptions` entrypoint,
-- an initial benchmark skeleton,
-- broader tests for concurrency, eviction, and failure paths.
+- a dedicated completion dispatcher for disk request completions,
+- same-page miss coordination through explicit miss-state ownership,
+- a real asynchronous writeback scheduler,
+- foreground and background flush queue separation,
+- batch write submission with configurable limits,
+- background cleaner coordination with dirty-page watermarks,
+- stronger flush consistency handling for re-dirty races,
+- backend capability negotiation for fallback and native paths,
+- broader correctness and regression coverage around writeback behavior.
 
 ## Implemented Components
 
-The current State 2 codebase includes:
+The current State 3 codebase includes:
 
 - `BufferManager`
 - `BufferHandle`
@@ -31,6 +30,9 @@ The current State 2 codebase includes:
 - contiguous `FrameMemoryPool`
 - `DiskBackend`
 - `PosixDiskBackend`
+- `IoUringDiskBackend`
+- `DiskBackendFactory`
+- `CompletionDispatcher`
 - `Replacer`
 - `ClockReplacer`
 - `LruReplacer`
@@ -41,119 +43,110 @@ The current State 2 codebase includes:
 
 ## Architectural Changes
 
-### 1. Contiguous Frame Memory
+### 1. Completion Ownership Is Centralized
 
-Frame storage is no longer implemented as nested vectors.
+Disk completions are no longer consumed opportunistically by whichever caller happens to be waiting.
 
-Instead, TelePath now allocates a contiguous frame memory pool and maps `frame_id` to page memory by offset. This is a much better fit for systems work because it improves locality and prepares the project for future aligned I/O and async backend evolution.
+State 3 introduces a dedicated completion-dispatch path that registers request ids, waits for backend completions, and routes the result back to the owning waiter. This closes the earlier class of completion-stealing bugs and gives the storage layer a model that can scale from the POSIX fallback backend to a native `io_uring` backend.
 
-### 2. Descriptor State Tightening
+### 2. Same-Page Misses Now Coordinate Explicitly
 
-Descriptors now carry more explicit state around:
+When several threads fault the same page concurrently, only one thread performs the miss work and the others join an explicit miss state.
 
-- resident vs loading,
-- in-flight I/O,
-- last I/O status.
+This reduces duplicate load attempts and keeps page install semantics much closer to what a real concurrent buffer manager needs.
 
-This provides the minimum machinery required to coordinate concurrent readers around a page that is still being loaded.
+### 3. Writeback Is Now a First-Class Subsystem
 
-### 3. Reduced Global Serialization
+State 3 introduces an actual flush scheduler instead of ad hoc direct writeback.
 
-State 2 begins to reduce the reliance on a single global coordination lock.
+The scheduler now supports:
 
-The current implementation separates:
+- worker-driven flush execution,
+- queue-based decoupling between requesters and disk submission,
+- configurable submission batching,
+- waiting by task completion rather than by inline disk call ownership.
 
-- striped page-table synchronization,
-- free-list synchronization,
-- miss-path serialization,
-- descriptor-local locking.
+### 4. Foreground and Background Writeback Are Separated
 
-This is not the final concurrency model, but it is materially better than forcing every lookup through one global latch.
+Explicit flushes triggered by foreground callers are no longer treated as the same queue as cleaner-owned writeback.
 
-### 4. Async-Ready Disk Interface
+The implementation now maintains separate foreground and background queues plus a burst limit so that foreground traffic can stay responsive without starving cleaner progress indefinitely.
 
-The disk abstraction is no longer purely synchronous in shape.
+### 5. Cleaner Policy Is Usable, Not Decorative
 
-It now exposes:
+State 3 adds a background cleaner that reacts to dirty-page watermarks and only targets evictable dirty pages.
 
-- `SubmitRead`
-- `SubmitWrite`
-- `PollCompletion`
+The cleaner is still intentionally conservative, but it is now real enough to:
 
-The current POSIX backend is still a transitional implementation, but it now runs requests through a background worker and completion queue. This keeps the public boundary aligned with a future async backend instead of hard-coding synchronous call/return behavior into the API.
+- pre-clean dirty frames before eviction pressure becomes critical,
+- cooperate with the main flush scheduler,
+- avoid duplicate cleaner ownership on the same frame,
+- respect in-flight flush state.
 
-### 5. Descriptor-Level Waiting
+### 6. Flush Correctness Handles Re-Dirty Races
 
-When multiple threads request the same block and one thread is already loading it, later threads can now wait on descriptor state rather than all attempting independent load logic.
+The writeback path no longer assumes that a successful flush means the frame is now globally clean.
 
-This is an important semantic step toward a real concurrent buffer manager.
+Dirty state is only cleared when the flushed generation still matches the resident page generation at completion time. If the page is modified again while a flush is in flight, the later dirty state survives and can be re-queued safely.
 
-### 6. `LRU-K` Support
+### 7. Backend Capability Negotiation Is Now Real
 
-State 2 adds a baseline `LRU-K` replacer implementation.
+Backends now expose capability information that affects runtime policy decisions, such as batching defaults and fallback behavior.
 
-The current implementation is intentionally straightforward and correctness-oriented. It is suitable for behavior testing and benchmark exploration, even if it is not yet the final high-performance form.
-
-### 7. Benchmark Skeleton
-
-State 2 introduces a small but usable benchmark executable and scripts under `scripts/`.
-
-The current benchmark supports:
-
-- configurable thread count,
-- configurable pool size,
-- configurable block count,
-- configurable operations per thread,
-- multiple workload modes,
-- CSV-friendly output,
-- simple sweep execution.
-
-This is enough to begin throughput and hit-rate exploration without claiming a finished benchmark platform.
+This keeps the public model stable while allowing the implementation to choose different defaults for POSIX fallback and native `io_uring` execution environments.
 
 ## Test Coverage
 
-State 2 now validates the following categories:
+State 3 now validates the following categories:
 
-- smoke-path lifecycle
-- replacer baseline behavior
-- `LRU-K` behavior
-- buffer handle semantics
-- telemetry sink behavior
-- memory layout assumptions
-- concurrent read behavior
-- same-page miss coordination
-- disk backend submit/poll behavior
-- dirty eviction behavior
-- failure paths for read and write I/O
-- wait/evict interleaving in small-capacity scenarios
+- smoke-path lifecycle behavior,
+- handle and pin/unpin semantics,
+- same-page miss ownership and recovery,
+- different-page parallel miss behavior,
+- eviction and dirty-page persistence,
+- flush consistency during re-dirty scenarios,
+- read-lock and write-stable flush behavior,
+- completion ordering and dispatcher idle behavior,
+- async flush scheduling and fairness,
+- `FlushAll()` persistence and failure propagation,
+- cleaner wakeup and background writeback behavior,
+- submit-time and completion-time writeback failures,
+- options resolution,
+- replacer correctness,
+- benchmark workload semantics.
 
-At the time of writing, the project test suite contains 17 tests and passes in both debug and ASAN configurations under the current development environment.
+At the time of writing:
+
+- the baseline debug/ASAN suite contains 27 tests,
+- the native Linux `io_uring` workflow adds 6 kernel-sensitive tests,
+- the writeback scheduler is covered by dedicated adversarial cases, including batch failure, foreground/background interaction, cleaner ownership, and in-flight `FlushAll()` coordination.
 
 ## Current Limits
 
-State 2 still does **not** mean TelePath is finished.
+State 3 still does **not** mean TelePath is finished.
 
 The following remain future work:
 
-- a real `io_uring` backend,
-- a dedicated completion thread or more advanced completion handling,
+- stronger long-running stress and soak testing,
+- more mature benchmark interpretation and reporting,
 - shared-memory telemetry transport,
-- stronger contention-aware observability,
-- larger concurrency stress coverage,
-- more mature benchmark automation,
+- a richer observability event model,
+- deeper `io_uring` optimization beyond correctness-first support,
+- NUMA-aware or contention-aware memory/layout tuning,
 - WAL / recovery,
 - transaction or query-layer features.
 
 ## Practical Conclusion
 
-State 2 is the point where TelePath becomes meaningfully closer to its intended long-term architecture.
+State 3 is the point where TelePath becomes a credible concurrent buffer-engine core rather than only a promising architecture direction.
 
 It now has:
 
-- a better memory model,
-- a more credible concurrency direction,
-- an async-ready I/O boundary,
-- richer replacement policy support,
-- and a benchmark entrypoint for early experimental work.
+- explicit miss coordination,
+- centralized completion ownership,
+- a usable asynchronous writeback path,
+- cleaner-backed dirty-page management,
+- fallback and native backend separation,
+- and a regression suite broad enough to support the next stage of implementation work.
 
-That is enough to treat State 2 as a real architectural milestone rather than just a collection of incremental patches.
+That is enough to treat State 3 as a real architectural milestone.
