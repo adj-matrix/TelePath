@@ -126,6 +126,26 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
         std::thread(&BufferManager::CompletionDispatcherLoop, this);
   } catch (...) {
     init_status_ = Status::Unavailable("failed to start completion dispatcher");
+    return;
+  }
+
+  try {
+    flush_thread_ = std::thread(&BufferManager::FlushWorkerLoop, this);
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> guard(completion_latch_);
+      completion_shutdown_ = true;
+      completion_shutdown_status_ =
+          Status::Unavailable("failed to start flush scheduler");
+    }
+    completion_cv_.notify_all();
+    if (disk_backend_ != nullptr) {
+      disk_backend_->Shutdown();
+    }
+    if (completion_thread_.joinable()) {
+      completion_thread_.join();
+    }
+    init_status_ = Status::Unavailable("failed to start flush scheduler");
   }
 }
 
@@ -139,6 +159,15 @@ BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
                     std::move(telemetry_sink)) {}
 
 BufferManager::~BufferManager() {
+  {
+    std::lock_guard<std::mutex> guard(flush_latch_);
+    flush_shutdown_ = true;
+  }
+  flush_cv_.notify_all();
+  if (flush_thread_.joinable()) {
+    flush_thread_.join();
+  }
+
   {
     std::lock_guard<std::mutex> guard(completion_latch_);
     completion_shutdown_ = true;
@@ -295,61 +324,115 @@ Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
     return Status::InvalidArgument("invalid frame id");
   }
 
-  BufferTag tag;
-  bool should_flush = false;
-  uint64_t dirty_generation = 0;
-  {
-    BufferDescriptor &descriptor = descriptors_[frame_id];
-    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-    if (!descriptor.is_valid || descriptor.state != BufferFrameState::kResident ||
-        !descriptor.is_dirty) {
-      return Status::Ok();
+  while (true) {
+    BufferTag tag;
+    uint64_t dirty_generation = 0;
+    bool waited_for_existing_flush = false;
+    {
+      BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::unique_lock<std::mutex> descriptor_guard(descriptor.latch);
+      while (descriptor.flush_queued || descriptor.flush_in_flight) {
+        waited_for_existing_flush = true;
+        descriptor.io_cv.wait(descriptor_guard, [&descriptor]() {
+          return !descriptor.flush_queued && !descriptor.flush_in_flight;
+        });
+      }
+      if (waited_for_existing_flush && !descriptor.last_flush_status.ok()) {
+        return descriptor.last_flush_status;
+      }
+      if (!descriptor.is_valid || descriptor.state != BufferFrameState::kResident ||
+          !descriptor.is_dirty) {
+        return Status::Ok();
+      }
+
+      tag = descriptor.tag;
+      dirty_generation = descriptor.dirty_generation;
+      descriptor.flush_queued = true;
+      descriptor.last_flush_status = Status::Ok();
     }
-    tag = descriptor.tag;
-    dirty_generation = descriptor.dirty_generation;
-    should_flush = true;
-  }
 
-  if (!should_flush) {
-    return Status::Ok();
-  }
+    std::vector<std::byte> flush_snapshot(page_size_);
+    if (stable_data != nullptr) {
+      std::memcpy(flush_snapshot.data(), stable_data, page_size_);
+    } else {
+      const BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::shared_lock<std::shared_mutex> content_guard(
+          descriptor.content_latch);
+      std::memcpy(flush_snapshot.data(), GetFrameData(frame_id), page_size_);
+    }
 
-  std::vector<std::byte> flush_snapshot(page_size_);
-  if (stable_data != nullptr) {
-    std::memcpy(flush_snapshot.data(), stable_data, page_size_);
-  } else {
-    const BufferDescriptor &descriptor = descriptors_[frame_id];
-    std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch);
-    std::memcpy(flush_snapshot.data(), GetFrameData(frame_id), page_size_);
-  }
+    auto task = std::make_shared<FlushTask>();
+    task->frame_id = frame_id;
+    task->tag = tag;
+    task->generation = dirty_generation;
+    task->clear_dirty_on_success = true;
+    task->snapshot = std::move(flush_snapshot);
 
-  Status status =
-      [&]() -> Status {
-        Result<uint64_t> submit_result =
-            disk_backend_->SubmitWrite(tag, flush_snapshot.data(), page_size_);
-        if (!submit_result.ok()) {
-          return submit_result.status();
-        }
-        RegisterDiskRequest(submit_result.value());
-        return WaitForDiskRequest(submit_result.value());
-      }();
-  if (!status.ok()) {
-    return status;
-  }
+    Status enqueue_status = QueueFlushTask(task);
+    if (!enqueue_status.ok()) {
+      BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      descriptor.flush_queued = false;
+      descriptor.last_flush_status = enqueue_status;
+      descriptor.io_cv.notify_all();
+      return enqueue_status;
+    }
 
-  {
-    BufferDescriptor &descriptor = descriptors_[frame_id];
-    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-    if (descriptor.is_valid && descriptor.state == BufferFrameState::kResident &&
-        descriptor.tag == tag &&
-        descriptor.dirty_generation == dirty_generation) {
-      descriptor.is_dirty = false;
+    Status wait_status = WaitForFlushTask(task);
+    if (!wait_status.ok()) {
+      return wait_status;
     }
   }
+}
 
-  telemetry_sink_->RecordDiskWrite(tag);
-  telemetry_sink_->RecordDirtyFlush(tag);
+Status BufferManager::QueueFlushTask(const std::shared_ptr<FlushTask> &task) {
+  std::lock_guard<std::mutex> guard(flush_latch_);
+  if (flush_shutdown_) {
+    return Status::Unavailable("flush scheduler is shutting down");
+  }
+  flush_queue_.push_back(task);
+  flush_cv_.notify_one();
   return Status::Ok();
+}
+
+Status BufferManager::WaitForFlushTask(const std::shared_ptr<FlushTask> &task) {
+  std::unique_lock<std::mutex> lock(task->latch);
+  task->cv.wait(lock, [&task]() { return task->completed; });
+  return task->status;
+}
+
+Status BufferManager::FlushEvictedPage(const FrameReservation &reservation) {
+  std::vector<std::byte> evicted_snapshot(page_size_);
+  {
+    const BufferDescriptor &descriptor = descriptors_[reservation.frame_id];
+    std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch);
+    std::memcpy(evicted_snapshot.data(), GetFrameData(reservation.frame_id),
+                page_size_);
+  }
+
+  auto task = std::make_shared<FlushTask>();
+  task->frame_id = reservation.frame_id;
+  task->tag = reservation.evicted_tag;
+  task->generation = reservation.evicted_dirty_generation;
+  task->clear_dirty_on_success = false;
+  task->snapshot = std::move(evicted_snapshot);
+
+  Status enqueue_status = QueueFlushTask(task);
+  if (!enqueue_status.ok()) {
+    return enqueue_status;
+  }
+
+  return WaitForFlushTask(task);
+}
+
+void BufferManager::CompleteFlushTask(const std::shared_ptr<FlushTask> &task,
+                                      const Status &status) {
+  {
+    std::lock_guard<std::mutex> guard(task->latch);
+    task->completed = true;
+    task->status = status;
+  }
+  task->cv.notify_all();
 }
 
 bool BufferManager::ValidateFrame(FrameId frame_id) const {
@@ -533,7 +616,8 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
 
     BufferDescriptor &descriptor = descriptors_[frame_id];
     std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-    if (descriptor.pin_count != 0 || descriptor.io_in_flight) {
+    if (descriptor.pin_count != 0 || descriptor.io_in_flight ||
+        descriptor.flush_queued || descriptor.flush_in_flight) {
       continue;
     }
 
@@ -575,7 +659,10 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
     descriptor.is_valid = false;
     descriptor.state = BufferFrameState::kLoading;
     descriptor.io_in_flight = false;
+    descriptor.flush_queued = false;
+    descriptor.flush_in_flight = false;
     descriptor.last_io_status = Status::Ok();
+    descriptor.last_flush_status = Status::Ok();
     return FrameReservation{frame_id, had_evicted_page, evicted_tag, evicted_dirty,
                             evicted_dirty_generation};
   }
@@ -586,41 +673,7 @@ Result<FrameId> BufferManager::CompleteReservation(
   const FrameId frame_id = reservation.frame_id;
 
   if (reservation.had_evicted_page && reservation.evicted_dirty) {
-    std::vector<std::byte> evicted_snapshot(page_size_);
-    {
-      const BufferDescriptor &descriptor = descriptors_[frame_id];
-      std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch);
-      std::memcpy(evicted_snapshot.data(), GetFrameData(frame_id), page_size_);
-    }
-    {
-      BufferDescriptor &descriptor = descriptors_[frame_id];
-      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-      descriptor.io_in_flight = true;
-      descriptor.last_io_status = Status::Ok();
-    }
-
-    Result<uint64_t> write_submit = disk_backend_->SubmitWrite(
-        reservation.evicted_tag, evicted_snapshot.data(), page_size_);
-    if (!write_submit.ok()) {
-      {
-        BufferDescriptor &descriptor = descriptors_[frame_id];
-        std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-        descriptor.io_in_flight = false;
-      }
-      RestoreFrameAfterFailedEviction(frame_id, reservation.evicted_tag,
-                                      reservation.evicted_dirty,
-                                      reservation.evicted_dirty_generation);
-      return write_submit.status();
-    }
-
-    RegisterDiskRequest(write_submit.value());
-    Status flush_status = WaitForDiskRequest(write_submit.value());
-    {
-      BufferDescriptor &descriptor = descriptors_[frame_id];
-      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-      descriptor.io_in_flight = false;
-      descriptor.last_io_status = flush_status;
-    }
+    Status flush_status = FlushEvictedPage(reservation);
     if (!flush_status.ok()) {
       RestoreFrameAfterFailedEviction(frame_id, reservation.evicted_tag,
                                       reservation.evicted_dirty,
@@ -659,7 +712,10 @@ Result<FrameId> BufferManager::CompleteReservation(
     descriptor.is_valid = false;
     descriptor.state = BufferFrameState::kFree;
     descriptor.io_in_flight = false;
+    descriptor.flush_queued = false;
+    descriptor.flush_in_flight = false;
     descriptor.last_io_status = read_submit.status();
+    descriptor.last_flush_status = Status::Ok();
     descriptor.io_cv.notify_all();
     {
       std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
@@ -689,7 +745,10 @@ Result<FrameId> BufferManager::CompleteReservation(
     descriptor.is_valid = false;
     descriptor.state = BufferFrameState::kFree;
     descriptor.io_in_flight = false;
+    descriptor.flush_queued = false;
+    descriptor.flush_in_flight = false;
     descriptor.last_io_status = read_status;
+    descriptor.last_flush_status = Status::Ok();
     descriptor.io_cv.notify_all();
     {
       std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
@@ -704,7 +763,10 @@ Result<FrameId> BufferManager::CompleteReservation(
   descriptor.is_valid = true;
   descriptor.state = BufferFrameState::kResident;
   descriptor.io_in_flight = false;
+  descriptor.flush_queued = false;
+  descriptor.flush_in_flight = false;
   descriptor.last_io_status = Status::Ok();
+  descriptor.last_flush_status = Status::Ok();
   descriptor.io_cv.notify_all();
 
   replacer_->RecordAccess(frame_id);
@@ -758,11 +820,73 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
   descriptor.is_valid = true;
   descriptor.state = BufferFrameState::kResident;
   descriptor.io_in_flight = false;
+  descriptor.flush_queued = false;
+  descriptor.flush_in_flight = false;
   descriptor.last_io_status = Status::IoError("eviction flush failed");
+  descriptor.last_flush_status = Status::Ok();
   descriptor.io_cv.notify_all();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, true);
   return descriptor.last_io_status;
+}
+
+void BufferManager::FlushWorkerLoop() {
+  while (true) {
+    std::shared_ptr<FlushTask> task;
+    {
+      std::unique_lock<std::mutex> lock(flush_latch_);
+      flush_cv_.wait(lock, [this]() {
+        return flush_shutdown_ || !flush_queue_.empty();
+      });
+      if (flush_queue_.empty()) {
+        if (flush_shutdown_) {
+          return;
+        }
+        continue;
+      }
+      task = flush_queue_.front();
+      flush_queue_.pop_front();
+    }
+
+    if (task->clear_dirty_on_success) {
+      BufferDescriptor &descriptor = descriptors_[task->frame_id];
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      descriptor.flush_queued = false;
+      descriptor.flush_in_flight = true;
+      descriptor.io_cv.notify_all();
+    }
+
+    Status flush_status = [&]() -> Status {
+      Result<uint64_t> submit_result =
+          disk_backend_->SubmitWrite(task->tag, task->snapshot.data(),
+                                     page_size_);
+      if (!submit_result.ok()) {
+        return submit_result.status();
+      }
+      RegisterDiskRequest(submit_result.value());
+      return WaitForDiskRequest(submit_result.value());
+    }();
+
+    if (task->clear_dirty_on_success) {
+      BufferDescriptor &descriptor = descriptors_[task->frame_id];
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      descriptor.flush_in_flight = false;
+      descriptor.last_flush_status = flush_status;
+      if (flush_status.ok() && descriptor.is_valid &&
+          descriptor.state == BufferFrameState::kResident &&
+          descriptor.tag == task->tag &&
+          descriptor.dirty_generation == task->generation) {
+        descriptor.is_dirty = false;
+      }
+      descriptor.io_cv.notify_all();
+    }
+
+    if (flush_status.ok()) {
+      telemetry_sink_->RecordDiskWrite(task->tag);
+      telemetry_sink_->RecordDirtyFlush(task->tag);
+    }
+    CompleteFlushTask(task, flush_status);
+  }
 }
 
 Status BufferManager::WaitForDiskRequest(uint64_t request_id) {

@@ -2,6 +2,7 @@
 #define TELEPATH_BUFFER_BUFFER_DESCRIPTOR_H_
 
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <shared_mutex>
 
@@ -27,7 +28,10 @@ struct alignas(kCacheLineSize) BufferDescriptor {
   bool is_dirty{false};
   bool is_valid{false};
   bool io_in_flight{false};
+  bool flush_queued{false};
+  bool flush_in_flight{false};
   Status last_io_status{};
+  Status last_flush_status{};
   BufferFrameState state{BufferFrameState::kFree};
 };
 

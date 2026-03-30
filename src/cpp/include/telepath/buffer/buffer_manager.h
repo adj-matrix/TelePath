@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 #include <condition_variable>
+#include <deque>
 
 #include "telepath/buffer/buffer_descriptor.h"
 #include "telepath/buffer/buffer_handle.h"
@@ -85,12 +86,30 @@ class BufferManager {
     bool is_owner{false};
   };
 
+  struct FlushTask {
+    FrameId frame_id{kInvalidFrameId};
+    BufferTag tag{};
+    uint64_t generation{0};
+    bool clear_dirty_on_success{false};
+    std::vector<std::byte> snapshot;
+    std::mutex latch;
+    std::condition_variable cv;
+    bool completed{false};
+    Status status{};
+  };
+
   friend class BufferHandle;
 
   Status ReleaseFrame(FrameId frame_id);
   Status FlushFrame(FrameId frame_id);
   Status FlushFrameWithStableSource(FrameId frame_id,
                                     const std::byte *stable_data);
+  Status QueueFlushTask(const std::shared_ptr<FlushTask> &task);
+  Status WaitForFlushTask(const std::shared_ptr<FlushTask> &task);
+  Status FlushEvictedPage(const FrameReservation &reservation);
+  void CompleteFlushTask(const std::shared_ptr<FlushTask> &task,
+                         const Status &status);
+  void FlushWorkerLoop();
   Result<FrameReservation> ReserveFrameForTag(const BufferTag &tag);
   Result<FrameId> CompleteReservation(const BufferTag &tag,
                                       const FrameReservation &reservation);
@@ -138,6 +157,11 @@ class BufferManager {
   Status completion_shutdown_status_{Status::Unavailable(
       "completion dispatcher stopped")};
   std::thread completion_thread_;
+  std::mutex flush_latch_;
+  std::condition_variable flush_cv_;
+  std::deque<std::shared_ptr<FlushTask>> flush_queue_;
+  bool flush_shutdown_{false};
+  std::thread flush_thread_;
   std::vector<std::mutex> page_table_latches_;
   std::unordered_map<BufferTag, FrameId, BufferTagHash> page_table_;
   std::vector<FrameId> free_list_;

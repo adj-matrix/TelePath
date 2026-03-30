@@ -268,6 +268,15 @@ target_link_libraries(telepath_flush_all_persistence_test PRIVATE telepath)
 
 add_test(NAME telepath_flush_all_persistence_test COMMAND telepath_flush_all_persistence_test)
 
+add_executable(telepath_async_flush_scheduler_test
+  cpp/buffer/async_flush_scheduler_test.cc
+)
+
+target_link_libraries(telepath_async_flush_scheduler_test PRIVATE telepath)
+
+add_test(NAME telepath_async_flush_scheduler_test
+         COMMAND telepath_async_flush_scheduler_test)
+
 add_executable(telepath_benchmark_workload_test
   cpp/benchmark/benchmark_workload_test.cc
 )
