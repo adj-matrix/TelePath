@@ -18,6 +18,7 @@ int main() {
   assert(defaults.disk_backend.ResolveQueueDepth() == 32);
   assert(defaults.flush_worker_count == 0);
   assert(defaults.flush_submit_batch_size == 0);
+  assert(defaults.flush_foreground_burst_limit == 0);
   assert(!defaults.enable_background_cleaner);
   assert(defaults.ResolveDirtyPageHighWatermark() == 96);
   assert(defaults.ResolveDirtyPageLowWatermark() == 48);
@@ -27,6 +28,7 @@ int main() {
                                          true, 8}};
   custom.flush_worker_count = 3;
   custom.flush_submit_batch_size = 2;
+  custom.flush_foreground_burst_limit = 5;
   custom.enable_background_cleaner = true;
   custom.dirty_page_high_watermark = 10;
   custom.dirty_page_low_watermark = 8;
@@ -34,6 +36,7 @@ int main() {
   assert(custom.disk_backend.ResolveQueueDepth() == 8);
   assert(custom.flush_worker_count == 3);
   assert(custom.flush_submit_batch_size == 2);
+  assert(custom.flush_foreground_burst_limit == 5);
   assert(custom.ResolveDirtyPageHighWatermark() == 10);
   assert(custom.ResolveDirtyPageLowWatermark() == 8);
 
@@ -55,6 +58,7 @@ int main() {
   assert(manager.options().disk_backend.ResolveQueueDepth() == 8);
   assert(manager.options().flush_worker_count == 3);
   assert(manager.options().flush_submit_batch_size == 1);
+  assert(manager.options().flush_foreground_burst_limit == 5);
   assert(manager.options().enable_background_cleaner);
   assert(manager.options().dirty_page_high_watermark == 10);
   assert(manager.options().dirty_page_low_watermark == 8);

@@ -163,6 +163,12 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
           : std::max<std::size_t>(
                 1, std::min<std::size_t>(max_flush_submit_batch_size,
                                          options_.flush_submit_batch_size));
+  const std::size_t derived_flush_foreground_burst_limit =
+      std::max<std::size_t>(4, options_.flush_submit_batch_size * 4);
+  options_.flush_foreground_burst_limit =
+      options_.flush_foreground_burst_limit == 0
+          ? derived_flush_foreground_burst_limit
+          : std::max<std::size_t>(1, options_.flush_foreground_burst_limit);
 
   try {
     completion_thread_ =
@@ -1174,6 +1180,7 @@ void BufferManager::FlushWorkerLoop() {
     uint64_t request_id{0};
   };
 
+  std::size_t consecutive_foreground_flushes = 0;
   while (true) {
     std::vector<std::shared_ptr<FlushTask>> queued_tasks;
     {
@@ -1190,14 +1197,26 @@ void BufferManager::FlushWorkerLoop() {
       }
       queued_tasks.reserve(options_.flush_submit_batch_size);
       while (queued_tasks.size() < options_.flush_submit_batch_size) {
+        const bool should_serve_background =
+            !background_flush_queue_.empty() &&
+            consecutive_foreground_flushes >=
+                options_.flush_foreground_burst_limit;
+        if (should_serve_background) {
+          queued_tasks.push_back(background_flush_queue_.front());
+          background_flush_queue_.pop_front();
+          consecutive_foreground_flushes = 0;
+          continue;
+        }
         if (!foreground_flush_queue_.empty()) {
           queued_tasks.push_back(foreground_flush_queue_.front());
           foreground_flush_queue_.pop_front();
+          ++consecutive_foreground_flushes;
           continue;
         }
         if (!background_flush_queue_.empty()) {
           queued_tasks.push_back(background_flush_queue_.front());
           background_flush_queue_.pop_front();
+          consecutive_foreground_flushes = 0;
           continue;
         }
         break;

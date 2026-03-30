@@ -24,6 +24,9 @@ struct BufferManagerOptions {
   // starts waiting for completions. Set to zero to derive a backend-sensitive
   // default.
   std::size_t flush_submit_batch_size{0};
+  // Maximum number of consecutive foreground flush tasks a worker may serve
+  // while background writeback is pending. Set to zero to derive a default.
+  std::size_t flush_foreground_burst_limit{0};
   // Enables proactive background flushing for evictable dirty pages.
   bool enable_background_cleaner{false};
   // Dirty-page count that wakes the background cleaner. Set to zero to derive
