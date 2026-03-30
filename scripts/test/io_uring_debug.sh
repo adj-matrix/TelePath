@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build/io_uring_debug"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/cmake.sh"
 
-ctest --test-dir "${BUILD_DIR}" --output-on-failure
+TELEPATH_ROOT_DIR="$(telepath_root_dir)"
+
+telepath_configure_and_build io_uring_debug
+telepath_run_tests io_uring_debug

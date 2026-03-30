@@ -100,6 +100,8 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
       frame_pool_(std::make_unique<FrameMemoryPool>(options.pool_size,
                                                     options.page_size)),
       descriptors_(options.pool_size),
+      miss_table_latches_(options.ResolvePageTableStripeCount()),
+      miss_state_shards_(options.ResolvePageTableStripeCount()),
       page_table_latches_(options.ResolvePageTableStripeCount()) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
   const Status init_status = frame_pool_->Initialize();
@@ -163,43 +165,45 @@ Result<BufferHandle> BufferManager::ReadBuffer(FileId file_id, BlockId block_id)
     return std::move(handle.value());
   }
 
-  FrameId existing_frame = kInvalidFrameId;
-  std::optional<FrameReservation> reservation;
-  {
-    std::lock_guard<std::mutex> miss_guard(miss_latch_);
-    const std::size_t stripe = GetPageTableStripe(tag);
-    {
-      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-      auto it = page_table_.find(tag);
-      if (it != page_table_.end()) {
-        existing_frame = it->second;
-      }
+  MissRegistration registration = RegisterOrJoinMiss(tag);
+  if (!registration.is_owner) {
+    Result<FrameId> wait_result = WaitForMiss(registration.state);
+    if (!wait_result.ok()) {
+      return wait_result.status();
     }
-
-    if (existing_frame == kInvalidFrameId) {
-      telemetry_sink_->RecordMiss(tag);
-      Result<FrameReservation> reserve_result = ReserveFrameForTag(tag);
-      if (!reserve_result.ok()) {
-        return reserve_result.status();
-      }
-      reservation = reserve_result.value();
-    }
-  }
-
-  if (existing_frame != kInvalidFrameId) {
-    Result<BufferHandle> await_result = AwaitResidentBuffer(existing_frame, tag);
+    Result<BufferHandle> await_result =
+        AwaitResidentBuffer(wait_result.value(), tag);
     if (await_result.ok()) {
       telemetry_sink_->RecordHit(tag);
     }
     return await_result;
   }
 
-  Result<FrameId> frame_result = CompleteReservation(tag, reservation.value());
+  if (auto handle = TryReadResidentBuffer(tag); handle.has_value()) {
+    const FrameId frame_id = handle->frame_id();
+    CompleteMiss(tag, registration.state, Status::Ok(), frame_id);
+    telemetry_sink_->RecordHit(tag);
+    return std::move(handle.value());
+  }
+
+  telemetry_sink_->RecordMiss(tag);
+  Result<FrameReservation> reserve_result = ReserveFrameForTag(tag);
+  if (!reserve_result.ok()) {
+    CompleteMiss(tag, registration.state, reserve_result.status(),
+                 kInvalidFrameId);
+    return reserve_result.status();
+  }
+
+  Result<FrameId> frame_result =
+      CompleteReservation(tag, reserve_result.value());
   if (!frame_result.ok()) {
+    CompleteMiss(tag, registration.state, frame_result.status(),
+                 kInvalidFrameId);
     return frame_result.status();
   }
 
   const FrameId frame_id = frame_result.value();
+  CompleteMiss(tag, registration.state, Status::Ok(), frame_id);
   return BufferHandle(this, frame_id, tag, GetFrameData(frame_id), page_size_);
 }
 
@@ -420,6 +424,58 @@ std::size_t BufferManager::GetPageTableStripe(const BufferTag &tag) const {
   return BufferTagHash{}(tag) % page_table_latches_.size();
 }
 
+std::size_t BufferManager::GetMissTableStripe(const BufferTag &tag) const {
+  return BufferTagHash{}(tag) % miss_table_latches_.size();
+}
+
+BufferManager::MissRegistration BufferManager::RegisterOrJoinMiss(
+    const BufferTag &tag) {
+  const std::size_t stripe = GetMissTableStripe(tag);
+  std::lock_guard<std::mutex> guard(miss_table_latches_[stripe]);
+  auto &shard = miss_state_shards_[stripe];
+  auto it = shard.find(tag);
+  if (it != shard.end()) {
+    return MissRegistration{it->second, false};
+  }
+
+  auto state = std::make_shared<MissState>();
+  shard.emplace(tag, state);
+  return MissRegistration{std::move(state), true};
+}
+
+void BufferManager::CompleteMiss(const BufferTag &tag,
+                                 const std::shared_ptr<MissState> &state,
+                                 const Status &status, FrameId frame_id) {
+  {
+    std::lock_guard<std::mutex> state_guard(state->latch);
+    state->status = status;
+    state->frame_id = frame_id;
+    state->completed = true;
+  }
+  state->cv.notify_all();
+
+  const std::size_t stripe = GetMissTableStripe(tag);
+  std::lock_guard<std::mutex> guard(miss_table_latches_[stripe]);
+  auto &shard = miss_state_shards_[stripe];
+  auto it = shard.find(tag);
+  if (it != shard.end() && it->second == state) {
+    shard.erase(it);
+  }
+}
+
+Result<FrameId> BufferManager::WaitForMiss(
+    const std::shared_ptr<MissState> &state) {
+  std::unique_lock<std::mutex> lock(state->latch);
+  state->cv.wait(lock, [&state]() { return state->completed; });
+  if (!state->status.ok()) {
+    return state->status;
+  }
+  if (state->frame_id == kInvalidFrameId) {
+    return Status::Internal("completed miss is missing a frame id");
+  }
+  return state->frame_id;
+}
+
 std::byte *BufferManager::GetFrameData(FrameId frame_id) {
   return frame_pool_->GetFrameData(frame_id);
 }
@@ -486,13 +542,30 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
       evicted_tag = descriptor.tag;
       evicted_dirty = descriptor.is_dirty;
       evicted_dirty_generation = descriptor.dirty_generation;
-
-      const std::size_t old_stripe = GetPageTableStripe(descriptor.tag);
-      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
-      page_table_.erase(descriptor.tag);
     } else {
       evicted_dirty = false;
       evicted_dirty_generation = 0;
+    }
+
+    const std::size_t new_stripe = GetPageTableStripe(tag);
+    const std::size_t old_stripe =
+        had_evicted_page ? GetPageTableStripe(evicted_tag) : new_stripe;
+    if (old_stripe == new_stripe) {
+      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[new_stripe]);
+      if (had_evicted_page) {
+        page_table_.erase(evicted_tag);
+      }
+      page_table_[tag] = frame_id;
+    } else if (old_stripe < new_stripe) {
+      std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
+      std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
+      page_table_.erase(evicted_tag);
+      page_table_[tag] = frame_id;
+    } else {
+      std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
+      std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
+      page_table_.erase(evicted_tag);
+      page_table_[tag] = frame_id;
     }
 
     descriptor.tag = tag;
@@ -503,12 +576,6 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
     descriptor.state = BufferFrameState::kLoading;
     descriptor.io_in_flight = false;
     descriptor.last_io_status = Status::Ok();
-
-    const std::size_t stripe = GetPageTableStripe(tag);
-    {
-      std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-      page_table_[tag] = frame_id;
-    }
     return FrameReservation{frame_id, had_evicted_page, evicted_tag, evicted_dirty,
                             evicted_dirty_generation};
   }
@@ -654,16 +721,34 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
                                                       bool was_dirty,
                                                       uint64_t dirty_generation) {
   BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::lock_guard<std::mutex> miss_guard(miss_latch_);
   std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
 
-  const std::size_t new_stripe = GetPageTableStripe(descriptor.tag);
-  {
-    std::lock_guard<std::mutex> page_table_guard(page_table_latches_[new_stripe]);
-    auto it = page_table_.find(descriptor.tag);
+  const BufferTag failed_tag = descriptor.tag;
+  const std::size_t new_stripe = GetPageTableStripe(failed_tag);
+  const std::size_t old_stripe = GetPageTableStripe(old_tag);
+  if (new_stripe == old_stripe) {
+    std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
+    auto it = page_table_.find(failed_tag);
     if (it != page_table_.end() && it->second == frame_id) {
       page_table_.erase(it);
     }
+    page_table_[old_tag] = frame_id;
+  } else if (new_stripe < old_stripe) {
+    std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
+    std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
+    auto it = page_table_.find(failed_tag);
+    if (it != page_table_.end() && it->second == frame_id) {
+      page_table_.erase(it);
+    }
+    page_table_[old_tag] = frame_id;
+  } else {
+    std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
+    std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
+    auto it = page_table_.find(failed_tag);
+    if (it != page_table_.end() && it->second == frame_id) {
+      page_table_.erase(it);
+    }
+    page_table_[old_tag] = frame_id;
   }
 
   descriptor.tag = old_tag;
@@ -675,12 +760,6 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
   descriptor.io_in_flight = false;
   descriptor.last_io_status = Status::IoError("eviction flush failed");
   descriptor.io_cv.notify_all();
-
-  const std::size_t old_stripe = GetPageTableStripe(old_tag);
-  {
-    std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
-    page_table_[old_tag] = frame_id;
-  }
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, true);
   return descriptor.last_io_status;

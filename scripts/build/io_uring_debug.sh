@@ -2,14 +2,12 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build/io_uring_debug"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/cmake.sh"
 
-rm -f "${BUILD_DIR}/CMakeCache.txt"
+TELEPATH_ROOT_DIR="$(telepath_root_dir)"
+BUILD_DIR="${TELEPATH_ROOT_DIR}/build/io_uring_debug"
 
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DTELEPATH_ENABLE_IO_URING=ON
-cmake --build "${BUILD_DIR}" -j"$(nproc)"
+telepath_configure_and_build io_uring_debug
 
 echo "io_uring debug build completed: ${BUILD_DIR}"

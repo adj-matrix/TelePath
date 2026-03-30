@@ -2,13 +2,10 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build/debug"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/cmake.sh"
 
-if [[ ! -d "${BUILD_DIR}" ]]; then
-  echo "Build directory not found: ${BUILD_DIR}"
-  echo "Run scripts/build/debug.sh first."
-  exit 1
-fi
+TELEPATH_ROOT_DIR="$(telepath_root_dir)"
 
-ctest --test-dir "${BUILD_DIR}" --output-on-failure
+telepath_configure_and_build debug
+telepath_run_tests debug

@@ -1,0 +1,106 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 16,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "TELEPATH_ENABLE_ASAN": "OFF",
+        "TELEPATH_ENABLE_LSAN": "OFF",
+        "TELEPATH_ENABLE_IO_URING": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASAN Debug",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/asan",
+      "cacheVariables": {
+        "TELEPATH_ENABLE_ASAN": "ON"
+      }
+    },
+    {
+      "name": "lsan",
+      "displayName": "ASAN+LSAN Debug",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/lsan",
+      "cacheVariables": {
+        "TELEPATH_ENABLE_ASAN": "ON",
+        "TELEPATH_ENABLE_LSAN": "ON"
+      }
+    },
+    {
+      "name": "io_uring_debug",
+      "displayName": "io_uring Debug",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/io_uring_debug",
+      "cacheVariables": {
+        "TELEPATH_ENABLE_IO_URING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "lsan",
+      "configurePreset": "lsan"
+    },
+    {
+      "name": "io_uring_debug",
+      "configurePreset": "io_uring_debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0"
+      }
+    },
+    {
+      "name": "io_uring_debug",
+      "configurePreset": "io_uring_debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "io_uring_native",
+      "configurePreset": "io_uring_debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "native_io_uring"
+        }
+      }
+    }
+  ]
+}

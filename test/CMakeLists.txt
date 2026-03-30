@@ -186,6 +186,24 @@ target_link_libraries(telepath_same_page_miss_test PRIVATE telepath)
 
 add_test(NAME telepath_same_page_miss_test COMMAND telepath_same_page_miss_test)
 
+add_executable(telepath_same_page_miss_failure_recovery_test
+  cpp/buffer/same_page_miss_failure_recovery_test.cc
+)
+
+target_link_libraries(telepath_same_page_miss_failure_recovery_test PRIVATE telepath)
+
+add_test(NAME telepath_same_page_miss_failure_recovery_test
+         COMMAND telepath_same_page_miss_failure_recovery_test)
+
+add_executable(telepath_different_page_parallel_miss_test
+  cpp/buffer/different_page_parallel_miss_test.cc
+)
+
+target_link_libraries(telepath_different_page_parallel_miss_test PRIVATE telepath)
+
+add_test(NAME telepath_different_page_parallel_miss_test
+         COMMAND telepath_different_page_parallel_miss_test)
+
 add_executable(telepath_eviction_test
   cpp/buffer/eviction_test.cc
 )

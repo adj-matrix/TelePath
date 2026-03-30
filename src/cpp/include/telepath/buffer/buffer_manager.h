@@ -72,6 +72,19 @@ class BufferManager {
     Status status{};
   };
 
+  struct MissState {
+    std::mutex latch;
+    std::condition_variable cv;
+    bool completed{false};
+    Status status{};
+    FrameId frame_id{kInvalidFrameId};
+  };
+
+  struct MissRegistration {
+    std::shared_ptr<MissState> state;
+    bool is_owner{false};
+  };
+
   friend class BufferHandle;
 
   Status ReleaseFrame(FrameId frame_id);
@@ -89,6 +102,11 @@ class BufferManager {
   Result<BufferHandle> AwaitResidentBuffer(FrameId frame_id, const BufferTag &tag);
   std::optional<BufferHandle> TryReadResidentBuffer(const BufferTag &tag);
   std::size_t GetPageTableStripe(const BufferTag &tag) const;
+  std::size_t GetMissTableStripe(const BufferTag &tag) const;
+  MissRegistration RegisterOrJoinMiss(const BufferTag &tag);
+  void CompleteMiss(const BufferTag &tag, const std::shared_ptr<MissState> &state,
+                    const Status &status, FrameId frame_id);
+  Result<FrameId> WaitForMiss(const std::shared_ptr<MissState> &state);
   Status WaitForDiskRequest(uint64_t request_id);
   void RegisterDiskRequest(uint64_t request_id);
   void CompletionDispatcherLoop();
@@ -108,7 +126,9 @@ class BufferManager {
   std::unique_ptr<FrameMemoryPool> frame_pool_;
   std::vector<BufferDescriptor> descriptors_;
 
-  std::mutex miss_latch_;
+  std::vector<std::mutex> miss_table_latches_;
+  std::vector<std::unordered_map<BufferTag, std::shared_ptr<MissState>, BufferTagHash>>
+      miss_state_shards_;
   std::mutex free_list_latch_;
   mutable std::mutex completion_latch_;
   std::condition_variable completion_cv_;

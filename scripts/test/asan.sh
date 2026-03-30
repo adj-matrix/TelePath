@@ -2,13 +2,10 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build/asan"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/cmake.sh"
 
-if [[ ! -d "${BUILD_DIR}" ]]; then
-  echo "ASAN build directory not found: ${BUILD_DIR}"
-  echo "Run scripts/build/asan.sh first."
-  exit 1
-fi
+TELEPATH_ROOT_DIR="$(telepath_root_dir)"
 
-ASAN_OPTIONS=detect_leaks=0 ctest --test-dir "${BUILD_DIR}" --output-on-failure
+telepath_configure_and_build asan
+telepath_run_tests asan

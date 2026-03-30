@@ -2,10 +2,12 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build/debug"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/cmake.sh"
 
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Debug
-cmake --build "${BUILD_DIR}" -j"$(nproc)"
+TELEPATH_ROOT_DIR="$(telepath_root_dir)"
+BUILD_DIR="${TELEPATH_ROOT_DIR}/build/debug"
+
+telepath_configure_and_build debug
 
 echo "Build completed: ${BUILD_DIR}"
