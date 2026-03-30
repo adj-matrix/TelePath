@@ -118,6 +118,8 @@ class BufferManager {
   Status FlushEvictedPage(const FrameReservation &reservation);
   void CompleteFlushTask(const std::shared_ptr<FlushTask> &task,
                          const Status &status);
+  void FinalizeFlushTask(const std::shared_ptr<FlushTask> &task,
+                         const Status &flush_status);
   void FlushWorkerLoop();
   Result<FrameReservation> ReserveFrameForTag(const BufferTag &tag);
   Result<FrameId> CompleteReservation(const BufferTag &tag,
@@ -174,7 +176,8 @@ class BufferManager {
   std::thread completion_thread_;
   std::mutex flush_latch_;
   std::condition_variable flush_cv_;
-  std::deque<std::shared_ptr<FlushTask>> flush_queue_;
+  std::deque<std::shared_ptr<FlushTask>> foreground_flush_queue_;
+  std::deque<std::shared_ptr<FlushTask>> background_flush_queue_;
   bool flush_shutdown_{false};
   std::vector<std::thread> flush_threads_;
   std::mutex cleaner_latch_;

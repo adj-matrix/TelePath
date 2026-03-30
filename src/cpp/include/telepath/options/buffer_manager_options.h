@@ -20,6 +20,10 @@ struct BufferManagerOptions {
   // Number of background flush workers. Set to zero to let the library derive
   // a backend-sensitive default.
   std::size_t flush_worker_count{0};
+  // Maximum number of writeback requests a flush worker may submit before it
+  // starts waiting for completions. Set to zero to derive a backend-sensitive
+  // default.
+  std::size_t flush_submit_batch_size{0};
   // Enables proactive background flushing for evictable dirty pages.
   bool enable_background_cleaner{false};
   // Dirty-page count that wakes the background cleaner. Set to zero to derive

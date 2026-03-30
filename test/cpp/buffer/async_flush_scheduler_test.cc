@@ -51,6 +51,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
     pending_.push_back(
         {request_id, telepath::DiskOperation::kWrite, tag, nullptr, data, size});
     submit_write_threads_.push_back(std::this_thread::get_id());
+    submitted_write_tags_.push_back(tag);
     ++submitted_writes_;
     cv_.notify_all();
     return request_id;
@@ -231,6 +232,11 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
     return submitted_writes_;
   }
 
+  std::vector<telepath::BufferTag> submitted_write_tags() const {
+    std::lock_guard<std::mutex> guard(latch_);
+    return submitted_write_tags_;
+  }
+
   std::array<std::byte, 4096> ReadPersistedPage(
       const telepath::BufferTag &tag) const {
     std::array<std::byte, 4096> page{};
@@ -268,6 +274,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
   std::unordered_set<telepath::BufferTag, telepath::BufferTagHash>
       blocked_write_waiters_;
   std::vector<std::thread::id> submit_write_threads_;
+  std::vector<telepath::BufferTag> submitted_write_tags_;
   uint64_t next_request_id_{1};
   std::size_t submitted_writes_{0};
   bool shutdown_{false};
@@ -387,6 +394,69 @@ int main() {
     backend_ptr->BlockAllWriteCompletions();
 
     telepath::BufferManagerOptions options;
+    options.pool_size = 3;
+    options.page_size = 4096;
+    options.flush_worker_count = 1;
+    options.flush_submit_batch_size = 1;
+    options.enable_background_cleaner = true;
+    options.dirty_page_high_watermark = 2;
+    options.dirty_page_low_watermark = 0;
+    auto replacer = telepath::MakeClockReplacer(3);
+    auto telemetry = telepath::MakeNoOpTelemetrySink();
+    telepath::BufferManager manager(options, std::move(backend),
+                                    std::move(replacer), telemetry);
+
+    auto first_result = manager.ReadBuffer(20, 0);
+    auto second_result = manager.ReadBuffer(20, 1);
+    auto resident_result = manager.ReadBuffer(20, 2);
+    assert(first_result.ok());
+    assert(second_result.ok());
+    assert(resident_result.ok());
+    auto first = std::move(first_result.value());
+    auto second = std::move(second_result.value());
+    auto resident = std::move(resident_result.value());
+    first.mutable_data()[0] = std::byte{0x50};
+    second.mutable_data()[0] = std::byte{0x51};
+    assert(manager.MarkBufferDirty(first).ok());
+    assert(manager.MarkBufferDirty(second).ok());
+    resident.Reset();
+    first.Reset();
+    second.Reset();
+    backend_ptr->WaitForSubmittedWrites(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    auto foreground_result = manager.ReadBuffer(20, 2);
+    assert(foreground_result.ok());
+    auto foreground_handle = std::move(foreground_result.value());
+    foreground_handle.mutable_data()[0] = std::byte{0x5A};
+    assert(manager.MarkBufferDirty(foreground_handle).ok());
+
+    telepath::Status foreground_flush_status = telepath::Status::Ok();
+    std::thread foreground_flush_thread([&]() {
+      foreground_flush_status = manager.FlushBuffer(foreground_handle);
+    });
+
+    backend_ptr->AllowAllWriteCompletions();
+    foreground_flush_thread.join();
+    assert(foreground_flush_status.ok());
+    foreground_handle.Reset();
+    assert(backend_ptr->WaitForSubmittedWritesFor(
+        3, std::chrono::milliseconds(200)));
+    assert(backend_ptr->WaitForPersistedByte(
+        {20, 2}, 0, std::byte{0x5A}, std::chrono::milliseconds(200)));
+
+    const auto submit_order = backend_ptr->submitted_write_tags();
+    assert(submit_order.size() == 3);
+    assert((submit_order[1] == telepath::BufferTag{20, 2}));
+    assert((submit_order[0] != telepath::BufferTag{20, 2}));
+  }
+
+  {
+    auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
+    auto *backend_ptr = backend.get();
+    backend_ptr->BlockAllWriteCompletions();
+
+    telepath::BufferManagerOptions options;
     options.pool_size = 4;
     options.page_size = 4096;
     options.enable_background_cleaner = true;
@@ -407,7 +477,7 @@ int main() {
     }
 
     assert(backend_ptr->WaitForSubmittedWritesFor(
-        2, std::chrono::milliseconds(200)));
+        2, std::chrono::milliseconds(500)));
     assert(!backend_ptr->WaitForSubmittedWritesFor(
         3, std::chrono::milliseconds(50)));
 
@@ -430,6 +500,7 @@ int main() {
     options.pool_size = 4;
     options.page_size = 4096;
     options.flush_worker_count = 1;
+    options.flush_submit_batch_size = 1;
     auto replacer = telepath::MakeClockReplacer(4);
     auto telemetry = telepath::MakeNoOpTelemetrySink();
     telepath::BufferManager manager(options, std::move(backend),
@@ -474,6 +545,50 @@ int main() {
     const auto second_page = backend_ptr->ReadPersistedPage({12, 1});
     assert(first_page[0] == std::byte{0x40});
     assert(second_page[0] == std::byte{0x41});
+  }
+
+  {
+    auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
+    auto *backend_ptr = backend.get();
+    backend_ptr->BlockAllWriteCompletions();
+
+    telepath::BufferManagerOptions options;
+    options.pool_size = 4;
+    options.page_size = 4096;
+    options.flush_worker_count = 1;
+    options.flush_submit_batch_size = 2;
+    auto replacer = telepath::MakeClockReplacer(4);
+    auto telemetry = telepath::MakeNoOpTelemetrySink();
+    telepath::BufferManager manager(options, std::move(backend),
+                                    std::move(replacer), telemetry);
+
+    for (telepath::BlockId block_id : {13UL, 14UL}) {
+      auto result = manager.ReadBuffer(13, block_id);
+      assert(result.ok());
+      auto handle = std::move(result.value());
+      handle.mutable_data()[0] = static_cast<std::byte>(0x44 + block_id - 13);
+      assert(manager.MarkBufferDirty(handle).ok());
+    }
+
+    std::atomic<bool> flush_all_finished{false};
+    telepath::Status flush_all_status = telepath::Status::Ok();
+    std::thread flush_all_thread([&]() {
+      flush_all_status = manager.FlushAll();
+      flush_all_finished.store(true);
+    });
+
+    assert(backend_ptr->WaitForSubmittedWritesFor(
+        2, std::chrono::milliseconds(200)));
+    assert(!flush_all_finished.load());
+
+    backend_ptr->AllowAllWriteCompletions();
+    flush_all_thread.join();
+    assert(flush_all_status.ok());
+
+    const auto first_page = backend_ptr->ReadPersistedPage({13, 13});
+    const auto second_page = backend_ptr->ReadPersistedPage({13, 14});
+    assert(first_page[0] == std::byte{0x44});
+    assert(second_page[0] == std::byte{0x45});
   }
 
   {

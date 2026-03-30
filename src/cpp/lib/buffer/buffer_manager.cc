@@ -144,6 +144,25 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
           : std::max<std::size_t>(
                 1, std::min<std::size_t>(pool_size_, options_.flush_worker_count));
   options_.flush_worker_count = flush_worker_count;
+  const std::size_t max_flush_submit_batch_size =
+      capabilities.supports_submit_batching
+          ? std::max<std::size_t>(1, capabilities.recommended_queue_depth)
+          : 1;
+  const std::size_t derived_flush_submit_batch_size =
+      capabilities.supports_submit_batching
+          ? std::max<std::size_t>(
+                1, std::min<std::size_t>(
+                       max_flush_submit_batch_size,
+                       std::max<std::size_t>(
+                           1, capabilities.recommended_queue_depth /
+                                  flush_worker_count)))
+          : 1;
+  options_.flush_submit_batch_size =
+      options_.flush_submit_batch_size == 0
+          ? derived_flush_submit_batch_size
+          : std::max<std::size_t>(
+                1, std::min<std::size_t>(max_flush_submit_batch_size,
+                                         options_.flush_submit_batch_size));
 
   try {
     completion_thread_ =
@@ -615,7 +634,11 @@ Status BufferManager::QueueFlushTask(const std::shared_ptr<FlushTask> &task) {
   if (flush_shutdown_) {
     return Status::Unavailable("flush scheduler is shutting down");
   }
-  flush_queue_.push_back(task);
+  if (task->cleaner_owned) {
+    background_flush_queue_.push_back(task);
+  } else {
+    foreground_flush_queue_.push_back(task);
+  }
   flush_cv_.notify_one();
   return Status::Ok();
 }
@@ -658,6 +681,58 @@ void BufferManager::CompleteFlushTask(const std::shared_ptr<FlushTask> &task,
     task->status = status;
   }
   task->cv.notify_all();
+}
+
+void BufferManager::FinalizeFlushTask(const std::shared_ptr<FlushTask> &task,
+                                      const Status &flush_status) {
+  if (task->clear_dirty_on_success) {
+    BufferDescriptor &descriptor = descriptors_[task->frame_id];
+    bool cleared_dirty = false;
+    bool should_requeue_cleaner = false;
+    {
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      descriptor.flush_in_flight = false;
+      descriptor.last_flush_status = flush_status;
+      if (flush_status.ok() && descriptor.is_valid &&
+          descriptor.state == BufferFrameState::kResident &&
+          descriptor.tag == task->tag &&
+          descriptor.dirty_generation == task->generation &&
+          descriptor.is_dirty) {
+        descriptor.is_dirty = false;
+        cleared_dirty = true;
+      }
+      should_requeue_cleaner =
+          descriptor.is_valid && descriptor.state == BufferFrameState::kResident &&
+          descriptor.is_dirty && descriptor.pin_count == 0 &&
+          !descriptor.flush_queued && !descriptor.flush_in_flight;
+      descriptor.io_cv.notify_all();
+    }
+    if (cleared_dirty) {
+      dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    if (should_requeue_cleaner) {
+      MaybeEnqueueCleanerCandidate(task->frame_id);
+    } else if (cleared_dirty) {
+      ResetCleanerCandidate(task->frame_id);
+    }
+  }
+
+  if (task->cleaner_owned) {
+    {
+      std::lock_guard<std::mutex> cleaner_guard(cleaner_latch_);
+      if (cleaner_inflight_flushes_ > 0) {
+        --cleaner_inflight_flushes_;
+      }
+    }
+    cleaner_cv_.notify_one();
+  }
+
+  if (flush_status.ok()) {
+    telemetry_sink_->RecordDiskWrite(task->tag);
+    telemetry_sink_->RecordDirtyFlush(task->tag);
+  }
+  NotifyCleaner();
+  CompleteFlushTask(task, flush_status);
 }
 
 bool BufferManager::ValidateFrame(FrameId frame_id) const {
@@ -1094,91 +1169,67 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
 }
 
 void BufferManager::FlushWorkerLoop() {
-  while (true) {
+  struct SubmittedFlushTask {
     std::shared_ptr<FlushTask> task;
+    uint64_t request_id{0};
+  };
+
+  while (true) {
+    std::vector<std::shared_ptr<FlushTask>> queued_tasks;
     {
       std::unique_lock<std::mutex> lock(flush_latch_);
       flush_cv_.wait(lock, [this]() {
-        return flush_shutdown_ || !flush_queue_.empty();
+        return flush_shutdown_ || !foreground_flush_queue_.empty() ||
+               !background_flush_queue_.empty();
       });
-      if (flush_queue_.empty()) {
+      if (foreground_flush_queue_.empty() && background_flush_queue_.empty()) {
         if (flush_shutdown_) {
           return;
         }
         continue;
       }
-      task = flush_queue_.front();
-      flush_queue_.pop_front();
+      queued_tasks.reserve(options_.flush_submit_batch_size);
+      while (queued_tasks.size() < options_.flush_submit_batch_size) {
+        if (!foreground_flush_queue_.empty()) {
+          queued_tasks.push_back(foreground_flush_queue_.front());
+          foreground_flush_queue_.pop_front();
+          continue;
+        }
+        if (!background_flush_queue_.empty()) {
+          queued_tasks.push_back(background_flush_queue_.front());
+          background_flush_queue_.pop_front();
+          continue;
+        }
+        break;
+      }
     }
 
-    if (task->clear_dirty_on_success) {
-      BufferDescriptor &descriptor = descriptors_[task->frame_id];
-      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-      descriptor.flush_queued = false;
-      descriptor.flush_in_flight = true;
-      descriptor.io_cv.notify_all();
-    }
+    std::vector<SubmittedFlushTask> submitted_tasks;
+    submitted_tasks.reserve(queued_tasks.size());
+    for (const auto &task : queued_tasks) {
+      if (task->clear_dirty_on_success) {
+        BufferDescriptor &descriptor = descriptors_[task->frame_id];
+        std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+        descriptor.flush_queued = false;
+        descriptor.flush_in_flight = true;
+        descriptor.io_cv.notify_all();
+      }
 
-    Status flush_status = [&]() -> Status {
       Result<uint64_t> submit_result =
           disk_backend_->SubmitWrite(task->tag, task->snapshot.data(),
                                      page_size_);
       if (!submit_result.ok()) {
-        return submit_result.status();
+        FinalizeFlushTask(task, submit_result.status());
+        continue;
       }
       RegisterDiskRequest(submit_result.value());
-      return WaitForDiskRequest(submit_result.value());
-    }();
-
-    if (task->clear_dirty_on_success) {
-      BufferDescriptor &descriptor = descriptors_[task->frame_id];
-      bool cleared_dirty = false;
-      bool should_requeue_cleaner = false;
-      {
-        std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-        descriptor.flush_in_flight = false;
-        descriptor.last_flush_status = flush_status;
-        if (flush_status.ok() && descriptor.is_valid &&
-            descriptor.state == BufferFrameState::kResident &&
-            descriptor.tag == task->tag &&
-            descriptor.dirty_generation == task->generation &&
-            descriptor.is_dirty) {
-          descriptor.is_dirty = false;
-          cleared_dirty = true;
-        }
-        should_requeue_cleaner =
-            descriptor.is_valid &&
-            descriptor.state == BufferFrameState::kResident &&
-            descriptor.is_dirty && descriptor.pin_count == 0 &&
-            !descriptor.flush_queued && !descriptor.flush_in_flight;
-        descriptor.io_cv.notify_all();
-      }
-      if (cleared_dirty) {
-        dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
-      }
-      if (should_requeue_cleaner) {
-        MaybeEnqueueCleanerCandidate(task->frame_id);
-      } else if (cleared_dirty) {
-        ResetCleanerCandidate(task->frame_id);
-      }
+      submitted_tasks.push_back({task, submit_result.value()});
     }
 
-    if (task->cleaner_owned) {
-      {
-        std::lock_guard<std::mutex> cleaner_guard(cleaner_latch_);
-        if (cleaner_inflight_flushes_ > 0) {
-          --cleaner_inflight_flushes_;
-        }
-      }
-      cleaner_cv_.notify_one();
+    for (const auto &submitted_task : submitted_tasks) {
+      FinalizeFlushTask(submitted_task.task,
+                        WaitForDiskRequest(submitted_task.request_id));
     }
-
-    if (flush_status.ok()) {
-      telemetry_sink_->RecordDiskWrite(task->tag);
-      telemetry_sink_->RecordDirtyFlush(task->tag);
-    }
-    NotifyCleaner();
-    CompleteFlushTask(task, flush_status);
   }
 }
 
