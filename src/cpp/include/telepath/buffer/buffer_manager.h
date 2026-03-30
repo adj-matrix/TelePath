@@ -1,6 +1,7 @@
 #ifndef TELEPATH_BUFFER_BUFFER_MANAGER_H_
 #define TELEPATH_BUFFER_BUFFER_MANAGER_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <condition_variable>
 #include <deque>
@@ -91,6 +93,7 @@ class BufferManager {
     BufferTag tag{};
     uint64_t generation{0};
     bool clear_dirty_on_success{false};
+    bool cleaner_owned{false};
     std::vector<std::byte> snapshot;
     std::mutex latch;
     std::condition_variable cv;
@@ -101,11 +104,15 @@ class BufferManager {
   friend class BufferHandle;
 
   Status ReleaseFrame(FrameId frame_id);
+  void ResetCleanerCandidate(FrameId frame_id);
+  void MaybeEnqueueCleanerCandidate(FrameId frame_id);
+  void SeedCleanerCandidates();
   Status FlushFrame(FrameId frame_id);
   Status FlushFrameWithStableSource(FrameId frame_id,
                                     const std::byte *stable_data);
   Result<std::shared_ptr<FlushTask>> TryScheduleFlushTask(
-      FrameId frame_id, const std::byte *stable_data, bool *was_busy);
+      FrameId frame_id, const std::byte *stable_data, bool *was_busy,
+      bool cleaner_owned);
   Status QueueFlushTask(const std::shared_ptr<FlushTask> &task);
   Status WaitForFlushTask(const std::shared_ptr<FlushTask> &task);
   Status FlushEvictedPage(const FrameReservation &reservation);
@@ -135,6 +142,8 @@ class BufferManager {
   Status WaitForDiskRequest(uint64_t request_id);
   void RegisterDiskRequest(uint64_t request_id);
   void CompletionDispatcherLoop();
+  void NotifyCleaner();
+  void BackgroundCleanerLoop();
   const std::byte *AcquireReadPointer(BufferHandle *handle) const;
   std::byte *AcquireWritePointer(BufferHandle *handle);
   std::byte *GetFrameData(FrameId frame_id);
@@ -168,6 +177,15 @@ class BufferManager {
   std::deque<std::shared_ptr<FlushTask>> flush_queue_;
   bool flush_shutdown_{false};
   std::vector<std::thread> flush_threads_;
+  std::mutex cleaner_latch_;
+  std::condition_variable cleaner_cv_;
+  bool cleaner_shutdown_{false};
+  std::thread cleaner_thread_;
+  std::atomic<std::size_t> dirty_page_count_{0};
+  std::size_t cleaner_inflight_flushes_{0};
+  std::deque<std::pair<FrameId, uint64_t>> cleaner_candidate_queue_;
+  std::vector<bool> cleaner_candidate_enqueued_;
+  std::vector<uint64_t> cleaner_candidate_generations_;
   std::vector<std::mutex> page_table_latches_;
   std::vector<std::unordered_map<BufferTag, FrameId, BufferTagHash>>
       page_table_shards_;

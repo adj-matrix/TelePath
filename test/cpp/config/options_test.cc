@@ -17,14 +17,22 @@ int main() {
   assert(defaults.ResolvePageTableStripeCount() <= defaults.pool_size);
   assert(defaults.disk_backend.ResolveQueueDepth() == 32);
   assert(defaults.flush_worker_count == 0);
+  assert(!defaults.enable_background_cleaner);
+  assert(defaults.ResolveDirtyPageHighWatermark() == 96);
+  assert(defaults.ResolveDirtyPageLowWatermark() == 48);
 
   telepath::BufferManagerOptions custom{32, 4096, 7,
                                         {telepath::DiskBackendKind::kPosix,
                                          true, 8}};
   custom.flush_worker_count = 3;
+  custom.enable_background_cleaner = true;
+  custom.dirty_page_high_watermark = 10;
+  custom.dirty_page_low_watermark = 8;
   assert(custom.ResolvePageTableStripeCount() == 7);
   assert(custom.disk_backend.ResolveQueueDepth() == 8);
   assert(custom.flush_worker_count == 3);
+  assert(custom.ResolveDirtyPageHighWatermark() == 10);
+  assert(custom.ResolveDirtyPageLowWatermark() == 8);
 
   const fs::path root = fs::temp_directory_path() / "telepath_options_test_data";
   fs::remove_all(root);
@@ -43,6 +51,9 @@ int main() {
   assert(manager.page_size() == 4096);
   assert(manager.options().disk_backend.ResolveQueueDepth() == 8);
   assert(manager.options().flush_worker_count == 3);
+  assert(manager.options().enable_background_cleaner);
+  assert(manager.options().dirty_page_high_watermark == 10);
+  assert(manager.options().dirty_page_low_watermark == 8);
 
   fs::remove_all(root);
   return 0;

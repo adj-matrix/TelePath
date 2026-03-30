@@ -102,6 +102,8 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
       descriptors_(options.pool_size),
       miss_table_latches_(options.ResolvePageTableStripeCount()),
       miss_state_shards_(options.ResolvePageTableStripeCount()),
+      cleaner_candidate_enqueued_(options.pool_size, false),
+      cleaner_candidate_generations_(options.pool_size, 0),
       page_table_latches_(options.ResolvePageTableStripeCount()),
       page_table_shards_(options.ResolvePageTableStripeCount()) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
@@ -120,6 +122,14 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
   if (disk_backend_ == nullptr) {
     init_status_ = Status::InvalidArgument("disk backend must not be null");
     return;
+  }
+
+  if (options_.enable_background_cleaner) {
+    options_.dirty_page_high_watermark = options.ResolveDirtyPageHighWatermark();
+    options_.dirty_page_low_watermark = options.ResolveDirtyPageLowWatermark();
+    if (options_.dirty_page_high_watermark == 0) {
+      options_.enable_background_cleaner = false;
+    }
   }
 
   const DiskBackendCapabilities capabilities = disk_backend_->GetCapabilities();
@@ -173,6 +183,39 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
       completion_thread_.join();
     }
     init_status_ = Status::Unavailable("failed to start flush scheduler");
+    return;
+  }
+
+  if (options_.enable_background_cleaner) {
+    try {
+      cleaner_thread_ = std::thread(&BufferManager::BackgroundCleanerLoop, this);
+    } catch (...) {
+      {
+        std::lock_guard<std::mutex> guard(completion_latch_);
+        completion_shutdown_ = true;
+        completion_shutdown_status_ =
+            Status::Unavailable("failed to start background cleaner");
+      }
+      completion_cv_.notify_all();
+      {
+        std::lock_guard<std::mutex> guard(flush_latch_);
+        flush_shutdown_ = true;
+      }
+      flush_cv_.notify_all();
+      for (auto &flush_thread : flush_threads_) {
+        if (flush_thread.joinable()) {
+          flush_thread.join();
+        }
+      }
+      if (disk_backend_ != nullptr) {
+        disk_backend_->Shutdown();
+      }
+      if (completion_thread_.joinable()) {
+        completion_thread_.join();
+      }
+      init_status_ = Status::Unavailable("failed to start background cleaner");
+      return;
+    }
   }
 }
 
@@ -186,6 +229,15 @@ BufferManager::BufferManager(std::size_t pool_size, std::size_t page_size,
                     std::move(telemetry_sink)) {}
 
 BufferManager::~BufferManager() {
+  {
+    std::lock_guard<std::mutex> guard(cleaner_latch_);
+    cleaner_shutdown_ = true;
+  }
+  cleaner_cv_.notify_all();
+  if (cleaner_thread_.joinable()) {
+    cleaner_thread_.join();
+  }
+
   {
     std::lock_guard<std::mutex> guard(flush_latch_);
     flush_shutdown_ = true;
@@ -292,13 +344,21 @@ Status BufferManager::MarkBufferDirty(const BufferHandle &handle) {
     return Status::InvalidArgument("invalid buffer handle");
   }
   BufferDescriptor &descriptor = descriptors_[handle.frame_id()];
-  std::lock_guard<std::mutex> guard(descriptor.latch);
-  if (!descriptor.is_valid || descriptor.state != BufferFrameState::kResident ||
-      descriptor.tag != handle.tag()) {
-    return Status::InvalidArgument("buffer handle refers to an invalid frame");
+  bool became_dirty = false;
+  {
+    std::lock_guard<std::mutex> guard(descriptor.latch);
+    if (!descriptor.is_valid || descriptor.state != BufferFrameState::kResident ||
+        descriptor.tag != handle.tag()) {
+      return Status::InvalidArgument("buffer handle refers to an invalid frame");
+    }
+    became_dirty = !descriptor.is_dirty;
+    ++descriptor.dirty_generation;
+    descriptor.is_dirty = true;
   }
-  ++descriptor.dirty_generation;
-  descriptor.is_dirty = true;
+  if (became_dirty) {
+    dirty_page_count_.fetch_add(1, std::memory_order_acq_rel);
+    NotifyCleaner();
+  }
   return Status::Ok();
 }
 
@@ -327,7 +387,7 @@ Status BufferManager::FlushAll() {
   for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
     bool was_busy = false;
     Result<std::shared_ptr<FlushTask>> schedule_result =
-        TryScheduleFlushTask(frame_id, nullptr, &was_busy);
+        TryScheduleFlushTask(frame_id, nullptr, &was_busy, false);
     if (!schedule_result.ok()) {
       return schedule_result.status();
     }
@@ -363,17 +423,25 @@ Status BufferManager::ReleaseFrame(FrameId frame_id) {
     return Status::InvalidArgument("invalid frame id");
   }
   BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-  if (descriptor.pin_count == 0) {
-    return Status::Internal("pin count underflow");
+  bool became_evictable_dirty = false;
+  {
+    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+    if (descriptor.pin_count == 0) {
+      return Status::Internal("pin count underflow");
+    }
+    if (descriptor.state != BufferFrameState::kResident || !descriptor.is_valid ||
+        descriptor.io_in_flight) {
+      return Status::Internal("attempted to release a non-resident frame");
+    }
+    --descriptor.pin_count;
+    if (descriptor.pin_count == 0) {
+      replacer_->SetEvictable(frame_id, true);
+      became_evictable_dirty = descriptor.is_dirty;
+    }
   }
-  if (descriptor.state != BufferFrameState::kResident || !descriptor.is_valid ||
-      descriptor.io_in_flight) {
-    return Status::Internal("attempted to release a non-resident frame");
-  }
-  --descriptor.pin_count;
-  if (descriptor.pin_count == 0) {
-    replacer_->SetEvictable(frame_id, true);
+  if (became_evictable_dirty) {
+    MaybeEnqueueCleanerCandidate(frame_id);
+    NotifyCleaner();
   }
   return Status::Ok();
 }
@@ -382,10 +450,54 @@ Status BufferManager::FlushFrame(FrameId frame_id) {
   return FlushFrameWithStableSource(frame_id, nullptr);
 }
 
+void BufferManager::ResetCleanerCandidate(FrameId frame_id) {
+  if (!options_.enable_background_cleaner || !ValidateFrame(frame_id)) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(cleaner_latch_);
+  cleaner_candidate_enqueued_[frame_id] = false;
+  ++cleaner_candidate_generations_[frame_id];
+}
+
+void BufferManager::MaybeEnqueueCleanerCandidate(FrameId frame_id) {
+  if (!options_.enable_background_cleaner || !ValidateFrame(frame_id)) {
+    return;
+  }
+  std::lock_guard<std::mutex> guard(cleaner_latch_);
+  if (cleaner_candidate_enqueued_[frame_id]) {
+    return;
+  }
+  cleaner_candidate_enqueued_[frame_id] = true;
+  cleaner_candidate_queue_.emplace_back(frame_id,
+                                        cleaner_candidate_generations_[frame_id]);
+}
+
+void BufferManager::SeedCleanerCandidates() {
+  if (!options_.enable_background_cleaner) {
+    return;
+  }
+
+  for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
+    bool should_enqueue = false;
+    {
+      BufferDescriptor &descriptor = descriptors_[frame_id];
+      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+      should_enqueue = descriptor.is_valid &&
+                       descriptor.state == BufferFrameState::kResident &&
+                       descriptor.is_dirty && descriptor.pin_count == 0 &&
+                       !descriptor.flush_queued && !descriptor.flush_in_flight;
+    }
+    if (should_enqueue) {
+      MaybeEnqueueCleanerCandidate(frame_id);
+    }
+  }
+}
+
 Result<std::shared_ptr<BufferManager::FlushTask>>
 BufferManager::TryScheduleFlushTask(FrameId frame_id,
                                     const std::byte *stable_data,
-                                    bool *was_busy) {
+                                    bool *was_busy,
+                                    bool cleaner_owned) {
   if (was_busy != nullptr) {
     *was_busy = false;
   }
@@ -417,6 +529,12 @@ BufferManager::TryScheduleFlushTask(FrameId frame_id,
           !descriptor.is_dirty) {
         return std::shared_ptr<FlushTask>{};
       }
+      if (cleaner_owned && descriptor.pin_count != 0) {
+        if (was_busy != nullptr) {
+          *was_busy = true;
+        }
+        return std::shared_ptr<FlushTask>{};
+      }
 
       tag = descriptor.tag;
       dirty_generation = descriptor.dirty_generation;
@@ -439,10 +557,24 @@ BufferManager::TryScheduleFlushTask(FrameId frame_id,
     task->tag = tag;
     task->generation = dirty_generation;
     task->clear_dirty_on_success = true;
+    task->cleaner_owned = cleaner_owned;
     task->snapshot = std::move(flush_snapshot);
 
+    if (cleaner_owned) {
+      std::lock_guard<std::mutex> cleaner_guard(cleaner_latch_);
+      ++cleaner_inflight_flushes_;
+    }
     Status enqueue_status = QueueFlushTask(task);
     if (!enqueue_status.ok()) {
+      if (cleaner_owned) {
+        {
+          std::lock_guard<std::mutex> cleaner_guard(cleaner_latch_);
+          if (cleaner_inflight_flushes_ > 0) {
+            --cleaner_inflight_flushes_;
+          }
+        }
+        cleaner_cv_.notify_one();
+      }
       BufferDescriptor &descriptor = descriptors_[frame_id];
       std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
       descriptor.flush_queued = false;
@@ -462,10 +594,8 @@ Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
   }
 
   while (true) {
-    bool was_busy = false;
     Result<std::shared_ptr<FlushTask>> schedule_result =
-        TryScheduleFlushTask(frame_id, stable_data, &was_busy);
-    (void)was_busy;
+        TryScheduleFlushTask(frame_id, stable_data, nullptr, false);
     if (!schedule_result.ok()) {
       return schedule_result.status();
     }
@@ -722,8 +852,12 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
 
     BufferDescriptor &descriptor = descriptors_[frame_id];
     std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-    if (descriptor.pin_count != 0 || descriptor.io_in_flight ||
-        descriptor.flush_queued || descriptor.flush_in_flight) {
+    if (descriptor.pin_count != 0) {
+      continue;
+    }
+    if (descriptor.io_in_flight || descriptor.flush_queued ||
+        descriptor.flush_in_flight) {
+      replacer_->SetEvictable(frame_id, true);
       continue;
     }
 
@@ -759,6 +893,8 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
       page_table_shards_[new_stripe][tag] = frame_id;
     }
 
+    const bool removed_dirty_page = had_evicted_page && descriptor.is_dirty;
+    ResetCleanerCandidate(frame_id);
     descriptor.tag = tag;
     descriptor.pin_count = 1;
     descriptor.dirty_generation = 0;
@@ -770,6 +906,10 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
     descriptor.flush_in_flight = false;
     descriptor.last_io_status = Status::Ok();
     descriptor.last_flush_status = Status::Ok();
+    if (removed_dirty_page) {
+      dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
+      NotifyCleaner();
+    }
     return FrameReservation{frame_id, had_evicted_page, evicted_tag, evicted_dirty,
                             evicted_dirty_generation};
   }
@@ -825,6 +965,7 @@ Result<FrameId> BufferManager::CompleteReservation(
     descriptor.last_io_status = read_submit.status();
     descriptor.last_flush_status = Status::Ok();
     descriptor.io_cv.notify_all();
+    ResetCleanerCandidate(frame_id);
     {
       std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
       free_list_.push_back(frame_id);
@@ -859,6 +1000,7 @@ Result<FrameId> BufferManager::CompleteReservation(
     descriptor.last_io_status = read_status;
     descriptor.last_flush_status = Status::Ok();
     descriptor.io_cv.notify_all();
+    ResetCleanerCandidate(frame_id);
     {
       std::lock_guard<std::mutex> free_list_guard(free_list_latch_);
       free_list_.push_back(frame_id);
@@ -877,6 +1019,7 @@ Result<FrameId> BufferManager::CompleteReservation(
   descriptor.last_io_status = Status::Ok();
   descriptor.last_flush_status = Status::Ok();
   descriptor.io_cv.notify_all();
+  ResetCleanerCandidate(frame_id);
 
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
@@ -939,8 +1082,14 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
   descriptor.last_io_status = Status::IoError("eviction flush failed");
   descriptor.last_flush_status = Status::Ok();
   descriptor.io_cv.notify_all();
+  ResetCleanerCandidate(frame_id);
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, true);
+  if (was_dirty) {
+    dirty_page_count_.fetch_add(1, std::memory_order_acq_rel);
+    MaybeEnqueueCleanerCandidate(frame_id);
+    NotifyCleaner();
+  }
   return descriptor.last_io_status;
 }
 
@@ -983,22 +1132,52 @@ void BufferManager::FlushWorkerLoop() {
 
     if (task->clear_dirty_on_success) {
       BufferDescriptor &descriptor = descriptors_[task->frame_id];
-      std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-      descriptor.flush_in_flight = false;
-      descriptor.last_flush_status = flush_status;
-      if (flush_status.ok() && descriptor.is_valid &&
-          descriptor.state == BufferFrameState::kResident &&
-          descriptor.tag == task->tag &&
-          descriptor.dirty_generation == task->generation) {
-        descriptor.is_dirty = false;
+      bool cleared_dirty = false;
+      bool should_requeue_cleaner = false;
+      {
+        std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+        descriptor.flush_in_flight = false;
+        descriptor.last_flush_status = flush_status;
+        if (flush_status.ok() && descriptor.is_valid &&
+            descriptor.state == BufferFrameState::kResident &&
+            descriptor.tag == task->tag &&
+            descriptor.dirty_generation == task->generation &&
+            descriptor.is_dirty) {
+          descriptor.is_dirty = false;
+          cleared_dirty = true;
+        }
+        should_requeue_cleaner =
+            descriptor.is_valid &&
+            descriptor.state == BufferFrameState::kResident &&
+            descriptor.is_dirty && descriptor.pin_count == 0 &&
+            !descriptor.flush_queued && !descriptor.flush_in_flight;
+        descriptor.io_cv.notify_all();
       }
-      descriptor.io_cv.notify_all();
+      if (cleared_dirty) {
+        dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
+      }
+      if (should_requeue_cleaner) {
+        MaybeEnqueueCleanerCandidate(task->frame_id);
+      } else if (cleared_dirty) {
+        ResetCleanerCandidate(task->frame_id);
+      }
+    }
+
+    if (task->cleaner_owned) {
+      {
+        std::lock_guard<std::mutex> cleaner_guard(cleaner_latch_);
+        if (cleaner_inflight_flushes_ > 0) {
+          --cleaner_inflight_flushes_;
+        }
+      }
+      cleaner_cv_.notify_one();
     }
 
     if (flush_status.ok()) {
       telemetry_sink_->RecordDiskWrite(task->tag);
       telemetry_sink_->RecordDirtyFlush(task->tag);
     }
+    NotifyCleaner();
     CompleteFlushTask(task, flush_status);
   }
 }
@@ -1063,6 +1242,94 @@ void BufferManager::CompletionDispatcherLoop() {
       --outstanding_disk_requests_;
     }
     completion_cv_.notify_all();
+  }
+}
+
+void BufferManager::NotifyCleaner() {
+  if (!options_.enable_background_cleaner) {
+    return;
+  }
+  cleaner_cv_.notify_one();
+}
+
+void BufferManager::BackgroundCleanerLoop() {
+  while (true) {
+    std::unique_lock<std::mutex> cleaner_lock(cleaner_latch_);
+    cleaner_cv_.wait(cleaner_lock, [this]() {
+      return cleaner_shutdown_ ||
+             dirty_page_count_.load(std::memory_order_acquire) >=
+                 options_.dirty_page_high_watermark;
+    });
+    if (cleaner_shutdown_) {
+      return;
+    }
+
+    while (!cleaner_shutdown_) {
+      const std::size_t dirty_snapshot =
+          dirty_page_count_.load(std::memory_order_acquire);
+      if (dirty_snapshot < options_.dirty_page_high_watermark) {
+        break;
+      }
+
+      const std::size_t target = options_.dirty_page_low_watermark;
+      const std::size_t flush_budget =
+          dirty_snapshot > target ? dirty_snapshot - target : 0;
+      if (flush_budget == 0) {
+        break;
+      }
+
+      if (cleaner_inflight_flushes_ >= flush_budget) {
+        cleaner_cv_.wait(cleaner_lock, [this, flush_budget]() {
+          return cleaner_shutdown_ ||
+                 dirty_page_count_.load(std::memory_order_acquire) <
+                     options_.dirty_page_high_watermark ||
+                 cleaner_inflight_flushes_ < flush_budget;
+        });
+        continue;
+      }
+
+      if (cleaner_candidate_queue_.empty()) {
+        cleaner_lock.unlock();
+        SeedCleanerCandidates();
+        cleaner_lock.lock();
+        if (cleaner_candidate_queue_.empty()) {
+          break;
+        }
+      }
+
+      FrameId frame_id = kInvalidFrameId;
+      while (!cleaner_candidate_queue_.empty()) {
+        const auto [candidate_frame_id, candidate_generation] =
+            cleaner_candidate_queue_.front();
+        cleaner_candidate_queue_.pop_front();
+        if (!ValidateFrame(candidate_frame_id)) {
+          continue;
+        }
+        if (!cleaner_candidate_enqueued_[candidate_frame_id]) {
+          continue;
+        }
+        if (cleaner_candidate_generations_[candidate_frame_id] !=
+            candidate_generation) {
+          continue;
+        }
+        cleaner_candidate_enqueued_[candidate_frame_id] = false;
+        frame_id = candidate_frame_id;
+        break;
+      }
+
+      if (frame_id == kInvalidFrameId) {
+        continue;
+      }
+
+      cleaner_lock.unlock();
+      bool was_busy = false;
+      Result<std::shared_ptr<FlushTask>> schedule_result =
+          TryScheduleFlushTask(frame_id, nullptr, &was_busy, true);
+      cleaner_lock.lock();
+      if (!schedule_result.ok()) {
+        continue;
+      }
+    }
   }
 }
 
