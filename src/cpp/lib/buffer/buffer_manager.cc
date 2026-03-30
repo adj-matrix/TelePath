@@ -102,7 +102,8 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
       descriptors_(options.pool_size),
       miss_table_latches_(options.ResolvePageTableStripeCount()),
       miss_state_shards_(options.ResolvePageTableStripeCount()),
-      page_table_latches_(options.ResolvePageTableStripeCount()) {
+      page_table_latches_(options.ResolvePageTableStripeCount()),
+      page_table_shards_(options.ResolvePageTableStripeCount()) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
   const Status init_status = frame_pool_->Initialize();
   if (!init_status.ok()) {
@@ -121,6 +122,19 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
     return;
   }
 
+  const DiskBackendCapabilities capabilities = disk_backend_->GetCapabilities();
+  const std::size_t derived_flush_worker_count =
+      std::max<std::size_t>(
+          1, std::min<std::size_t>(
+                 pool_size_,
+                 std::min<std::size_t>(capabilities.recommended_queue_depth, 4)));
+  const std::size_t flush_worker_count =
+      options_.flush_worker_count == 0
+          ? derived_flush_worker_count
+          : std::max<std::size_t>(
+                1, std::min<std::size_t>(pool_size_, options_.flush_worker_count));
+  options_.flush_worker_count = flush_worker_count;
+
   try {
     completion_thread_ =
         std::thread(&BufferManager::CompletionDispatcherLoop, this);
@@ -130,7 +144,10 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
   }
 
   try {
-    flush_thread_ = std::thread(&BufferManager::FlushWorkerLoop, this);
+    flush_threads_.reserve(flush_worker_count);
+    for (std::size_t worker = 0; worker < flush_worker_count; ++worker) {
+      flush_threads_.emplace_back(&BufferManager::FlushWorkerLoop, this);
+    }
   } catch (...) {
     {
       std::lock_guard<std::mutex> guard(completion_latch_);
@@ -139,6 +156,16 @@ BufferManager::BufferManager(const BufferManagerOptions &options,
           Status::Unavailable("failed to start flush scheduler");
     }
     completion_cv_.notify_all();
+    {
+      std::lock_guard<std::mutex> guard(flush_latch_);
+      flush_shutdown_ = true;
+    }
+    flush_cv_.notify_all();
+    for (auto &flush_thread : flush_threads_) {
+      if (flush_thread.joinable()) {
+        flush_thread.join();
+      }
+    }
     if (disk_backend_ != nullptr) {
       disk_backend_->Shutdown();
     }
@@ -164,8 +191,10 @@ BufferManager::~BufferManager() {
     flush_shutdown_ = true;
   }
   flush_cv_.notify_all();
-  if (flush_thread_.joinable()) {
-    flush_thread_.join();
+  for (auto &flush_thread : flush_threads_) {
+    if (flush_thread.joinable()) {
+      flush_thread.join();
+    }
   }
 
   {
@@ -181,6 +210,11 @@ BufferManager::~BufferManager() {
   if (completion_thread_.joinable()) {
     completion_thread_.join();
   }
+
+  // Destroy the backend while frame memory is still alive so any backend-owned
+  // worker thread drains and joins before frame_pool_ and descriptors_ are
+  // released.
+  disk_backend_.reset();
 }
 
 Result<BufferHandle> BufferManager::ReadBuffer(FileId file_id, BlockId block_id) {
@@ -285,13 +319,43 @@ Status BufferManager::FlushAll() {
   if (!init_status_.ok()) {
     return init_status_;
   }
+  std::vector<std::shared_ptr<FlushTask>> queued_tasks;
+  queued_tasks.reserve(pool_size_);
+  std::vector<FrameId> busy_frames;
+  busy_frames.reserve(pool_size_);
+
   for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
-    Status status = FlushFrame(frame_id);
-    if (!status.ok()) {
-      return status;
+    bool was_busy = false;
+    Result<std::shared_ptr<FlushTask>> schedule_result =
+        TryScheduleFlushTask(frame_id, nullptr, &was_busy);
+    if (!schedule_result.ok()) {
+      return schedule_result.status();
+    }
+    if (was_busy) {
+      busy_frames.push_back(frame_id);
+      continue;
+    }
+    if (schedule_result.value() != nullptr) {
+      queued_tasks.push_back(std::move(schedule_result.value()));
     }
   }
-  return Status::Ok();
+
+  Status first_error = Status::Ok();
+  for (const auto &task : queued_tasks) {
+    Status status = WaitForFlushTask(task);
+    if (!status.ok() && first_error.ok()) {
+      first_error = status;
+    }
+  }
+
+  for (FrameId frame_id : busy_frames) {
+    Status status = FlushFrame(frame_id);
+    if (!status.ok() && first_error.ok()) {
+      first_error = status;
+    }
+  }
+
+  return first_error;
 }
 
 Status BufferManager::ReleaseFrame(FrameId frame_id) {
@@ -318,8 +382,13 @@ Status BufferManager::FlushFrame(FrameId frame_id) {
   return FlushFrameWithStableSource(frame_id, nullptr);
 }
 
-Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
-                                                 const std::byte *stable_data) {
+Result<std::shared_ptr<BufferManager::FlushTask>>
+BufferManager::TryScheduleFlushTask(FrameId frame_id,
+                                    const std::byte *stable_data,
+                                    bool *was_busy) {
+  if (was_busy != nullptr) {
+    *was_busy = false;
+  }
   if (!ValidateFrame(frame_id)) {
     return Status::InvalidArgument("invalid frame id");
   }
@@ -331,7 +400,11 @@ Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
     {
       BufferDescriptor &descriptor = descriptors_[frame_id];
       std::unique_lock<std::mutex> descriptor_guard(descriptor.latch);
-      while (descriptor.flush_queued || descriptor.flush_in_flight) {
+      if (descriptor.flush_queued || descriptor.flush_in_flight) {
+        if (stable_data == nullptr && was_busy != nullptr) {
+          *was_busy = true;
+          return std::shared_ptr<FlushTask>{};
+        }
         waited_for_existing_flush = true;
         descriptor.io_cv.wait(descriptor_guard, [&descriptor]() {
           return !descriptor.flush_queued && !descriptor.flush_in_flight;
@@ -342,7 +415,7 @@ Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
       }
       if (!descriptor.is_valid || descriptor.state != BufferFrameState::kResident ||
           !descriptor.is_dirty) {
-        return Status::Ok();
+        return std::shared_ptr<FlushTask>{};
       }
 
       tag = descriptor.tag;
@@ -378,7 +451,29 @@ Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
       return enqueue_status;
     }
 
-    Status wait_status = WaitForFlushTask(task);
+    return task;
+  }
+}
+
+Status BufferManager::FlushFrameWithStableSource(FrameId frame_id,
+                                                 const std::byte *stable_data) {
+  if (!ValidateFrame(frame_id)) {
+    return Status::InvalidArgument("invalid frame id");
+  }
+
+  while (true) {
+    bool was_busy = false;
+    Result<std::shared_ptr<FlushTask>> schedule_result =
+        TryScheduleFlushTask(frame_id, stable_data, &was_busy);
+    (void)was_busy;
+    if (!schedule_result.ok()) {
+      return schedule_result.status();
+    }
+    if (schedule_result.value() == nullptr) {
+      return Status::Ok();
+    }
+
+    Status wait_status = WaitForFlushTask(schedule_result.value());
     if (!wait_status.ok()) {
       return wait_status;
     }
@@ -481,8 +576,9 @@ std::optional<BufferHandle> BufferManager::TryReadResidentBuffer(const BufferTag
   FrameId frame_id = kInvalidFrameId;
   {
     std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-    auto it = page_table_.find(tag);
-    if (it == page_table_.end()) {
+    auto &shard = page_table_shards_[stripe];
+    auto it = shard.find(tag);
+    if (it == shard.end()) {
       return std::nullopt;
     }
     frame_id = it->second;
@@ -501,6 +597,16 @@ std::optional<BufferHandle> BufferManager::TryReadResidentBuffer(const BufferTag
   replacer_->SetEvictable(descriptor.frame_id, false);
   return BufferHandle(this, descriptor.frame_id, tag,
                       GetFrameData(descriptor.frame_id), page_size_);
+}
+
+std::unordered_map<BufferTag, FrameId, BufferTagHash> &
+BufferManager::GetPageTableShard(const BufferTag &tag) {
+  return page_table_shards_[GetPageTableStripe(tag)];
+}
+
+const std::unordered_map<BufferTag, FrameId, BufferTagHash> &
+BufferManager::GetPageTableShard(const BufferTag &tag) const {
+  return page_table_shards_[GetPageTableStripe(tag)];
 }
 
 std::size_t BufferManager::GetPageTableStripe(const BufferTag &tag) const {
@@ -636,20 +742,21 @@ Result<FrameReservation> BufferManager::ReserveFrameForTag(const BufferTag &tag)
         had_evicted_page ? GetPageTableStripe(evicted_tag) : new_stripe;
     if (old_stripe == new_stripe) {
       std::lock_guard<std::mutex> page_table_guard(page_table_latches_[new_stripe]);
+      auto &shard = page_table_shards_[new_stripe];
       if (had_evicted_page) {
-        page_table_.erase(evicted_tag);
+        shard.erase(evicted_tag);
       }
-      page_table_[tag] = frame_id;
+      shard[tag] = frame_id;
     } else if (old_stripe < new_stripe) {
       std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
       std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
-      page_table_.erase(evicted_tag);
-      page_table_[tag] = frame_id;
+      page_table_shards_[old_stripe].erase(evicted_tag);
+      page_table_shards_[new_stripe][tag] = frame_id;
     } else {
       std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
       std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
-      page_table_.erase(evicted_tag);
-      page_table_[tag] = frame_id;
+      page_table_shards_[old_stripe].erase(evicted_tag);
+      page_table_shards_[new_stripe][tag] = frame_id;
     }
 
     descriptor.tag = tag;
@@ -699,9 +806,10 @@ Result<FrameId> BufferManager::CompleteReservation(
     const std::size_t stripe = GetPageTableStripe(tag);
     {
       std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-      auto it = page_table_.find(tag);
-      if (it != page_table_.end() && it->second == frame_id) {
-        page_table_.erase(it);
+      auto &shard = page_table_shards_[stripe];
+      auto it = shard.find(tag);
+      if (it != shard.end() && it->second == frame_id) {
+        shard.erase(it);
       }
     }
     descriptor.frame_id = frame_id;
@@ -732,9 +840,10 @@ Result<FrameId> BufferManager::CompleteReservation(
     const std::size_t stripe = GetPageTableStripe(tag);
     {
       std::lock_guard<std::mutex> page_table_guard(page_table_latches_[stripe]);
-      auto it = page_table_.find(tag);
-      if (it != page_table_.end() && it->second == frame_id) {
-        page_table_.erase(it);
+      auto &shard = page_table_shards_[stripe];
+      auto it = shard.find(tag);
+      if (it != shard.end() && it->second == frame_id) {
+        shard.erase(it);
       }
     }
     descriptor.frame_id = frame_id;
@@ -790,27 +899,32 @@ Status BufferManager::RestoreFrameAfterFailedEviction(FrameId frame_id,
   const std::size_t old_stripe = GetPageTableStripe(old_tag);
   if (new_stripe == old_stripe) {
     std::lock_guard<std::mutex> page_table_guard(page_table_latches_[old_stripe]);
-    auto it = page_table_.find(failed_tag);
-    if (it != page_table_.end() && it->second == frame_id) {
-      page_table_.erase(it);
+    auto &shard = page_table_shards_[old_stripe];
+    auto it = shard.find(failed_tag);
+    if (it != shard.end() && it->second == frame_id) {
+      shard.erase(it);
     }
-    page_table_[old_tag] = frame_id;
+    shard[old_tag] = frame_id;
   } else if (new_stripe < old_stripe) {
     std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
     std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
-    auto it = page_table_.find(failed_tag);
-    if (it != page_table_.end() && it->second == frame_id) {
-      page_table_.erase(it);
+    auto &new_shard = page_table_shards_[new_stripe];
+    auto &old_shard = page_table_shards_[old_stripe];
+    auto it = new_shard.find(failed_tag);
+    if (it != new_shard.end() && it->second == frame_id) {
+      new_shard.erase(it);
     }
-    page_table_[old_tag] = frame_id;
+    old_shard[old_tag] = frame_id;
   } else {
     std::lock_guard<std::mutex> old_guard(page_table_latches_[old_stripe]);
     std::lock_guard<std::mutex> new_guard(page_table_latches_[new_stripe]);
-    auto it = page_table_.find(failed_tag);
-    if (it != page_table_.end() && it->second == frame_id) {
-      page_table_.erase(it);
+    auto &old_shard = page_table_shards_[old_stripe];
+    auto &new_shard = page_table_shards_[new_stripe];
+    auto it = new_shard.find(failed_tag);
+    if (it != new_shard.end() && it->second == frame_id) {
+      new_shard.erase(it);
     }
-    page_table_[old_tag] = frame_id;
+    old_shard[old_tag] = frame_id;
   }
 
   descriptor.tag = old_tag;

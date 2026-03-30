@@ -16,6 +16,9 @@ struct BufferManagerOptions {
   // the library derive a machine-sensitive default.
   std::size_t page_table_stripe_count{0};
   DiskBackendOptions disk_backend{};
+  // Number of background flush workers. Set to zero to let the library derive
+  // a backend-sensitive default.
+  std::size_t flush_worker_count{0};
 
   // Returns the effective stripe count after applying the default policy.
   std::size_t ResolvePageTableStripeCount() const {

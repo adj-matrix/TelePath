@@ -104,6 +104,8 @@ class BufferManager {
   Status FlushFrame(FrameId frame_id);
   Status FlushFrameWithStableSource(FrameId frame_id,
                                     const std::byte *stable_data);
+  Result<std::shared_ptr<FlushTask>> TryScheduleFlushTask(
+      FrameId frame_id, const std::byte *stable_data, bool *was_busy);
   Status QueueFlushTask(const std::shared_ptr<FlushTask> &task);
   Status WaitForFlushTask(const std::shared_ptr<FlushTask> &task);
   Status FlushEvictedPage(const FrameReservation &reservation);
@@ -120,6 +122,10 @@ class BufferManager {
   bool ValidateHandle(const BufferHandle &handle) const;
   Result<BufferHandle> AwaitResidentBuffer(FrameId frame_id, const BufferTag &tag);
   std::optional<BufferHandle> TryReadResidentBuffer(const BufferTag &tag);
+  std::unordered_map<BufferTag, FrameId, BufferTagHash> &GetPageTableShard(
+      const BufferTag &tag);
+  const std::unordered_map<BufferTag, FrameId, BufferTagHash> &GetPageTableShard(
+      const BufferTag &tag) const;
   std::size_t GetPageTableStripe(const BufferTag &tag) const;
   std::size_t GetMissTableStripe(const BufferTag &tag) const;
   MissRegistration RegisterOrJoinMiss(const BufferTag &tag);
@@ -161,9 +167,10 @@ class BufferManager {
   std::condition_variable flush_cv_;
   std::deque<std::shared_ptr<FlushTask>> flush_queue_;
   bool flush_shutdown_{false};
-  std::thread flush_thread_;
+  std::vector<std::thread> flush_threads_;
   std::vector<std::mutex> page_table_latches_;
-  std::unordered_map<BufferTag, FrameId, BufferTagHash> page_table_;
+  std::vector<std::unordered_map<BufferTag, FrameId, BufferTagHash>>
+      page_table_shards_;
   std::vector<FrameId> free_list_;
 };
 
