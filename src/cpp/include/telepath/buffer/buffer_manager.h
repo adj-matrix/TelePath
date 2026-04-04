@@ -36,6 +36,25 @@ struct FrameReservation {
   uint64_t evicted_dirty_generation{0};
 };
 
+struct FrameSnapshot {
+  FrameId frame_id{kInvalidFrameId};
+  BufferFrameState state{BufferFrameState::kFree};
+  BufferTag tag{};
+  uint32_t pin_count{0};
+  uint64_t dirty_generation{0};
+  bool is_valid{false};
+  bool is_dirty{false};
+  bool io_in_flight{false};
+  bool flush_queued{false};
+  bool flush_in_flight{false};
+};
+
+struct BufferPoolSnapshot {
+  std::size_t pool_size{0};
+  std::size_t page_size{0};
+  std::vector<FrameSnapshot> frames;
+};
+
 class BufferManager {
  public:
   // Builds a buffer manager from explicit options. Initialization failures are
@@ -63,6 +82,9 @@ class BufferManager {
   Status FlushBuffer(const BufferHandle &handle);
   // Flushes every currently resident dirty page.
   Status FlushAll();
+  // Returns a point-in-time view of frame metadata for observability and debug
+  // tooling. This does not expose direct page memory access.
+  BufferPoolSnapshot ExportSnapshot() const;
 
   std::size_t pool_size() const { return pool_size_; }
   std::size_t page_size() const { return page_size_; }

@@ -38,6 +38,14 @@ target_link_libraries(telepath_memory_layout_test PRIVATE telepath)
 
 add_test(NAME telepath_memory_layout_test COMMAND telepath_memory_layout_test)
 
+add_executable(telepath_frame_snapshot_test
+  cpp/buffer/frame_snapshot_test.cc
+)
+
+target_link_libraries(telepath_frame_snapshot_test PRIVATE telepath)
+
+add_test(NAME telepath_frame_snapshot_test COMMAND telepath_frame_snapshot_test)
+
 add_executable(telepath_options_test
   cpp/config/options_test.cc
 )
@@ -285,6 +293,14 @@ target_include_directories(telepath_benchmark_workload_test PRIVATE ${CMAKE_CURR
 target_link_libraries(telepath_benchmark_workload_test PRIVATE telepath)
 
 add_test(NAME telepath_benchmark_workload_test COMMAND telepath_benchmark_workload_test)
+
+add_executable(telepath_benchmark_json_output_test
+  cpp/benchmark/benchmark_json_output_test.cc
+)
+
+target_link_libraries(telepath_benchmark_json_output_test PRIVATE telepath)
+
+add_test(NAME telepath_benchmark_json_output_test COMMAND telepath_benchmark_json_output_test)
 
 add_executable(telepath_benchmark
   cpp/benchmark/benchmark_main.cc

@@ -289,12 +289,28 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
     return parsed
 
 
-def run_benchmark_once(request: BenchmarkRequest) -> dict[str, Any]:
+def parse_json_output(stdout: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"failed to parse benchmark JSON output:\n{stdout}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"unexpected benchmark JSON payload:\n{stdout}")
+    metrics = payload.get("metrics")
+    snapshot = payload.get("snapshot")
+    if not isinstance(metrics, dict):
+        raise RuntimeError(f"benchmark JSON payload is missing metrics:\n{stdout}")
+    if snapshot is not None and not isinstance(snapshot, dict):
+        raise RuntimeError(f"benchmark JSON payload has invalid snapshot:\n{stdout}")
+    return payload
+
+
+def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") -> dict[str, Any]:
     ensure_benchmark_binary()
     command = [
         str(BENCHMARK_BIN),
         "--output-format",
-        "csv",
+        output_format,
         "--workload",
         request.workload,
         "--pool-size",
@@ -323,11 +339,14 @@ def run_benchmark_once(request: BenchmarkRequest) -> dict[str, Any]:
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
+    if output_format == "json":
+        return parse_json_output(result.stdout)
     return parse_csv_output(result.stdout)
 
 
 def run_benchmark(request: BenchmarkRequest) -> dict[str, Any]:
-    metrics = run_benchmark_once(request)
+    benchmark_payload = run_benchmark_once(request, "json")
+    metrics = benchmark_payload["metrics"]
     response = {
         "kind": "single_run",
         "timestamp_ms": now_epoch_ms(),
@@ -341,6 +360,8 @@ def run_benchmark(request: BenchmarkRequest) -> dict[str, Any]:
             "hot_access_percent": request.hot_access_percent,
         },
         "metrics": metrics,
+        "snapshot": benchmark_payload.get("snapshot"),
+        "access_profile": benchmark_payload.get("access_profile"),
     }
     with _history_lock:
         _recent_runs.appendleft(response)
@@ -359,7 +380,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
             hotset_size=request.hotset_size,
             hot_access_percent=request.hot_access_percent,
         )
-        samples.append(run_benchmark_once(sample_request))
+        samples.append(run_benchmark_once(sample_request, "csv"))
 
     best_throughput = max(
         samples, key=lambda sample: sample["throughput_ops_per_sec"]
@@ -508,11 +529,34 @@ class TelePathDemoHandler(BaseHTTPRequestHandler):
         if not file_path.exists() or file_path.is_dir():
             file_path = FRONTEND_ROOT / "index.html"
 
+        try:
+            body = file_path.read_bytes()
+        except OSError as exc:
+            self.respond_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"failed to read static asset: {exc}"},
+            )
+            return
+
         content_type, _ = mimetypes.guess_type(str(file_path))
+        if content_type is None:
+            if file_path.suffix == ".js":
+                content_type = "application/javascript"
+            elif file_path.suffix == ".css":
+                content_type = "text/css"
+            else:
+                content_type = "text/html"
+        if content_type.startswith("text/") and "charset=" not in content_type:
+            content_type = f"{content_type}; charset=utf-8"
+
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type or "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(file_path.read_bytes())
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def respond_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
         body = json_bytes(payload)

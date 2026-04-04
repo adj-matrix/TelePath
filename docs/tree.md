@@ -80,6 +80,17 @@ Recommended split:
 - `/web/frontend` for browser assets and client-side code,
 - `/web/backend` for the lightweight HTTP layer that calls scripts or reads exported results.
 
+Frontend code inside `/web/frontend` should remain layered rather than collapsing into one file per asset type.
+
+Recommended frontend split:
+
+- `/web/frontend/index.html` for the page shell,
+- `/web/frontend/css/base.css` for layout, typography, and global tokens,
+- `/web/frontend/css/components.css` for component-level styling,
+- `/web/frontend/js/core` for shared state, API, and localization helpers,
+- `/web/frontend/js/ui` for rendering and interaction modules,
+- `/web/frontend/js/app.js` for bootstrap and top-level event wiring.
+
 Keep this directory presentation-oriented. It should not become the home of core storage-engine logic.
 
 ### `/gui`
@@ -195,6 +206,8 @@ For presentation-layer code, keep a separate tree:
 ```text
 web/
   frontend/
+    css/
+    js/
   backend/
 
 gui/

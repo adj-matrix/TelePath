@@ -58,6 +58,10 @@
     "history_title": "Run and Sweep History",
     "recent_runs": "Recent Runs",
     "recent_sweeps": "Recent Sweeps",
+    "block_map_kicker": "Frame Map",
+    "block_map_title": "Latest Buffer Pool Snapshot",
+    "block_map_note": "Shows the latest frame snapshot together with observed access counts.",
+    "block_map_empty": "Run a single benchmark pass to populate the frame snapshot.",
     "architecture_kicker": "System Framing",
     "architecture_title": "How It Fits",
     "raw_kicker": "Structured Result",
@@ -102,9 +106,17 @@
   "table": {
     "threads": "Threads",
     "throughput": "Throughput",
+    "scale": "Scale",
     "hit_rate": "Hit Rate",
     "hits": "Hits",
-    "misses": "Misses"
+    "misses": "Misses",
+    "notes": "Notes"
+  },
+  "sweep": {
+    "badges": {
+      "best_throughput": "Best Throughput",
+      "best_hit_rate": "Best Hit Rate"
+    }
   },
   "architecture": {
     "body": "TelePath's core remains a C++ buffer engine. This browser layer provides a lightweight control surface for running workloads and inspecting recent results without changing the engine's execution path.",
@@ -116,12 +128,66 @@
   "history": {
     "empty_runs": "No recent runs yet.",
     "empty_sweeps": "No recent sweeps yet.",
+    "click_hint": "Click to load",
     "run_title": "{workload} · {threads}",
     "run_subtitle": "pool {pool_size} · blocks {block_count}",
     "run_detail": "{throughput} ops/s · {hit_rate}",
     "sweep_title": "{workload} sweep",
     "sweep_subtitle": "threads {thread_candidates}",
     "sweep_detail": "{sample_count} samples · best {throughput} ops/s"
+  },
+  "block_map": {
+    "summary": {
+      "mode": "Capture",
+      "blocks": "Resident",
+      "pool": "Dirty",
+      "focus": "Access Profile",
+      "point_in_time": "Real Snapshot",
+      "resident_template": "{resident} / {total}",
+      "dirty_template": "{dirty} / {total}"
+    },
+    "detail": {
+      "kicker": "Selected Frame",
+      "title": "Frame {frame_id}",
+      "category": "State",
+      "tag": "Tag",
+      "accesses": "Accesses",
+      "share": "Access Share",
+      "pin_count": "Pin Count",
+      "flags": "Flags",
+      "tag_template": "file {file_id} · block {block_id}",
+      "free_tag": "No page assigned",
+      "note_resident": "Access profile: {mode} · Dirty generation {generation}",
+      "note_free": "This frame is currently free."
+    },
+    "states": {
+      "free": "Free",
+      "loading": "Loading",
+      "resident": "Resident"
+    },
+    "tones": {
+      "resident": "Resident Clean",
+      "dirty": "Resident Dirty",
+      "pinned": "Pinned",
+      "loading": "I/O Active",
+      "free": "Free"
+    },
+    "flags": {
+      "dirty": "Dirty",
+      "flush_queued": "Flush queued",
+      "flush_in_flight": "Flush in flight",
+      "io_in_flight": "Read I/O in flight",
+      "none": "None"
+    },
+    "profile": {
+      "none": "None",
+      "observed": "Observed",
+      "exact": "Exact",
+      "expected": "Expected",
+      "uniform": "Uniform",
+      "hotset": "Hotset {count}",
+      "recent_window": "Recent window {count}"
+    }
   },
   "workloads": {
     "hotspot": "Hotspot",

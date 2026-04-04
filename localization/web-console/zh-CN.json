@@ -58,6 +58,10 @@
     "history_title": "运行与扫描历史",
     "recent_runs": "最近运行",
     "recent_sweeps": "最近扫描",
+    "block_map_kicker": "Frame 映射",
+    "block_map_title": "最近一次缓冲池快照",
+    "block_map_note": "显示最近一次运行的 frame 状态，并附带真实访问统计。",
+    "block_map_empty": "请先运行一次单次基准测试，以生成 frame 快照。",
     "architecture_kicker": "系统说明",
     "architecture_title": "它在系统中的位置",
     "raw_kicker": "结构化结果",
@@ -102,9 +106,17 @@
   "table": {
     "threads": "线程数",
     "throughput": "吞吐量",
+    "scale": "扩展倍数",
     "hit_rate": "命中率",
     "hits": "命中",
-    "misses": "未命中"
+    "misses": "未命中",
+    "notes": "说明"
+  },
+  "sweep": {
+    "badges": {
+      "best_throughput": "最佳吞吐",
+      "best_hit_rate": "最佳命中率"
+    }
   },
   "architecture": {
     "body": "TelePath 的核心仍然是 C++ 缓冲引擎。这个网页层提供了一个轻量控制界面，用于运行负载并查看最近结果，同时不改变引擎本身的执行路径。",
@@ -116,12 +128,66 @@
   "history": {
     "empty_runs": "还没有最近运行记录。",
     "empty_sweeps": "还没有最近扫描记录。",
+    "click_hint": "点击回放",
     "run_title": "{workload} · {threads}",
     "run_subtitle": "池大小 {pool_size} · 块数 {block_count}",
     "run_detail": "{throughput} 次/秒 · {hit_rate}",
     "sweep_title": "{workload} 参数扫描",
     "sweep_subtitle": "线程 {thread_candidates}",
     "sweep_detail": "{sample_count} 个样本 · 最佳 {throughput} 次/秒"
+  },
+  "block_map": {
+    "summary": {
+      "mode": "采样方式",
+      "blocks": "驻留页",
+      "pool": "脏页数",
+      "focus": "访问画像",
+      "point_in_time": "真实快照",
+      "resident_template": "{resident} / {total}",
+      "dirty_template": "{dirty} / {total}"
+    },
+    "detail": {
+      "kicker": "当前 Frame",
+      "title": "Frame {frame_id}",
+      "category": "状态",
+      "tag": "Tag",
+      "accesses": "访问次数",
+      "share": "访问占比",
+      "pin_count": "Pin 计数",
+      "flags": "标记",
+      "tag_template": "file {file_id} · block {block_id}",
+      "free_tag": "当前未绑定页面",
+      "note_resident": "访问画像：{mode} · 脏代数 {generation}",
+      "note_free": "这个 frame 当前处于空闲状态。"
+    },
+    "states": {
+      "free": "空闲",
+      "loading": "加载中",
+      "resident": "已驻留"
+    },
+    "tones": {
+      "resident": "已驻留且干净",
+      "dirty": "已驻留且脏",
+      "pinned": "已被 Pin",
+      "loading": "I/O 进行中",
+      "free": "空闲"
+    },
+    "flags": {
+      "dirty": "脏页",
+      "flush_queued": "已排队刷盘",
+      "flush_in_flight": "刷盘中",
+      "io_in_flight": "读 I/O 进行中",
+      "none": "无"
+    },
+    "profile": {
+      "none": "无",
+      "observed": "实测",
+      "exact": "精确",
+      "expected": "期望",
+      "uniform": "均匀访问",
+      "hotset": "热点集合 {count}",
+      "recent_window": "近期窗口 {count}"
+    }
   },
   "workloads": {
     "hotspot": "热点负载",

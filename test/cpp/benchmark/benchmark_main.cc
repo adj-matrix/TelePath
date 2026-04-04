@@ -5,6 +5,8 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -22,6 +24,46 @@ using telepath::benchmark_support::ChooseBlock;
 using telepath::benchmark_support::LoadMetadata;
 using telepath::benchmark_support::NormalizeWorkloadName;
 using telepath::benchmark_support::ParseArgs;
+
+std::string JsonEscape(std::string_view input) {
+  std::string escaped;
+  escaped.reserve(input.size());
+  for (char ch : input) {
+    switch (ch) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        escaped += ch;
+        break;
+    }
+  }
+  return escaped;
+}
+
+const char *FrameStateName(telepath::BufferFrameState state) {
+  switch (state) {
+    case telepath::BufferFrameState::kFree:
+      return "free";
+    case telepath::BufferFrameState::kLoading:
+      return "loading";
+    case telepath::BufferFrameState::kResident:
+      return "resident";
+  }
+  return "unknown";
+}
 
 void PrintTextSummary(const BenchmarkOptions &options,
                       const BenchmarkMetadata &metadata, const char *backend_kind,
@@ -72,6 +114,85 @@ void PrintCsvSummary(const BenchmarkOptions &options,
             << hits << ","
             << misses << ","
             << hit_rate << "\n";
+}
+
+void PrintJsonSummary(const BenchmarkOptions &options,
+                      const BenchmarkMetadata &metadata, const char *backend_kind,
+                      std::size_t total_ops, double seconds, double throughput,
+                      uint64_t hits, uint64_t misses, double hit_rate,
+                      const telepath::BufferPoolSnapshot &snapshot,
+                      const std::vector<uint64_t> &block_access_counts) {
+  std::cout << "{\n";
+  std::cout << "  \"metrics\": {\n";
+  std::cout << "    \"workload\": \"" << JsonEscape(NormalizeWorkloadName(options.workload))
+            << "\",\n";
+  std::cout << "    \"disk_backend\": \"" << JsonEscape(backend_kind) << "\",\n";
+  std::cout << "    \"commit_sha\": \"" << JsonEscape(metadata.commit_sha) << "\",\n";
+  std::cout << "    \"runner_os\": \"" << JsonEscape(metadata.runner_os) << "\",\n";
+  std::cout << "    \"runner_arch\": \"" << JsonEscape(metadata.runner_arch) << "\",\n";
+  std::cout << "    \"threads\": " << options.thread_count << ",\n";
+  std::cout << "    \"pool_size\": " << options.pool_size << ",\n";
+  std::cout << "    \"block_count\": " << options.block_count << ",\n";
+  std::cout << "    \"ops_per_thread\": " << options.ops_per_thread << ",\n";
+  std::cout << "    \"hotset_size\": " << options.hotset_size << ",\n";
+  std::cout << "    \"hot_access_percent\": " << options.hot_access_percent << ",\n";
+  std::cout << "    \"total_ops\": " << total_ops << ",\n";
+  std::cout << "    \"seconds\": " << seconds << ",\n";
+  std::cout << "    \"throughput_ops_per_sec\": " << throughput << ",\n";
+  std::cout << "    \"buffer_hits\": " << hits << ",\n";
+  std::cout << "    \"buffer_misses\": " << misses << ",\n";
+  std::cout << "    \"hit_rate\": " << hit_rate << "\n";
+  std::cout << "  },\n";
+  std::cout << "  \"snapshot\": {\n";
+  std::cout << "    \"pool_size\": " << snapshot.pool_size << ",\n";
+  std::cout << "    \"page_size\": " << snapshot.page_size << ",\n";
+  std::cout << "    \"frames\": [\n";
+  for (std::size_t index = 0; index < snapshot.frames.size(); ++index) {
+    const telepath::FrameSnapshot &frame = snapshot.frames[index];
+    std::cout << "      {\n";
+    std::cout << "        \"frame_id\": " << frame.frame_id << ",\n";
+    std::cout << "        \"state\": \"" << FrameStateName(frame.state) << "\",\n";
+    std::cout << "        \"file_id\": " << frame.tag.file_id << ",\n";
+    std::cout << "        \"block_id\": " << frame.tag.block_id << ",\n";
+    std::cout << "        \"pin_count\": " << frame.pin_count << ",\n";
+    std::cout << "        \"dirty_generation\": " << frame.dirty_generation << ",\n";
+    std::cout << "        \"is_valid\": " << (frame.is_valid ? "true" : "false") << ",\n";
+    std::cout << "        \"is_dirty\": " << (frame.is_dirty ? "true" : "false") << ",\n";
+    std::cout << "        \"io_in_flight\": "
+              << (frame.io_in_flight ? "true" : "false") << ",\n";
+    std::cout << "        \"flush_queued\": "
+              << (frame.flush_queued ? "true" : "false") << ",\n";
+    std::cout << "        \"flush_in_flight\": "
+              << (frame.flush_in_flight ? "true" : "false") << "\n";
+    std::cout << "      }";
+    if (index + 1 < snapshot.frames.size()) {
+      std::cout << ",";
+    }
+    std::cout << "\n";
+  }
+  std::cout << "    ]\n";
+  std::cout << "  },\n";
+  std::cout << "  \"access_profile\": {\n";
+  std::cout << "    \"mode\": \"observed\",\n";
+  std::cout << "    \"blocks\": [\n";
+  for (std::size_t block_id = 0; block_id < block_access_counts.size(); ++block_id) {
+    const uint64_t accesses = block_access_counts[block_id];
+    const double share =
+        total_ops > 0 ? static_cast<double>(accesses) / static_cast<double>(total_ops)
+                      : 0.0;
+    std::cout << "      {\n";
+    std::cout << "        \"block_id\": " << block_id << ",\n";
+    std::cout << "        \"accesses\": " << accesses << ",\n";
+    std::cout << "        \"share\": " << share << "\n";
+    std::cout << "      }";
+    if (block_id + 1 < block_access_counts.size()) {
+      std::cout << ",";
+    }
+    std::cout << "\n";
+  }
+  std::cout << "    ]\n";
+  std::cout << "  }\n";
+  std::cout << "}\n";
 }
 
 }  // namespace
@@ -133,12 +254,15 @@ int main(int argc, char **argv) {
 
   std::vector<std::thread> workers;
   workers.reserve(options.thread_count);
+  std::vector<std::vector<uint64_t>> per_thread_access_counts(
+      options.thread_count, std::vector<uint64_t>(options.block_count, 0));
   for (std::size_t thread_index = 0; thread_index < options.thread_count;
        ++thread_index) {
-    workers.emplace_back([&manager, &options, thread_index]() {
+    workers.emplace_back([&manager, &options, &per_thread_access_counts, thread_index]() {
       std::mt19937_64 rng(0xBADC0FFEEULL + thread_index);
       for (std::size_t op = 0; op < options.ops_per_thread; ++op) {
         const BlockId block_id = ChooseBlock(&rng, op, thread_index, options);
+        ++per_thread_access_counts[thread_index][block_id];
         auto result = manager.ReadBuffer(1, block_id);
         if (!result.ok()) {
           continue;
@@ -165,6 +289,12 @@ int main(int argc, char **argv) {
   const double throughput = seconds > 0.0 ? total_ops / seconds : 0.0;
   const double hit_rate =
       (hits + misses) > 0 ? static_cast<double>(hits) / (hits + misses) : 0.0;
+  std::vector<uint64_t> block_access_counts(options.block_count, 0);
+  for (const auto &thread_counts : per_thread_access_counts) {
+    for (std::size_t block_id = 0; block_id < thread_counts.size(); ++block_id) {
+      block_access_counts[block_id] += thread_counts[block_id];
+    }
+  }
 
   const char *backend_kind =
       disk_backend_capabilities.kind == telepath::DiskBackendKind::kIoUring
@@ -175,6 +305,10 @@ int main(int argc, char **argv) {
   if (options.output_format == "csv") {
     PrintCsvSummary(options, metadata, backend_kind, total_ops, seconds,
                     throughput, hits, misses, hit_rate);
+  } else if (options.output_format == "json") {
+    PrintJsonSummary(options, metadata, backend_kind, total_ops, seconds,
+                     throughput, hits, misses, hit_rate,
+                     manager.ExportSnapshot(), block_access_counts);
   } else {
     PrintTextSummary(options, metadata, backend_kind, total_ops, seconds,
                      throughput, hits, misses, hit_rate);

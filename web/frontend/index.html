@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TelePath Console</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/css/base.css" />
+    <link rel="stylesheet" href="/css/components.css" />
   </head>
   <body>
     <div class="page-shell">
@@ -294,9 +295,11 @@
                   <tr>
                     <th data-i18n="table.threads">Threads</th>
                     <th data-i18n="table.throughput">Throughput</th>
+                    <th data-i18n="table.scale">Scale</th>
                     <th data-i18n="table.hit_rate">Hit Rate</th>
                     <th data-i18n="table.hits">Hits</th>
                     <th data-i18n="table.misses">Misses</th>
+                    <th data-i18n="table.notes">Notes</th>
                   </tr>
                 </thead>
                 <tbody id="sweepTableBody"></tbody>
@@ -319,6 +322,84 @@
             <div>
               <h4 class="history-title" data-i18n="panels.recent_sweeps">Recent Sweeps</h4>
               <div id="recentSweeps" class="history-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel blockmap-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.block_map_kicker">Frame Map</p>
+            <h3 data-i18n="panels.block_map_title">Latest Buffer Pool Snapshot</h3>
+          </div>
+
+          <div class="note note-cool">
+            <p data-i18n="panels.block_map_note">
+              Shows the latest frame snapshot together with workload access intensity.
+            </p>
+          </div>
+
+          <div id="blockMapEmpty" class="empty-state">
+            <p data-i18n="panels.block_map_empty">
+              Run a single benchmark pass to populate the frame snapshot.
+            </p>
+          </div>
+
+          <div id="blockMapContent" class="hidden">
+            <div class="blockmap-summary-grid">
+              <article class="summary-card">
+                <p class="summary-label" data-i18n="block_map.summary.mode">Snapshot</p>
+                <p id="blockMapMode" class="summary-value">-</p>
+              </article>
+              <article class="summary-card">
+                <p class="summary-label" data-i18n="block_map.summary.blocks">Resident</p>
+                <p id="blockMapBlocks" class="summary-value">-</p>
+              </article>
+              <article class="summary-card">
+                <p class="summary-label" data-i18n="block_map.summary.pool">Dirty</p>
+                <p id="blockMapPool" class="summary-value">-</p>
+              </article>
+              <article class="summary-card">
+                <p class="summary-label" data-i18n="block_map.summary.focus">Access Profile</p>
+                <p id="blockMapFocus" class="summary-value">-</p>
+              </article>
+            </div>
+
+            <div class="blockmap-layout">
+              <div class="blockmap-grid-shell">
+                <div id="blockMapLegend" class="blockmap-legend"></div>
+                <div id="blockMapGrid" class="blockmap-grid"></div>
+              </div>
+              <aside class="blockmap-detail">
+                <p class="panel-kicker" data-i18n="block_map.detail.kicker">Selected Frame</p>
+                <h4 id="blockMapDetailTitle">Frame 0</h4>
+                <dl class="blockmap-detail-list">
+                  <div>
+                    <dt data-i18n="block_map.detail.category">State</dt>
+                    <dd id="blockMapDetailCategory">-</dd>
+                  </div>
+                  <div>
+                    <dt data-i18n="block_map.detail.tag">Tag</dt>
+                    <dd id="blockMapDetailAccesses">-</dd>
+                  </div>
+                  <div>
+                    <dt data-i18n="block_map.detail.accesses">Accesses</dt>
+                    <dd id="blockMapDetailShare">-</dd>
+                  </div>
+                  <div>
+                    <dt data-i18n="block_map.detail.share">Access Share</dt>
+                    <dd id="blockMapDetailResidency">-</dd>
+                  </div>
+                  <div>
+                    <dt data-i18n="block_map.detail.pin_count">Pin Count</dt>
+                    <dd id="blockMapDetailPinCount">-</dd>
+                  </div>
+                  <div>
+                    <dt data-i18n="block_map.detail.flags">Flags</dt>
+                    <dd id="blockMapDetailFlags">-</dd>
+                  </div>
+                </dl>
+                <p id="blockMapDetailNote" class="blockmap-detail-note"></p>
+              </aside>
             </div>
           </div>
         </section>
@@ -353,6 +434,12 @@
       </main>
     </div>
 
-    <script src="/app.js"></script>
+    <script src="/js/core/state.js"></script>
+    <script src="/js/core/api.js"></script>
+    <script src="/js/core/i18n.js"></script>
+    <script src="/js/ui/forms.js"></script>
+    <script src="/js/ui/block-map.js"></script>
+    <script src="/js/ui/renderers.js"></script>
+    <script src="/js/app.js"></script>
   </body>
 </html>

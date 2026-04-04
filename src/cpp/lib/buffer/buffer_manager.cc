@@ -443,6 +443,31 @@ Status BufferManager::FlushAll() {
   return first_error;
 }
 
+BufferPoolSnapshot BufferManager::ExportSnapshot() const {
+  BufferPoolSnapshot snapshot;
+  snapshot.pool_size = pool_size_;
+  snapshot.page_size = page_size_;
+  snapshot.frames.reserve(descriptors_.size());
+
+  for (const BufferDescriptor &descriptor : descriptors_) {
+    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+    snapshot.frames.push_back(FrameSnapshot{
+        descriptor.frame_id,
+        descriptor.state,
+        descriptor.tag,
+        descriptor.pin_count,
+        descriptor.dirty_generation,
+        descriptor.is_valid,
+        descriptor.is_dirty,
+        descriptor.io_in_flight,
+        descriptor.flush_queued,
+        descriptor.flush_in_flight,
+    });
+  }
+
+  return snapshot;
+}
+
 Status BufferManager::ReleaseFrame(FrameId frame_id) {
   if (!ValidateFrame(frame_id)) {
     return Status::InvalidArgument("invalid frame id");
