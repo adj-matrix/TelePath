@@ -10,6 +10,8 @@
 #include "telepath/replacer/clock_replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
 
+// This test file is recommended since it could help comprehend the overall buffering procedure
+
 int main() {
   namespace fs = std::filesystem;
   using telepath::BlockId;
@@ -25,15 +27,15 @@ int main() {
 
   auto telemetry = MakeCounterTelemetrySink();
   {
-    auto disk_backend =
-        std::make_unique<PosixDiskBackend>(root.string(), 4096);
+    // Initialize the stage, classic Posix, 2 frames.
+    auto disk_backend = std::make_unique<PosixDiskBackend>(root.string(), 4096);
     auto replacer = std::make_unique<ClockReplacer>(2);
-    BufferManager manager(2, 4096, std::move(disk_backend),
-                          std::move(replacer), telemetry);
+    BufferManager manager(2, 4096, std::move(disk_backend), std::move(replacer), telemetry);
 
     const FileId file_id = 1;
     const BlockId block_id = 0;
 
+    // Cold Start and miss
     auto first_result = manager.ReadBuffer(file_id, block_id);
     assert(first_result.ok());
     telepath::BufferHandle first_handle = std::move(first_result.value());
@@ -44,6 +46,7 @@ int main() {
     assert(manager.FlushBuffer(first_handle).ok());
     first_handle.Reset();
 
+    // Twice read and hit the cache
     auto second_result = manager.ReadBuffer(file_id, block_id);
     assert(second_result.ok());
     telepath::BufferHandle second_handle = std::move(second_result.value());
@@ -53,6 +56,7 @@ int main() {
     second_handle.Reset();
   }
 
+  // Test file finally check the Telemetry
   const telepath::TelemetrySnapshot snapshot = telemetry->Snapshot();
   assert(snapshot.buffer_misses >= 1);
   assert(snapshot.disk_reads >= 1);

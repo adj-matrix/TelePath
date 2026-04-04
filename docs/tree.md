@@ -64,6 +64,30 @@ Examples:
 
 Keep CLI code thin. It should call into library code from `/src`, not reimplement logic.
 
+### `/web`
+
+Owns the browser-based presentation plane.
+
+Use this directory for:
+
+- the web frontend used for demos or dashboards,
+- the thin web backend that serves browser requests,
+- benchmark and sweep orchestration for the browser console,
+- UI assets and browser-oriented interaction logic that stay outside the core C++ library.
+
+Recommended split:
+
+- `/web/frontend` for browser assets and client-side code,
+- `/web/backend` for the lightweight HTTP layer that calls scripts or reads exported results.
+
+Keep this directory presentation-oriented. It should not become the home of core storage-engine logic.
+
+### `/gui`
+
+Owns future desktop GUI work.
+
+Keep this directory separate from `/web` so that browser-facing and desktop-facing presentation layers do not get mixed together.
+
 ### `/config`
 
 Owns static configuration templates and example experiment configs.
@@ -76,6 +100,24 @@ Examples:
 - plotting presets.
 
 Do not store generated runtime outputs here.
+
+### `/localization`
+
+Owns translatable language resources.
+
+Use this directory for:
+
+- localized README files,
+- web-console translation bundles,
+- future GUI language packs,
+- other human-language resources that should remain independent from runtime configuration.
+
+Recommended split:
+
+- `/localization/web-console` for browser UI strings,
+- top-level localized docs such as `README.zh-CN.md`.
+
+Do not mix localization payloads into `/config` unless they are genuinely machine-tuned runtime options rather than user-facing language resources.
 
 ### `/support`
 
@@ -146,6 +188,19 @@ src/
     apps/
     CMakeLists.txt
   rust/
+```
+
+For presentation-layer code, keep a separate tree:
+
+```text
+web/
+  frontend/
+  backend/
+
+gui/
+
+localization/
+  web-console/
 ```
 
 ### `/src/cpp/include/telepath`
@@ -307,7 +362,9 @@ Given the current repository state, the next clean step is:
 2. Keep historical or internal design churn out of the public doc entrypoints.
 3. Build the C++ library under `src/cpp/include/telepath` and `src/cpp/lib`.
 4. Mirror tests under `test/cpp`.
-5. Add public manuals and guides only when the behavior they describe is stable.
+5. Keep browser-facing demo code under `web/frontend` and `web/backend`.
+6. Reserve `gui/` for future desktop presentation work.
+7. Add public manuals and guides only when the behavior they describe is stable.
 
 ## 8. Canonical Ownership Summary
 
@@ -317,6 +374,8 @@ When in doubt, follow this ownership map:
 - C++ product code: `/src/cpp`
 - Rust experiments or future SDK work: `/src/rust`
 - tests and benchmarks: `/test`
+- browser presentation plane: `/web`
+- desktop presentation plane: `/gui`
 - developer tooling: `/support`
 - runtime configs and templates: `/config`
 - upstream references: `/.reference`

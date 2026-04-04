@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TelePath Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div class="brand">
+          <p class="eyebrow" data-i18n="topbar.state">TelePath</p>
+          <h1 data-i18n="topbar.console">Console</h1>
+        </div>
+        <div class="topbar-side">
+          <nav class="topnav">
+            <a href="#overview" data-i18n="nav.overview">Overview</a>
+            <a href="#single-run" data-i18n="nav.single_run">Single Run</a>
+            <a href="#sweep-lab" data-i18n="nav.sweep_lab">Sweep Lab</a>
+            <a href="#run-history" data-i18n="nav.history">History</a>
+          </nav>
+          <div class="locale-switch">
+            <label for="languageSelect" data-i18n="locale.label">Language</label>
+            <select id="languageSelect" aria-label="Language"></select>
+          </div>
+        </div>
+      </header>
+
+      <section id="overview" class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow" data-i18n="hero.eyebrow">Observable Buffer Engine</p>
+          <h2 data-i18n="hero.title">
+            Inspect buffer-pool behavior, throughput, and cache efficiency in one place.
+          </h2>
+          <p class="hero-text" data-i18n="hero.description">
+            This web layer stays outside the C++ data plane. It runs benchmark
+            workloads, captures behavior-oriented metrics, and surfaces recent
+            runs and sweep results through a lightweight control surface.
+          </p>
+          <div class="hero-pill-row">
+            <span class="hero-pill" data-i18n="hero_pills.concurrent">Concurrent Buffer Pool</span>
+            <span class="hero-pill" data-i18n="hero_pills.writeback">Async Writeback</span>
+            <span class="hero-pill" data-i18n="hero_pills.cleaner">Cleaner-Aware</span>
+            <span class="hero-pill" data-i18n="hero_pills.console">Browser Console</span>
+          </div>
+        </div>
+        <div class="hero-status">
+          <div class="status-card">
+            <p class="status-label" data-i18n="status.service">Service</p>
+            <p id="healthStatus" class="status-value">Checking...</p>
+          </div>
+          <div class="status-card">
+            <p class="status-label" data-i18n="status.benchmark_binary">Benchmark Binary</p>
+            <p id="binaryStatus" class="status-value">Unknown</p>
+          </div>
+          <div class="status-card">
+            <p class="status-label" data-i18n="status.latest_throughput">Latest Throughput</p>
+            <p id="latestThroughput" class="status-value">-</p>
+          </div>
+          <div class="status-card">
+            <p class="status-label" data-i18n="status.latest_hit_rate">Latest Hit Rate</p>
+            <p id="latestHitRate" class="status-value">-</p>
+          </div>
+        </div>
+      </section>
+
+      <main class="console-grid">
+        <section id="single-run" class="panel control-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.single_run_kicker">Single Run</p>
+            <h3 data-i18n="panels.single_run_title">Launch a Focused Benchmark Pass</h3>
+          </div>
+
+          <form id="benchmarkForm" class="control-form">
+            <label>
+              <span data-i18n="form.workload">Workload</span>
+              <select id="workload" name="workload"></select>
+            </label>
+            <label>
+              <span data-i18n="form.threads">Threads</span>
+              <input id="threads" name="threads" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.pool_size">Pool Size</span>
+              <input id="pool_size" name="pool_size" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.block_count">Block Count</span>
+              <input id="block_count" name="block_count" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.ops_per_thread">Ops / Thread</span>
+              <input id="ops_per_thread" name="ops_per_thread" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.hotset_size">Hotset Size</span>
+              <input id="hotset_size" name="hotset_size" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.hot_access_percent">Hot Access %</span>
+              <input
+                id="hot_access_percent"
+                name="hot_access_percent"
+                type="number"
+                min="1"
+                max="100"
+              />
+            </label>
+
+            <button id="runButton" type="submit">Run Benchmark</button>
+          </form>
+
+          <div class="note">
+            <p data-i18n="panels.single_run_note">
+              Use this to inspect one configuration at a time and capture a
+              clean snapshot of its current behavior.
+            </p>
+          </div>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.current_snapshot_kicker">Current Snapshot</p>
+            <h3 data-i18n="panels.current_snapshot_title">Single Run Metrics</h3>
+          </div>
+
+          <div id="resultEmpty" class="empty-state">
+            <p data-i18n="panels.single_run_empty">
+              No benchmark run yet. Launch a single run from the control panel.
+            </p>
+          </div>
+
+          <div id="resultContent" class="result-content hidden">
+            <div class="metric-grid">
+              <article class="metric-card accent">
+                <p class="metric-label" data-i18n="metrics.throughput">Throughput</p>
+                <p id="throughputValue" class="metric-value">0</p>
+                <p class="metric-unit" data-i18n="units.ops_per_sec">ops / sec</p>
+              </article>
+              <article class="metric-card">
+                <p class="metric-label" data-i18n="metrics.hit_rate">Hit Rate</p>
+                <p id="hitRateValue" class="metric-value">0%</p>
+                <div class="meter">
+                  <div id="hitRateBar" class="meter-fill"></div>
+                </div>
+              </article>
+              <article class="metric-card">
+                <p class="metric-label" data-i18n="metrics.buffer_hits">Buffer Hits</p>
+                <p id="hitsValue" class="metric-value">0</p>
+              </article>
+              <article class="metric-card">
+                <p class="metric-label" data-i18n="metrics.buffer_misses">Buffer Misses</p>
+                <p id="missesValue" class="metric-value">0</p>
+              </article>
+            </div>
+
+            <div class="bars">
+              <div class="bar-row">
+                <div class="bar-meta">
+                  <span data-i18n="metrics.hits">Hits</span>
+                  <span id="hitsMeta">0</span>
+                </div>
+                <div class="bar-track">
+                  <div id="hitsBar" class="bar-fill hits"></div>
+                </div>
+              </div>
+              <div class="bar-row">
+                <div class="bar-meta">
+                  <span data-i18n="metrics.misses">Misses</span>
+                  <span id="missesMeta">0</span>
+                </div>
+                <div class="bar-track">
+                  <div id="missesBar" class="bar-fill misses"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="summary-grid">
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.backend">Backend</p>
+                <p id="backendValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.workload">Workload</p>
+                <p id="workloadValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.total_ops">Total Ops</p>
+                <p id="opsValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.elapsed">Elapsed</p>
+                <p id="secondsValue" class="summary-value">-</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="sweep-lab" class="panel sweep-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.sweep_kicker">Sweep Lab</p>
+            <h3 data-i18n="panels.sweep_title">Compare Thread Scaling Trends</h3>
+          </div>
+
+          <form id="sweepForm" class="control-form">
+            <label>
+              <span data-i18n="form.workload">Workload</span>
+              <select id="sweep_workload" name="sweep_workload"></select>
+            </label>
+            <label>
+              <span data-i18n="form.thread_candidates">Thread Candidates</span>
+              <input
+                id="thread_candidates"
+                name="thread_candidates"
+                type="text"
+                placeholder="1,2,4,8"
+                data-i18n-placeholder="form.thread_candidates_placeholder"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.pool_size">Pool Size</span>
+              <input id="sweep_pool_size" name="sweep_pool_size" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.block_count">Block Count</span>
+              <input id="sweep_block_count" name="sweep_block_count" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.ops_per_thread">Ops / Thread</span>
+              <input
+                id="sweep_ops_per_thread"
+                name="sweep_ops_per_thread"
+                type="number"
+                min="1"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.hotset_size">Hotset Size</span>
+              <input id="sweep_hotset_size" name="sweep_hotset_size" type="number" min="1" />
+            </label>
+            <label>
+              <span data-i18n="form.hot_access_percent">Hot Access %</span>
+              <input
+                id="sweep_hot_access_percent"
+                name="sweep_hot_access_percent"
+                type="number"
+                min="1"
+                max="100"
+              />
+            </label>
+            <button id="sweepButton" type="submit">Run Sweep</button>
+          </form>
+
+          <div class="note note-cool">
+            <p data-i18n="panels.sweep_note">
+              Sweep mode runs multiple benchmark passes back-to-back and reveals
+              scaling trends more clearly than a single snapshot.
+            </p>
+          </div>
+        </section>
+
+        <section class="panel sweep-results-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.sweep_output_kicker">Sweep Output</p>
+            <h3 data-i18n="panels.sweep_output_title">Scaling View</h3>
+          </div>
+
+          <div id="sweepEmpty" class="empty-state">
+            <p data-i18n="panels.sweep_empty">
+              No sweep yet. Run a thread sweep to populate the scaling view.
+            </p>
+          </div>
+
+          <div id="sweepContent" class="hidden">
+            <div class="sweep-summary-grid">
+              <article class="metric-card accent-cool">
+                <p class="metric-label" data-i18n="metrics.best_throughput">Best Throughput</p>
+                <p id="bestThroughputValue" class="metric-value">0</p>
+                <p id="bestThroughputThreads" class="metric-unit">-</p>
+              </article>
+              <article class="metric-card">
+                <p class="metric-label" data-i18n="metrics.best_hit_rate">Best Hit Rate</p>
+                <p id="bestHitRateValue" class="metric-value">0%</p>
+                <p id="bestHitRateThreads" class="metric-unit">-</p>
+              </article>
+            </div>
+
+            <div id="sweepBars" class="sweep-bars"></div>
+
+            <div class="table-shell">
+              <table class="sweep-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="table.threads">Threads</th>
+                    <th data-i18n="table.throughput">Throughput</th>
+                    <th data-i18n="table.hit_rate">Hit Rate</th>
+                    <th data-i18n="table.hits">Hits</th>
+                    <th data-i18n="table.misses">Misses</th>
+                  </tr>
+                </thead>
+                <tbody id="sweepTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="run-history" class="panel history-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.history_kicker">Recent Activity</p>
+            <h3 data-i18n="panels.history_title">Run and Sweep History</h3>
+          </div>
+
+          <div class="history-layout">
+            <div>
+              <h4 class="history-title" data-i18n="panels.recent_runs">Recent Runs</h4>
+              <div id="recentRuns" class="history-list"></div>
+            </div>
+            <div>
+              <h4 class="history-title" data-i18n="panels.recent_sweeps">Recent Sweeps</h4>
+              <div id="recentSweeps" class="history-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel architecture-panel">
+          <div class="panel-heading">
+            <p class="panel-kicker" data-i18n="panels.architecture_kicker">System Framing</p>
+            <h3 data-i18n="panels.architecture_title">How It Fits</h3>
+          </div>
+          <div class="architecture-copy">
+            <p data-i18n="architecture.body">
+              TelePath's core remains a C++ buffer engine. This browser layer
+              provides a lightweight control surface for running workloads and
+              inspecting recent results without changing the engine's execution path.
+            </p>
+            <ul class="architecture-list">
+              <li data-i18n="architecture.item1">Data plane stays in the C++ engine.</li>
+              <li data-i18n="architecture.item2">Observation remains out of the hot path.</li>
+              <li data-i18n="architecture.item3">Run history and sweep results make trend inspection easier.</li>
+              <li data-i18n="architecture.item4">Future GUI and shared-memory telemetry can replace this shell without changing engine semantics.</li>
+            </ul>
+          </div>
+
+          <div class="raw-output">
+            <div class="raw-heading">
+              <p class="panel-kicker" data-i18n="panels.raw_kicker">Structured Result</p>
+              <h3 data-i18n="panels.raw_title">Latest Payload</h3>
+            </div>
+            <pre id="rawJson"></pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

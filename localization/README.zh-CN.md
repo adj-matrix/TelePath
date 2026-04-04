@@ -136,6 +136,27 @@ LSAN 的构建入口为：
 
 但在部分受限环境或 WSL 风格环境中，LeakSanitizer 在执行阶段可能因 `ptrace` 限制而失败。这更偏向运行环境限制，而非当前已知 TelePath 代码错误。
 
+### Web 控制台
+
+TelePath 现在包含一个浏览器端 Console，用于运行负载并查看引擎最近结果。
+
+启动方式：
+
+```bash
+./scripts/web/serve.sh
+```
+
+它会启动一个本地 HTTP 服务，并提供：
+
+- 浏览器 UI，
+- 英文与简体中文运行时切换，
+- 单次 benchmark 运行，
+- 线程 sweep 实验，
+- 进程内 recent run / recent sweep 历史，
+- 以及基于当前 TelePath debug 构建与 benchmark 可执行文件的薄 API 层。
+
+前端多语言资源位于 `localization/web-console/`。
+
 ## 仓库结构
 
 仓库目录规范见：
@@ -147,6 +168,9 @@ LSAN 的构建入口为：
 - `src/cpp/include/telepath`
 - `src/cpp/lib`
 - `test/cpp`
+- `web/frontend`
+- `web/backend`
+- `gui`
 - `support`
 - `scripts`
 

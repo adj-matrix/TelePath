@@ -136,6 +136,27 @@ On supported native Linux kernels, the dedicated `io_uring` path can be built an
 
 However, LSAN execution may fail in ptrace-constrained or restricted WSL-style environments. That limitation is environmental rather than a known TelePath correctness issue.
 
+### Web Console
+
+TelePath also includes a browser-based console for running workloads and inspecting recent results from the engine.
+
+Run it with:
+
+```bash
+./scripts/web/serve.sh
+```
+
+This starts a single local HTTP service that:
+
+- serves the browser UI,
+- supports runtime language switching between English and Simplified Chinese,
+- runs single benchmark passes,
+- runs thread-sweep experiments,
+- retains recent run and sweep history in the server session,
+- and exposes all of that through a thin API backed by the existing TelePath debug build.
+
+Frontend localization resources live under `localization/web-console/`.
+
 ## Repository Layout
 
 The repository structure and ownership rules are documented here:
@@ -147,6 +168,9 @@ The main implementation currently lives under:
 - `src/cpp/include/telepath`
 - `src/cpp/lib`
 - `test/cpp`
+- `web/frontend`
+- `web/backend`
+- `gui`
 - `support`
 - `scripts`
 

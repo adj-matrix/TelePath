@@ -1,0 +1,138 @@
+{
+  "meta": {
+    "title": "TelePath Console"
+  },
+  "languages": {
+    "en": "English",
+    "zh-CN": "简体中文"
+  },
+  "locale": {
+    "label": "语言"
+  },
+  "topbar": {
+    "state": "TelePath",
+    "console": "Console"
+  },
+  "nav": {
+    "overview": "概览",
+    "single_run": "单次运行",
+    "sweep_lab": "参数扫描",
+    "history": "历史"
+  },
+  "hero": {
+    "eyebrow": "可观测缓冲引擎",
+    "title": "在一个界面中查看缓冲池行为、吞吐与缓存效率。",
+    "description": "这一层网页界面位于 C++ 数据面之外。它运行基准负载、采集行为级指标，并通过一个轻量控制层呈现最近运行结果与参数扫描结果。"
+  },
+  "hero_pills": {
+    "concurrent": "并发 Buffer Pool",
+    "writeback": "异步写回",
+    "cleaner": "后台 Cleaner",
+    "console": "浏览器控制台"
+  },
+  "status": {
+    "service": "服务状态",
+    "benchmark_binary": "基准测试程序",
+    "latest_throughput": "最新吞吐",
+    "latest_hit_rate": "最新命中率",
+    "checking": "检查中...",
+    "unknown": "未知",
+    "ready": "已就绪",
+    "build_on_first_run": "首次运行时构建",
+    "error": "错误"
+  },
+  "panels": {
+    "single_run_kicker": "单次运行",
+    "single_run_title": "发起一次聚焦配置的基准测试",
+    "single_run_note": "适合逐个观察具体配置下的系统行为，并保留一份清晰的当前快照。",
+    "current_snapshot_kicker": "当前快照",
+    "current_snapshot_title": "单次运行指标",
+    "single_run_empty": "还没有运行结果。请先从左侧控制面板发起一次单次运行。",
+    "sweep_kicker": "参数扫描",
+    "sweep_title": "比较线程扩展趋势",
+    "sweep_note": "参数扫描会连续执行多次基准测试，更适合观察线程数变化下的行为趋势。",
+    "sweep_output_kicker": "扫描输出",
+    "sweep_output_title": "扩展性视图",
+    "sweep_empty": "还没有参数扫描结果。请先运行一次线程参数扫描。",
+    "history_kicker": "最近活动",
+    "history_title": "运行与扫描历史",
+    "recent_runs": "最近运行",
+    "recent_sweeps": "最近扫描",
+    "architecture_kicker": "系统说明",
+    "architecture_title": "它在系统中的位置",
+    "raw_kicker": "结构化结果",
+    "raw_title": "最近一次 Payload"
+  },
+  "form": {
+    "workload": "负载类型",
+    "threads": "线程数",
+    "pool_size": "缓冲池大小",
+    "block_count": "块数量",
+    "ops_per_thread": "每线程操作数",
+    "hotset_size": "热点集合大小",
+    "hot_access_percent": "热点访问比例 %",
+    "thread_candidates": "线程候选集",
+    "thread_candidates_placeholder": "1,2,4,8"
+  },
+  "buttons": {
+    "run_idle": "运行基准测试",
+    "run_loading": "运行中...",
+    "sweep_idle": "运行参数扫描",
+    "sweep_loading": "扫描中..."
+  },
+  "metrics": {
+    "throughput": "吞吐量",
+    "hit_rate": "命中率",
+    "buffer_hits": "命中次数",
+    "buffer_misses": "未命中次数",
+    "backend": "后端",
+    "workload": "负载",
+    "total_ops": "总操作数",
+    "elapsed": "耗时",
+    "best_throughput": "最佳吞吐",
+    "best_hit_rate": "最佳命中率",
+    "hits": "命中",
+    "misses": "未命中"
+  },
+  "units": {
+    "ops_per_sec": "次 / 秒",
+    "seconds_suffix": "秒",
+    "threads_template": "{threads} 线程"
+  },
+  "table": {
+    "threads": "线程数",
+    "throughput": "吞吐量",
+    "hit_rate": "命中率",
+    "hits": "命中",
+    "misses": "未命中"
+  },
+  "architecture": {
+    "body": "TelePath 的核心仍然是 C++ 缓冲引擎。这个网页层提供了一个轻量控制界面，用于运行负载并查看最近结果，同时不改变引擎本身的执行路径。",
+    "item1": "数据面仍然留在 C++ 引擎中。",
+    "item2": "观测逻辑仍然尽量不进入热路径。",
+    "item3": "运行历史与参数扫描结果更便于观察趋势变化。",
+    "item4": "未来真正的 GUI 或共享内存遥测平面，可以替换这一层，而不改变引擎语义。"
+  },
+  "history": {
+    "empty_runs": "还没有最近运行记录。",
+    "empty_sweeps": "还没有最近扫描记录。",
+    "run_title": "{workload} · {threads}",
+    "run_subtitle": "池大小 {pool_size} · 块数 {block_count}",
+    "run_detail": "{throughput} 次/秒 · {hit_rate}",
+    "sweep_title": "{workload} 参数扫描",
+    "sweep_subtitle": "线程 {thread_candidates}",
+    "sweep_detail": "{sample_count} 个样本 · 最佳 {throughput} 次/秒"
+  },
+  "workloads": {
+    "hotspot": "热点负载",
+    "uniform": "均匀负载",
+    "sequential_shared": "顺序共享",
+    "sequential_disjoint": "顺序分离"
+  },
+  "backends": {
+    "posix": "POSIX",
+    "posix_fallback": "POSIX 回退路径",
+    "io_uring": "io_uring",
+    "io_uring_fallback": "io_uring 回退路径"
+  }
+}

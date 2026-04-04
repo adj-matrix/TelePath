@@ -1,0 +1,138 @@
+{
+  "meta": {
+    "title": "TelePath Console"
+  },
+  "languages": {
+    "en": "English",
+    "zh-CN": "Simplified Chinese"
+  },
+  "locale": {
+    "label": "Language"
+  },
+  "topbar": {
+    "state": "TelePath",
+    "console": "Console"
+  },
+  "nav": {
+    "overview": "Overview",
+    "single_run": "Single Run",
+    "sweep_lab": "Sweep Lab",
+    "history": "History"
+  },
+  "hero": {
+    "eyebrow": "Observable Buffer Engine",
+    "title": "Inspect buffer-pool behavior, throughput, and cache efficiency in one place.",
+    "description": "This web layer stays outside the C++ data plane. It runs benchmark workloads, captures behavior-oriented metrics, and surfaces recent runs and sweep results through a lightweight control surface."
+  },
+  "hero_pills": {
+    "concurrent": "Concurrent Buffer Pool",
+    "writeback": "Async Writeback",
+    "cleaner": "Cleaner-Aware",
+    "console": "Browser Console"
+  },
+  "status": {
+    "service": "Service",
+    "benchmark_binary": "Benchmark Binary",
+    "latest_throughput": "Latest Throughput",
+    "latest_hit_rate": "Latest Hit Rate",
+    "checking": "Checking...",
+    "unknown": "Unknown",
+    "ready": "Ready",
+    "build_on_first_run": "Build on first run",
+    "error": "Error"
+  },
+  "panels": {
+    "single_run_kicker": "Single Run",
+    "single_run_title": "Launch a Focused Benchmark Pass",
+    "single_run_note": "Use this to inspect one configuration at a time and capture a clean snapshot of its current behavior.",
+    "current_snapshot_kicker": "Current Snapshot",
+    "current_snapshot_title": "Single Run Metrics",
+    "single_run_empty": "No benchmark run yet. Launch a single run from the control panel.",
+    "sweep_kicker": "Sweep Lab",
+    "sweep_title": "Compare Thread Scaling Trends",
+    "sweep_note": "Sweep mode runs multiple benchmark passes back-to-back and reveals scaling trends more clearly than a single snapshot.",
+    "sweep_output_kicker": "Sweep Output",
+    "sweep_output_title": "Scaling View",
+    "sweep_empty": "No sweep yet. Run a thread sweep to populate the scaling view.",
+    "history_kicker": "Recent Activity",
+    "history_title": "Run and Sweep History",
+    "recent_runs": "Recent Runs",
+    "recent_sweeps": "Recent Sweeps",
+    "architecture_kicker": "System Framing",
+    "architecture_title": "How It Fits",
+    "raw_kicker": "Structured Result",
+    "raw_title": "Latest Payload"
+  },
+  "form": {
+    "workload": "Workload",
+    "threads": "Threads",
+    "pool_size": "Pool Size",
+    "block_count": "Block Count",
+    "ops_per_thread": "Ops / Thread",
+    "hotset_size": "Hotset Size",
+    "hot_access_percent": "Hot Access %",
+    "thread_candidates": "Thread Candidates",
+    "thread_candidates_placeholder": "1,2,4,8"
+  },
+  "buttons": {
+    "run_idle": "Run Benchmark",
+    "run_loading": "Running...",
+    "sweep_idle": "Run Sweep",
+    "sweep_loading": "Sweeping..."
+  },
+  "metrics": {
+    "throughput": "Throughput",
+    "hit_rate": "Hit Rate",
+    "buffer_hits": "Buffer Hits",
+    "buffer_misses": "Buffer Misses",
+    "backend": "Backend",
+    "workload": "Workload",
+    "total_ops": "Total Ops",
+    "elapsed": "Elapsed",
+    "best_throughput": "Best Throughput",
+    "best_hit_rate": "Best Hit Rate",
+    "hits": "Hits",
+    "misses": "Misses"
+  },
+  "units": {
+    "ops_per_sec": "ops / sec",
+    "seconds_suffix": "s",
+    "threads_template": "{threads} threads"
+  },
+  "table": {
+    "threads": "Threads",
+    "throughput": "Throughput",
+    "hit_rate": "Hit Rate",
+    "hits": "Hits",
+    "misses": "Misses"
+  },
+  "architecture": {
+    "body": "TelePath's core remains a C++ buffer engine. This browser layer provides a lightweight control surface for running workloads and inspecting recent results without changing the engine's execution path.",
+    "item1": "Data plane stays in the C++ engine.",
+    "item2": "Observation remains out of the hot path.",
+    "item3": "Run history and sweep results make trend inspection easier.",
+    "item4": "Future GUI and shared-memory telemetry can replace this shell without changing engine semantics."
+  },
+  "history": {
+    "empty_runs": "No recent runs yet.",
+    "empty_sweeps": "No recent sweeps yet.",
+    "run_title": "{workload} · {threads}",
+    "run_subtitle": "pool {pool_size} · blocks {block_count}",
+    "run_detail": "{throughput} ops/s · {hit_rate}",
+    "sweep_title": "{workload} sweep",
+    "sweep_subtitle": "threads {thread_candidates}",
+    "sweep_detail": "{sample_count} samples · best {throughput} ops/s"
+  },
+  "workloads": {
+    "hotspot": "Hotspot",
+    "uniform": "Uniform",
+    "sequential_shared": "Sequential Shared",
+    "sequential_disjoint": "Sequential Disjoint"
+  },
+  "backends": {
+    "posix": "POSIX",
+    "posix_fallback": "POSIX Fallback",
+    "io_uring": "io_uring",
+    "io_uring_fallback": "io_uring Fallback"
+  }
+}
