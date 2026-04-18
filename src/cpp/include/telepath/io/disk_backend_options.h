@@ -16,18 +16,16 @@ struct DiskBackendOptions {
   bool allow_fallback{true};
   std::size_t queue_depth{0};
 
-  std::size_t ResolveQueueDepth() const {
-    if (queue_depth != 0) {
-      return queue_depth;
-    }
+  auto ResolveQueueDepth() const -> std::size_t {
+    if (queue_depth != 0) return queue_depth;
 
     switch (preferred_kind) {
-      case DiskBackendKind::kIoUring:
-        return 64;
-      case DiskBackendKind::kAuto:
-        return 32;
-      case DiskBackendKind::kPosix:
-        return 1;
+    case DiskBackendKind::kIoUring:
+      return 64;
+    case DiskBackendKind::kAuto:
+      return 32;
+    case DiskBackendKind::kPosix:
+      return 1;
     }
 
     return 1;

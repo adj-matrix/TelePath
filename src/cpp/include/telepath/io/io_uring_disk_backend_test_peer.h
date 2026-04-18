@@ -11,16 +11,22 @@ namespace telepath {
 // deterministically without changing the production-facing backend API.
 class IoUringDiskBackendTestPeer {
  public:
+  // Overrides the next submit result for deterministic failure-path tests.
   static void ForceNextSubmitResult(IoUringDiskBackend &backend, int result) {
     backend.SetNextSubmitResultForTest(result);
   }
 
-  static void ForceNextCompletionResult(IoUringDiskBackend &backend,
-                                        int result) {
+  // Overrides the next completion result for deterministic failure-path tests.
+  static void ForceNextCompletionResult(
+    IoUringDiskBackend &backend,
+    int result
+  ) {
     backend.SetNextCompletionResultForTest(result);
   }
 
-  static std::size_t InFlightRequestCount(const IoUringDiskBackend &backend) {
+  // Returns the number of in-flight requests currently owned by the backend.
+  static auto InFlightRequestCount(const IoUringDiskBackend &backend)
+    -> std::size_t {
     return backend.InFlightRequestCountForTest();
   }
 };

@@ -45,19 +45,24 @@ class DiskBackend {
 
   // Enqueues an asynchronous page read into `out`. The returned request id must
   // later be matched with PollCompletion().
-  virtual Result<uint64_t> SubmitRead(const BufferTag &tag, std::byte *out,
-                                      std::size_t size) = 0;
+  virtual auto SubmitRead(
+    const BufferTag &tag,
+    std::byte *out,
+    std::size_t size
+  ) -> Result<uint64_t> = 0;
   // Enqueues an asynchronous page write from `data`. The caller must keep the
   // source buffer stable until the corresponding completion is observed.
-  virtual Result<uint64_t> SubmitWrite(const BufferTag &tag,
-                                       const std::byte *data,
-                                       std::size_t size) = 0;
+  virtual auto SubmitWrite(
+    const BufferTag &tag,
+    const std::byte *data,
+    std::size_t size
+  ) -> Result<uint64_t> = 0;
   // Waits for and returns the next completed disk request.
-  virtual Result<DiskCompletion> PollCompletion() = 0;
+  virtual auto PollCompletion() -> Result<DiskCompletion> = 0;
   // Stops the backend and unblocks any thread waiting in PollCompletion().
   virtual void Shutdown() = 0;
   // Describes the backend implementation and key async capabilities.
-  virtual DiskBackendCapabilities GetCapabilities() const = 0;
+  virtual auto GetCapabilities() const -> DiskBackendCapabilities = 0;
 };
 
 }  // namespace telepath

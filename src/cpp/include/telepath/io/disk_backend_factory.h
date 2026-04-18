@@ -15,9 +15,11 @@ bool IsIoUringBackendSupported();
 
 // Creates a disk backend using the requested policy, falling back when
 // permitted by `options`.
-Result<std::unique_ptr<DiskBackend>> CreateDiskBackend(
-    std::string root_path, std::size_t page_size,
-    const DiskBackendOptions &options = {});
+auto CreateDiskBackend(
+  std::string root_path,
+  std::size_t page_size,
+  const DiskBackendOptions &options = {}
+) -> Result<std::unique_ptr<DiskBackend>>;
 
 }  // namespace telepath
 

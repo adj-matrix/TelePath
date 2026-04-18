@@ -1,13 +1,22 @@
 set(TELEPATH_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_library(telepath
+  lib/buffer/buffer_handle.cc
+  lib/buffer/buffer_descriptor_state.cc
   lib/buffer/buffer_manager.cc
+  lib/buffer/buffer_manager_observer.cc
+  lib/buffer/page_table.cc
+  lib/buffer/cleaner_controller.cc
+  lib/buffer/completion_dispatcher.cc
+  lib/buffer/flush_scheduler.cc
+  lib/buffer/miss_coordinator.cc
   lib/io/disk_backend_factory.cc
   lib/io/io_uring_disk_backend.cc
   lib/io/posix_disk_backend.cc
   lib/replacer/clock_replacer.cc
   lib/replacer/lru_k_replacer.cc
   lib/replacer/lru_replacer.cc
+  lib/replacer/two_queue_replacer.cc
   lib/telemetry/counter_telemetry_sink.cc
   lib/telemetry/noop_telemetry_sink.cc
 )

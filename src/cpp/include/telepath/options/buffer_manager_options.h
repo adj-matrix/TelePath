@@ -37,39 +37,26 @@ struct BufferManagerOptions {
   std::size_t dirty_page_low_watermark{0};
 
   // Returns the effective stripe count after applying the default policy.
-  std::size_t ResolvePageTableStripeCount() const {
-    if (page_table_stripe_count != 0) {
-      return page_table_stripe_count;
-    }
+  auto ResolvePageTableStripeCount() const -> std::size_t {
+    if (page_table_stripe_count != 0) return page_table_stripe_count;
 
-    const std::size_t hardware_threads =
-        std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t hardware_threads = std::max<std::size_t>(1, std::thread::hardware_concurrency());
     const std::size_t baseline = std::max<std::size_t>(16, hardware_threads * 4);
     return std::min<std::size_t>(baseline, std::max<std::size_t>(1, pool_size));
   }
 
-  std::size_t ResolveDirtyPageHighWatermark() const {
-    if (pool_size == 0) {
-      return 0;
-    }
-    if (dirty_page_high_watermark != 0) {
-      return std::min<std::size_t>(dirty_page_high_watermark, pool_size);
-    }
+  auto ResolveDirtyPageHighWatermark() const -> std::size_t {
+    if (pool_size == 0) return 0;
+    if (dirty_page_high_watermark != 0) return std::min<std::size_t>(dirty_page_high_watermark, pool_size);
     return std::max<std::size_t>(1, (pool_size * 3) / 4);
   }
 
-  std::size_t ResolveDirtyPageLowWatermark() const {
+  auto ResolveDirtyPageLowWatermark() const -> std::size_t {
     const std::size_t high = ResolveDirtyPageHighWatermark();
-    if (high == 0) {
-      return 0;
-    }
+    if (high == 0) return 0;
     const std::size_t max_low = high - 1;
-    if (dirty_page_low_watermark != 0) {
-      return std::min<std::size_t>(dirty_page_low_watermark, max_low);
-    }
-    if (high == 1) {
-      return 0;
-    }
+    if (dirty_page_low_watermark != 0) return std::min<std::size_t>(dirty_page_low_watermark, max_low);
+    if (high == 1) return 0;
     return std::min<std::size_t>(high / 2, max_low);
   }
 };

@@ -12,7 +12,7 @@ namespace telepath {
 class FrameMemoryPool {
  public:
   FrameMemoryPool(std::size_t pool_size, std::size_t page_size)
-      : pool_size_(pool_size), page_size_(page_size) {}
+  : pool_size_(pool_size), page_size_(page_size) {}
 
   FrameMemoryPool(const FrameMemoryPool &) = delete;
   FrameMemoryPool &operator=(const FrameMemoryPool &) = delete;
@@ -20,17 +20,11 @@ class FrameMemoryPool {
   ~FrameMemoryPool() { std::free(data_); }
 
   Status Initialize() {
-    if (pool_size_ == 0 || page_size_ == 0) {
-      return Status::InvalidArgument("frame memory pool size must be non-zero");
-    }
+    if (pool_size_ == 0 || page_size_ == 0) return Status::InvalidArgument("frame memory pool size must be non-zero");
 
-    const std::size_t alignment =
-        page_size_ > kCacheLineSize ? page_size_ : kCacheLineSize;
+    const std::size_t alignment = page_size_ > kCacheLineSize ? page_size_ : kCacheLineSize;
     void *raw = nullptr;
-    if (posix_memalign(&raw, alignment, pool_size_ * page_size_) != 0) {
-      return Status::ResourceExhausted(
-          "failed to allocate contiguous frame memory pool");
-    }
+    if (posix_memalign(&raw, alignment, pool_size_ * page_size_) != 0) return Status::ResourceExhausted("failed to allocate contiguous frame memory pool");
 
     data_ = static_cast<std::byte *>(raw);
     std::memset(data_, 0, pool_size_ * page_size_);

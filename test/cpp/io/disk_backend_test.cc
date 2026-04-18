@@ -1,7 +1,7 @@
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <filesystem>
-#include <memory>
 
 #include "telepath/io/disk_backend.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -39,6 +39,36 @@ int main() {
 
   assert(read_buffer[0] == std::byte{0x33});
   assert(read_buffer[4095] == std::byte{0x7A});
+
+  auto invalid_read = backend.SubmitRead(tag, read_buffer.data(), read_buffer.size() - 1);
+  assert(!invalid_read.ok());
+  assert(invalid_read.status().code() == telepath::StatusCode::kInvalidArgument);
+
+  telepath::PosixDiskBackend shutdown_backend(root.string(), 4096);
+  auto first_shutdown_submit =
+      shutdown_backend.SubmitWrite(telepath::BufferTag{7, 1}, write_buffer.data(),
+                                   write_buffer.size());
+  auto second_shutdown_submit =
+      shutdown_backend.SubmitWrite(telepath::BufferTag{7, 2}, write_buffer.data(),
+                                   write_buffer.size());
+  assert(first_shutdown_submit.ok());
+  assert(second_shutdown_submit.ok());
+
+  shutdown_backend.Shutdown();
+
+  auto first_shutdown_completion = shutdown_backend.PollCompletion();
+  assert(first_shutdown_completion.ok());
+  assert(first_shutdown_completion.value().request_id == first_shutdown_submit.value());
+  assert(first_shutdown_completion.value().status.ok());
+
+  auto second_shutdown_completion = shutdown_backend.PollCompletion();
+  assert(second_shutdown_completion.ok());
+  assert(second_shutdown_completion.value().request_id == second_shutdown_submit.value());
+  assert(second_shutdown_completion.value().status.ok());
+
+  auto drained_completion = shutdown_backend.PollCompletion();
+  assert(!drained_completion.ok());
+  assert(drained_completion.status().code() == telepath::StatusCode::kUnavailable);
 
   fs::remove_all(root);
   return 0;

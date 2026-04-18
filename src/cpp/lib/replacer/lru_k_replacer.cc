@@ -4,15 +4,15 @@
 
 namespace telepath {
 
-LruKReplacer::LruKReplacer(std::size_t capacity, std::size_t history_length)
-    : capacity_(capacity),
-      history_length_(history_length == 0 ? 1 : history_length) {}
+LruKReplacer::LruKReplacer(
+  std::size_t capacity,
+  std::size_t history_length
+) : capacity_(capacity),
+    history_length_(history_length == 0 ? 1 : history_length) {}
 
 void LruKReplacer::RecordAccess(FrameId frame_id) {
   std::lock_guard<std::mutex> guard(latch_);
-  if (!IsValidFrame(frame_id)) {
-    return;
-  }
+  if (!IsValidFrame(frame_id)) return;
 
   auto [it, inserted] = entries_.try_emplace(frame_id);
   if (inserted && entries_.size() > capacity_) {
@@ -20,103 +20,103 @@ void LruKReplacer::RecordAccess(FrameId frame_id) {
     return;
   }
 
+  if (it->second.evictable) EraseEvictableEntry(frame_id, it->second);
+
   ++current_timestamp_;
   it->second.access_history.push_back(current_timestamp_);
   while (it->second.access_history.size() > history_length_) {
     it->second.access_history.pop_front();
   }
+
+  if (it->second.evictable) InsertEvictableEntry(frame_id, it->second);
 }
 
 void LruKReplacer::SetEvictable(FrameId frame_id, bool evictable) {
   std::lock_guard<std::mutex> guard(latch_);
   auto it = entries_.find(frame_id);
-  if (it == entries_.end()) {
-    return;
+  if (it == entries_.end()) return;
+  if (it->second.evictable == evictable) return;
+
+  if (evictable) {
+    it->second.evictable = true;
+    InsertEvictableEntry(frame_id, it->second);
+    ++evictable_size_;
+  } else {
+    EraseEvictableEntry(frame_id, it->second);
+    it->second.evictable = false;
+    if (evictable_size_ > 0) --evictable_size_;
   }
-  it->second.evictable = evictable;
 }
 
 bool LruKReplacer::Victim(FrameId *frame_id) {
   std::lock_guard<std::mutex> guard(latch_);
-  if (frame_id == nullptr) {
-    return false;
-  }
-
-  Entry *best_entry = nullptr;
-  FrameId best_frame_id = kInvalidFrameId;
-  for (auto &entry : entries_) {
-    if (!entry.second.evictable) {
-      continue;
-    }
-    if (PreferCandidate(entry.second, entry.first, best_entry, best_frame_id)) {
-      best_entry = &entry.second;
-      best_frame_id = entry.first;
-    }
-  }
-
-  if (best_entry == nullptr) {
-    return false;
-  }
-
-  entries_.erase(best_frame_id);
-  *frame_id = best_frame_id;
-  return true;
+  if (frame_id == nullptr || evictable_size_ == 0) return false;
+  if (TakeVictimFromQueue(&history_queue_, frame_id)) return true;
+  return TakeVictimFromQueue(&cache_queue_, frame_id);
 }
 
 void LruKReplacer::Remove(FrameId frame_id) {
   std::lock_guard<std::mutex> guard(latch_);
-  entries_.erase(frame_id);
+  auto it = entries_.find(frame_id);
+  if (it == entries_.end()) return;
+  if (it->second.evictable && evictable_size_ > 0) {
+    EraseEvictableEntry(frame_id, it->second);
+    --evictable_size_;
+  } else if (it->second.evictable) {
+    EraseEvictableEntry(frame_id, it->second);
+  }
+  entries_.erase(it);
 }
 
-std::size_t LruKReplacer::Size() const {
+auto LruKReplacer::Size() const -> std::size_t {
   std::lock_guard<std::mutex> guard(latch_);
-  std::size_t count = 0;
-  for (const auto &entry : entries_) {
-    if (entry.second.evictable) {
-      ++count;
-    }
-  }
-  return count;
+  return evictable_size_;
 }
 
 bool LruKReplacer::IsValidFrame(FrameId frame_id) const {
   return frame_id < capacity_;
 }
 
-bool LruKReplacer::PreferCandidate(const Entry &candidate,
-                                   FrameId candidate_id,
-                                   const Entry *current_best,
-                                   FrameId current_best_id) const {
-  if (current_best == nullptr) {
-    return true;
-  }
-
-  const bool candidate_incomplete = candidate.access_history.size() < history_length_;
-  const bool best_incomplete = current_best->access_history.size() < history_length_;
-
-  if (candidate_incomplete != best_incomplete) {
-    return candidate_incomplete;
-  }
-
-  if (candidate_incomplete) {
-    const uint64_t candidate_recent = candidate.access_history.back();
-    const uint64_t best_recent = current_best->access_history.back();
-    if (candidate_recent != best_recent) {
-      return candidate_recent < best_recent;
-    }
-    return candidate_id < current_best_id;
-  }
-
-  const uint64_t candidate_kth = candidate.access_history.front();
-  const uint64_t best_kth = current_best->access_history.front();
-  if (candidate_kth != best_kth) {
-    return candidate_kth < best_kth;
-  }
-  return candidate_id < current_best_id;
+bool LruKReplacer::HasIncompleteHistory(const Entry &entry) const {
+  return entry.access_history.size() < history_length_;
 }
 
-std::unique_ptr<Replacer> MakeLruKReplacer(std::size_t capacity,
-                                           std::size_t history_length) {
+auto LruKReplacer::HistoryQueueKey(const Entry &entry, FrameId frame_id) const -> QueueKey {
+  return {entry.access_history.back(), frame_id};
+}
+
+auto LruKReplacer::CacheQueueKey(const Entry &entry, FrameId frame_id) const -> QueueKey {
+  return {entry.access_history.front(), frame_id};
+}
+
+void LruKReplacer::InsertEvictableEntry(FrameId frame_id, const Entry &entry) {
+  if (HasIncompleteHistory(entry)) {
+    history_queue_.emplace(HistoryQueueKey(entry, frame_id));
+    return;
+  }
+  cache_queue_.emplace(CacheQueueKey(entry, frame_id));
+}
+
+void LruKReplacer::EraseEvictableEntry(FrameId frame_id, const Entry &entry) {
+  if (HasIncompleteHistory(entry)) {
+    history_queue_.erase(HistoryQueueKey(entry, frame_id));
+    return;
+  }
+  cache_queue_.erase(CacheQueueKey(entry, frame_id));
+}
+
+bool LruKReplacer::TakeVictimFromQueue(std::set<QueueKey> *queue, FrameId *frame_id) {
+  if (queue == nullptr || queue->empty()) return false;
+
+  const FrameId victim = queue->begin()->second;
+  queue->erase(queue->begin());
+  entries_.erase(victim);
+  --evictable_size_;
+  *frame_id = victim;
+  return true;
+}
+
+auto MakeLruKReplacer(std::size_t capacity, std::size_t history_length) -> std::unique_ptr<Replacer> {
   return std::make_unique<LruKReplacer>(capacity, history_length);
 }
 

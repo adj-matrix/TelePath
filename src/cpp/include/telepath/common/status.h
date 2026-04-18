@@ -1,6 +1,7 @@
 #ifndef TELEPATH_COMMON_STATUS_H_
 #define TELEPATH_COMMON_STATUS_H_
 
+#include <cassert>
 #include <string>
 #include <utility>
 
@@ -19,38 +20,40 @@ enum class StatusCode {
 class Status {
  public:
   Status() = default;
-  Status(StatusCode code, std::string message)
-      : code_(code), message_(std::move(message)) {}
+  Status(
+    StatusCode code,
+    std::string message
+  ) : code_(code), message_(std::move(message)) {}
 
-  static Status Ok() { return Status(); }
+  static auto Ok() -> Status { return Status(); }
 
-  static Status InvalidArgument(std::string message) {
+  static auto InvalidArgument(std::string message) -> Status {
     return Status(StatusCode::kInvalidArgument, std::move(message));
   }
 
-  static Status NotFound(std::string message) {
+  static auto NotFound(std::string message) -> Status {
     return Status(StatusCode::kNotFound, std::move(message));
   }
 
-  static Status IoError(std::string message) {
+  static auto IoError(std::string message) -> Status {
     return Status(StatusCode::kIoError, std::move(message));
   }
 
-  static Status Unavailable(std::string message) {
+  static auto Unavailable(std::string message) -> Status {
     return Status(StatusCode::kUnavailable, std::move(message));
   }
 
-  static Status ResourceExhausted(std::string message) {
+  static auto ResourceExhausted(std::string message) -> Status {
     return Status(StatusCode::kResourceExhausted, std::move(message));
   }
 
-  static Status Internal(std::string message) {
+  static auto Internal(std::string message) -> Status {
     return Status(StatusCode::kInternal, std::move(message));
   }
 
   bool ok() const { return code_ == StatusCode::kOk; }
-  StatusCode code() const { return code_; }
-  const std::string &message() const { return message_; }
+  auto code() const -> StatusCode { return code_; }
+  auto message() const -> const std::string & { return message_; }
 
  private:
   StatusCode code_{StatusCode::kOk};
@@ -66,10 +69,16 @@ class Result {
   Result(T &&value) : status_(Status::Ok()), value_(std::move(value)), has_value_(true) {}
 
   bool ok() const { return status_.ok(); }
-  const Status &status() const { return status_; }
+  auto status() const -> const Status & { return status_; }
 
-  const T &value() const { return value_; }
-  T &value() { return value_; }
+  auto value() const -> const T & {
+    assert(has_value_);
+    return value_;
+  }
+  auto value() -> T & {
+    assert(has_value_);
+    return value_;
+  }
 
  private:
   Status status_;

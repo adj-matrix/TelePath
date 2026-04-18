@@ -82,7 +82,7 @@ This means TelePath now supports not only the basic buffer lifecycle, but also:
 ## Architecture
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/adj-matrix/adjmatrix-assets/main/TelePath/Architecture.png" width="60%">
+  <img src="https://raw.githubusercontent.com/adj-matrix/adjmatrix-assets/main/TelePath/Architecture.png" width="80%">
 </p>
 
 ## Build

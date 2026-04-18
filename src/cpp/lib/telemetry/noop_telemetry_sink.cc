@@ -4,7 +4,7 @@
 
 namespace telepath {
 
-class NoOpTelemetrySink : public TelemetrySink {
+class NoOpTelemetrySink final : public TelemetrySink {
  public:
   NoOpTelemetrySink() = default;
 
@@ -16,10 +16,12 @@ class NoOpTelemetrySink : public TelemetrySink {
   void DoRecordEviction(const BufferTag &) override {}
   void DoRecordDirtyFlush(const BufferTag &) override {}
 
-  TelemetrySnapshot DoSnapshot() const override { return TelemetrySnapshot{}; }
+  auto DoSnapshot() const -> TelemetrySnapshot override {
+    return TelemetrySnapshot{};
+  }
 };
 
-std::shared_ptr<TelemetrySink> MakeNoOpTelemetrySink() {
+auto MakeNoOpTelemetrySink() -> std::shared_ptr<TelemetrySink> {
   return std::make_shared<NoOpTelemetrySink>();
 }
 

@@ -4,7 +4,7 @@
 
 namespace telepath {
 
-class CounterTelemetrySink : public TelemetrySink {
+class CounterTelemetrySink final : public TelemetrySink {
  public:
   CounterTelemetrySink() : TelemetrySink(&counters_) {}
 
@@ -16,13 +16,15 @@ class CounterTelemetrySink : public TelemetrySink {
   void DoRecordEviction(const BufferTag &) override {}
   void DoRecordDirtyFlush(const BufferTag &) override {}
 
-  TelemetrySnapshot DoSnapshot() const override { return TelemetrySnapshot{}; }
+  auto DoSnapshot() const -> TelemetrySnapshot override {
+    return ReadCountersSnapshot(counters_);
+  }
 
  private:
   TelemetryCounters counters_{};
 };
 
-std::shared_ptr<TelemetrySink> MakeCounterTelemetrySink() {
+auto MakeCounterTelemetrySink() -> std::shared_ptr<TelemetrySink> {
   return std::make_shared<CounterTelemetrySink>();
 }
 

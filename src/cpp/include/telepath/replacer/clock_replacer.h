@@ -8,15 +8,23 @@
 
 namespace telepath {
 
+// Array-backed Clock/Second-Chance replacer.
 class ClockReplacer : public Replacer {
  public:
+  // Creates a replacer that can track up to `capacity` frame ids.
   explicit ClockReplacer(std::size_t capacity);
 
+  // Sets the reference bit for the accessed frame, inserting tracking state on
+  // first use when the frame id is valid.
   void RecordAccess(FrameId frame_id) override;
+  // Toggles whether the frame may currently be chosen as a victim.
   void SetEvictable(FrameId frame_id, bool evictable) override;
+  // Advances the clock hand until it finds and removes one evictable victim.
   bool Victim(FrameId *frame_id) override;
+  // Stops tracking the given frame if it is present.
   void Remove(FrameId frame_id) override;
-  std::size_t Size() const override;
+  // Returns the current number of evictable tracked frames.
+  auto Size() const -> std::size_t override;
 
  private:
   struct Entry {
@@ -26,6 +34,8 @@ class ClockReplacer : public Replacer {
   };
 
   bool IsValidFrame(FrameId frame_id) const;
+  bool TryVictimAtHand(FrameId *frame_id);
+  void AdvanceHand();
 
   const std::size_t capacity_;
   mutable std::mutex latch_;

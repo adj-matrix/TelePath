@@ -27,7 +27,7 @@ struct BufferTag {
 };
 
 struct BufferTagHash {
-  std::size_t operator()(const BufferTag &tag) const {
+  auto operator()(const BufferTag &tag) const -> std::size_t {
     const std::size_t left = std::hash<FileId>{}(tag.file_id);
     const std::size_t right = std::hash<BlockId>{}(tag.block_id);
     return left ^ (right + 0x9e3779b9 + (left << 6U) + (left >> 2U));

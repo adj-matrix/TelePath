@@ -67,5 +67,27 @@ int main() {
     assert(replacer->Size() == 0);
   }
 
+  {
+    std::unique_ptr<telepath::Replacer> replacer =
+        telepath::MakeLruKReplacer(6, 3);
+
+    replacer->RecordAccess(0);  // t1
+    replacer->RecordAccess(0);  // t2
+    replacer->RecordAccess(1);  // t3
+    replacer->RecordAccess(1);  // t4
+    replacer->RecordAccess(1);  // t5
+    replacer->RecordAccess(0);  // t6
+    replacer->RecordAccess(0);  // t7
+
+    replacer->SetEvictable(0, true);
+    replacer->SetEvictable(1, true);
+
+    telepath::FrameId victim = telepath::kInvalidFrameId;
+    assert(replacer->Victim(&victim));
+    // For K=3, frame 0 keeps the older 3rd-most-recent access and should
+    // still be evicted before frame 1 even after its later accesses.
+    assert(victim == 0);
+  }
+
   return 0;
 }

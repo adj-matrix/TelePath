@@ -236,6 +236,15 @@ target_link_libraries(telepath_lru_k_behavior_test PRIVATE telepath)
 
 add_test(NAME telepath_lru_k_behavior_test COMMAND telepath_lru_k_behavior_test)
 
+add_executable(telepath_two_queue_behavior_test
+  cpp/replacer/two_queue_behavior_test.cc
+)
+
+target_link_libraries(telepath_two_queue_behavior_test PRIVATE telepath)
+
+add_test(NAME telepath_two_queue_behavior_test
+         COMMAND telepath_two_queue_behavior_test)
+
 add_executable(telepath_wait_evict_interleave_test
   cpp/buffer/wait_evict_interleave_test.cc
 )

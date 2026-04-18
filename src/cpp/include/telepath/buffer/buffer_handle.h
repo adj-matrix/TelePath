@@ -2,8 +2,7 @@
 #define TELEPATH_BUFFER_BUFFER_HANDLE_H_
 
 #include <cstddef>
-#include <cstdint>
-#include <memory>
+#include <mutex>
 #include <shared_mutex>
 
 #include "telepath/common/types.h"
@@ -14,9 +13,15 @@ class BufferManager;
 
 class BufferHandle {
  public:
+  // Creates an empty handle that does not reference any frame.
   BufferHandle() = default;
-  BufferHandle(BufferManager *manager, FrameId frame_id, const BufferTag &tag,
-               std::byte *data, std::size_t size);
+  // Creates a pinned handle for a resident frame.
+  BufferHandle(
+    BufferManager *manager,
+    FrameId frame_id,
+    const BufferTag &tag,
+    std::byte *data,
+    std::size_t size);
 
   BufferHandle(const BufferHandle &) = delete;
   BufferHandle &operator=(const BufferHandle &) = delete;
@@ -26,16 +31,16 @@ class BufferHandle {
 
   ~BufferHandle();
 
-  const BufferTag &tag() const { return tag_; }
-  FrameId frame_id() const { return frame_id_; }
-  std::size_t size() const { return size_; }
+  auto tag() const -> const BufferTag & { return tag_; }
+  auto frame_id() const -> FrameId { return frame_id_; }
+  auto size() const -> std::size_t { return size_; }
 
   // Returns read-only access to the page contents. The handle acquires and
   // holds a shared content latch on first access.
-  const std::byte *data() const;
+  auto data() const -> const std::byte *;
   // Returns writable access to the page contents. The handle upgrades to an
   // exclusive content latch and holds it until Reset/destruction.
-  std::byte *mutable_data();
+  auto mutable_data() -> std::byte *;
   bool writable() const { return data_ != nullptr; }
 
   bool valid() const { return manager_ != nullptr; }
