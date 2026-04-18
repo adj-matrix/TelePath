@@ -22,6 +22,42 @@ target_link_libraries(telepath_handle_test PRIVATE telepath)
 
 add_test(NAME telepath_handle_test COMMAND telepath_handle_test)
 
+add_executable(telepath_page_table_test
+  cpp/buffer/page_table_test.cc
+)
+
+target_include_directories(telepath_page_table_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_page_table_test PRIVATE telepath)
+
+add_test(NAME telepath_page_table_test COMMAND telepath_page_table_test)
+
+add_executable(telepath_miss_coordinator_test
+  cpp/buffer/miss_coordinator_test.cc
+)
+
+target_include_directories(telepath_miss_coordinator_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_miss_coordinator_test PRIVATE telepath)
+
+add_test(NAME telepath_miss_coordinator_test COMMAND telepath_miss_coordinator_test)
+
+add_executable(telepath_buffer_descriptor_state_test
+  cpp/buffer/buffer_descriptor_state_test.cc
+)
+
+target_include_directories(telepath_buffer_descriptor_state_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_buffer_descriptor_state_test PRIVATE telepath)
+
+add_test(NAME telepath_buffer_descriptor_state_test COMMAND telepath_buffer_descriptor_state_test)
+
+add_executable(telepath_completion_dispatcher_test
+  cpp/buffer/completion_dispatcher_test.cc
+)
+
+target_include_directories(telepath_completion_dispatcher_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_completion_dispatcher_test PRIVATE telepath)
+
+add_test(NAME telepath_completion_dispatcher_test COMMAND telepath_completion_dispatcher_test)
+
 add_executable(telepath_telemetry_test
   cpp/telemetry/telemetry_test.cc
 )

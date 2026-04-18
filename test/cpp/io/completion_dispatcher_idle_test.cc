@@ -19,18 +19,13 @@ struct IdleBackendState {
 
 class IdleAwareDiskBackend : public telepath::DiskBackend {
  public:
-  explicit IdleAwareDiskBackend(std::shared_ptr<IdleBackendState> state)
-      : state_(std::move(state)) {}
+  explicit IdleAwareDiskBackend(std::shared_ptr<IdleBackendState> state) : state_(std::move(state)) {}
 
-  telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &,
-                                        std::byte *,
-                                        std::size_t) override {
+  telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &, std::byte *, std::size_t) override {
     return telepath::Status::Unavailable("not expected");
   }
 
-  telepath::Result<uint64_t> SubmitWrite(const telepath::BufferTag &,
-                                         const std::byte *,
-                                         std::size_t) override {
+  telepath::Result<uint64_t> SubmitWrite(const telepath::BufferTag &, const std::byte *, std::size_t) override {
     return telepath::Status::Unavailable("not expected");
   }
 
@@ -61,19 +56,23 @@ class IdleAwareDiskBackend : public telepath::DiskBackend {
   bool shutdown_{false};
 };
 
+void CreateAndDestroyManager(const std::shared_ptr<IdleBackendState> &state) {
+  auto backend = std::make_unique<IdleAwareDiskBackend>(state);
+  auto replacer = telepath::MakeClockReplacer(2);
+  auto telemetry = telepath::MakeNoOpTelemetrySink();
+  telepath::BufferManager manager(2, 4096, std::move(backend), std::move(replacer), telemetry);
+}
+
+void AssertIdleBackendWasNotPolled(const std::shared_ptr<IdleBackendState> &state) {
+  assert(state->poll_calls.load() == 0);
+  assert(state->shutdown_calls.load() == 1);
+}
+
 }  // namespace
 
 int main() {
   auto state = std::make_shared<IdleBackendState>();
-  {
-    auto backend = std::make_unique<IdleAwareDiskBackend>(state);
-    auto replacer = telepath::MakeClockReplacer(2);
-    auto telemetry = telepath::MakeNoOpTelemetrySink();
-    telepath::BufferManager manager(2, 4096, std::move(backend),
-                                    std::move(replacer), telemetry);
-  }
-
-  assert(state->poll_calls.load() == 0);
-  assert(state->shutdown_calls.load() == 1);
+  CreateAndDestroyManager(state);
+  AssertIdleBackendWasNotPolled(state);
   return 0;
 }

@@ -1,68 +1,67 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
-#include <vector>
 
+#include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
 #include "telepath/replacer/clock_replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
 
-// This test file is recommended since it could help comprehend the overall buffering procedure
+namespace {
 
-int main() {
-  namespace fs = std::filesystem;
-  using telepath::BlockId;
-  using telepath::BufferManager;
-  using telepath::FileId;
-  using telepath::MakeCounterTelemetrySink;
-  using telepath::PosixDiskBackend;
-  using telepath::ClockReplacer;
+struct SmokeTestContext {
+  std::shared_ptr<telepath::TelemetrySink> telemetry;
+  telepath::BufferManager manager;
+};
 
-  const fs::path root = fs::temp_directory_path() / "telepath_smoke_data";
-  fs::remove_all(root);
-  fs::create_directories(root);
+auto BuildContext(const std::filesystem::path &root) -> SmokeTestContext {
+  auto telemetry = telepath::MakeCounterTelemetrySink();
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto replacer = std::make_unique<telepath::ClockReplacer>(2);
+  return {
+    telemetry,
+    telepath::BufferManager(2, 4096, std::move(disk_backend), std::move(replacer), telemetry),
+  };
+}
 
-  auto telemetry = MakeCounterTelemetrySink();
-  {
-    // Initialize the stage, classic Posix, 2 frames.
-    auto disk_backend = std::make_unique<PosixDiskBackend>(root.string(), 4096);
-    auto replacer = std::make_unique<ClockReplacer>(2);
-    BufferManager manager(2, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+void WriteAndFlushFirstPage(telepath::BufferManager *manager) {
+  auto first_result = manager->ReadBuffer(1, 0);
+  assert(first_result.ok());
 
-    const FileId file_id = 1;
-    const BlockId block_id = 0;
+  auto first_handle = std::move(first_result.value());
+  std::byte *data = first_handle.mutable_data();
+  data[0] = std::byte{0x2A};
+  data[1] = std::byte{0x0B};
+  assert(manager->MarkBufferDirty(first_handle).ok());
+  assert(manager->FlushBuffer(first_handle).ok());
+}
 
-    // Cold Start and miss
-    auto first_result = manager.ReadBuffer(file_id, block_id);
-    assert(first_result.ok());
-    telepath::BufferHandle first_handle = std::move(first_result.value());
-    std::byte *data = first_handle.mutable_data();
-    data[0] = std::byte{0x2A};
-    data[1] = std::byte{0x0B};
-    assert(manager.MarkBufferDirty(first_handle).ok());
-    assert(manager.FlushBuffer(first_handle).ok());
-    first_handle.Reset();
+void ExpectSecondReadHitsCachedBytes(telepath::BufferManager *manager) {
+  auto second_result = manager->ReadBuffer(1, 0);
+  assert(second_result.ok());
 
-    // Twice read and hit the cache
-    auto second_result = manager.ReadBuffer(file_id, block_id);
-    assert(second_result.ok());
-    telepath::BufferHandle second_handle = std::move(second_result.value());
-    const std::byte *read_back = second_handle.data();
-    assert(std::to_integer<int>(read_back[0]) == 0x2A);
-    assert(std::to_integer<int>(read_back[1]) == 0x0B);
-    second_handle.Reset();
-  }
+  auto second_handle = std::move(second_result.value());
+  const std::byte *read_back = second_handle.data();
+  assert(std::to_integer<int>(read_back[0]) == 0x2A);
+  assert(std::to_integer<int>(read_back[1]) == 0x0B);
+}
 
-  // Test file finally check the Telemetry
-  const telepath::TelemetrySnapshot snapshot = telemetry->Snapshot();
+void ExpectSmokeTelemetry(const telepath::TelemetrySnapshot &snapshot) {
   assert(snapshot.buffer_misses >= 1);
   assert(snapshot.disk_reads >= 1);
   assert(snapshot.disk_writes >= 1);
   assert(snapshot.dirty_flushes >= 1);
+}
 
-  fs::remove_all(root);
+}  // namespace
+
+int main() {
+  telepath::buffer_test_support::TestRootGuard root_guard("telepath_smoke_data");
+  auto context = BuildContext(root_guard.path());
+  WriteAndFlushFirstPage(&context.manager);
+  ExpectSecondReadHitsCachedBytes(&context.manager);
+  ExpectSmokeTelemetry(context.telemetry->Snapshot());
   return 0;
 }

@@ -1,47 +1,49 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 
+#include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
 #include "telepath/replacer/replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
 
-int main() {
-  namespace fs = std::filesystem;
+namespace {
 
-  const fs::path root = fs::temp_directory_path() / "telepath_memory_layout_data";
-  fs::remove_all(root);
-  fs::create_directories(root);
-
+auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto disk_backend =
-      std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
   auto replacer = telepath::MakeClockReplacer(4);
-  telepath::BufferManager manager(4, 4096, std::move(disk_backend),
-                                  std::move(replacer), telemetry);
+  return telepath::BufferManager(4, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+}
 
-  auto first_result = manager.ReadBuffer(1, 0);
-  auto second_result = manager.ReadBuffer(1, 1);
+auto ComputeFrameDistance(
+  const telepath::BufferHandle &first_handle,
+  const telepath::BufferHandle &second_handle
+) -> std::uintptr_t {
+  const auto first_addr = reinterpret_cast<std::uintptr_t>(first_handle.data());
+  const auto second_addr = reinterpret_cast<std::uintptr_t>(second_handle.data());
+  if (first_addr > second_addr) return first_addr - second_addr;
+  return second_addr - first_addr;
+}
+
+void ExpectFramesArePageSizedApart(telepath::BufferManager *manager) {
+  auto first_result = manager->ReadBuffer(1, 0);
+  auto second_result = manager->ReadBuffer(1, 1);
   assert(first_result.ok());
   assert(second_result.ok());
 
-  telepath::BufferHandle first_handle = std::move(first_result.value());
-  telepath::BufferHandle second_handle = std::move(second_result.value());
+  auto first_handle = std::move(first_result.value());
+  auto second_handle = std::move(second_result.value());
+  assert(ComputeFrameDistance(first_handle, second_handle) == 4096);
+}
 
-  const auto first_addr =
-      reinterpret_cast<std::uintptr_t>(first_handle.mutable_data());
-  const auto second_addr =
-      reinterpret_cast<std::uintptr_t>(second_handle.mutable_data());
-  const std::uintptr_t diff =
-      first_addr > second_addr ? first_addr - second_addr : second_addr - first_addr;
+}  // namespace
 
-  assert(diff == 4096);
-
-  first_handle.Reset();
-  second_handle.Reset();
-  fs::remove_all(root);
+int main() {
+  telepath::buffer_test_support::TestRootGuard root_guard("telepath_memory_layout_data");
+  auto manager = BuildManager(root_guard.path());
+  ExpectFramesArePageSizedApart(&manager);
   return 0;
 }

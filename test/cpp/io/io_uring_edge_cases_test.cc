@@ -3,119 +3,120 @@
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
-#include <string>
 
+#include "io_test_support.h"
 #include "telepath/io/io_uring_disk_backend.h"
 #include "telepath/io/posix_disk_backend.h"
 
 namespace {
 
-bool RequireIoUringSuccess() {
-  const char *value = std::getenv("TELEPATH_REQUIRE_IO_URING_SUCCESS");
-  return value != nullptr && std::string(value) == "1";
+auto BuildMarkedPage(std::byte first, std::byte last) -> std::array<std::byte, 4096> {
+  std::array<std::byte, 4096> page{};
+  page[0] = first;
+  page[4095] = last;
+  return page;
 }
 
-}  // namespace
+void AssertPageMarkers(const std::array<std::byte, 4096> &page, std::byte first, std::byte last) {
+  assert(page[0] == first);
+  assert(page[4095] == last);
+}
 
-int main() {
-  namespace fs = std::filesystem;
+bool HandleUnavailableIoUringBackend(const telepath::IoUringDiskBackend &backend) {
+  if (backend.initialization_status().ok()) return false;
 
-  const fs::path root =
-      fs::temp_directory_path() / "telepath_io_uring_edge_cases_test";
-  fs::remove_all(root);
-  fs::create_directories(root);
+  assert(!telepath::io_test_support::RequireIoUringSuccess());
+  assert(backend.initialization_status().code() == telepath::StatusCode::kUnavailable);
+  return true;
+}
 
-  telepath::IoUringDiskBackend backend(root.string(), 4096, 1);
-  if (!backend.initialization_status().ok()) {
-    assert(!RequireIoUringSuccess());
-    assert(backend.initialization_status().code() ==
-           telepath::StatusCode::kUnavailable);
-    fs::remove_all(root);
-    return 0;
-  }
+void AssertMissingReadZeroFillsPage(telepath::IoUringDiskBackend *backend, const telepath::BufferTag &tag) {
+  std::array<std::byte, 4096> page{};
+  page.fill(std::byte{0xFF});
 
-  const telepath::BufferTag zero_fill_tag{23, 7};
-  std::array<std::byte, 4096> zero_fill_page{};
-  zero_fill_page.fill(std::byte{0xFF});
+  auto request = backend->SubmitRead(tag, page.data(), page.size());
+  assert(request.ok());
 
-  auto zero_fill_request =
-      backend.SubmitRead(zero_fill_tag, zero_fill_page.data(),
-                         zero_fill_page.size());
-  assert(zero_fill_request.ok());
-  auto zero_fill_completion = backend.PollCompletion();
-  assert(zero_fill_completion.ok());
-  assert(zero_fill_completion.value().request_id == zero_fill_request.value());
-  assert(zero_fill_completion.value().operation == telepath::DiskOperation::kRead);
-  assert(zero_fill_completion.value().tag == zero_fill_tag);
-  assert(zero_fill_completion.value().status.ok());
-  for (const std::byte value : zero_fill_page) {
-    assert(value == std::byte{0});
-  }
+  auto completion = backend->PollCompletion();
+  assert(completion.ok());
+  assert(completion.value().request_id == request.value());
+  assert(completion.value().operation == telepath::DiskOperation::kRead);
+  assert(completion.value().tag == tag);
+  assert(completion.value().status.ok());
 
-  const telepath::BufferTag first_write_tag{23, 0};
-  const telepath::BufferTag second_write_tag{23, 1};
-  std::array<std::byte, 4096> first_page{};
-  std::array<std::byte, 4096> second_page{};
-  first_page[0] = std::byte{0x11};
-  first_page[4095] = std::byte{0x22};
-  second_page[0] = std::byte{0x33};
-  second_page[4095] = std::byte{0x44};
+  for (const std::byte value : page) assert(value == std::byte{0});
+}
 
-  auto first_write =
-      backend.SubmitWrite(first_write_tag, first_page.data(), first_page.size());
-  assert(first_write.ok());
-
-  auto null_read = backend.SubmitRead(second_write_tag, nullptr, 4096);
+void AssertInvalidArgumentsRejected(
+    telepath::IoUringDiskBackend *backend,
+    const telepath::BufferTag &tag,
+    const std::array<std::byte, 4096> &page) {
+  auto null_read = backend->SubmitRead(tag, nullptr, page.size());
   assert(!null_read.ok());
   assert(null_read.status().code() == telepath::StatusCode::kInvalidArgument);
 
-  auto wrong_size_write =
-      backend.SubmitWrite(second_write_tag, second_page.data(), 1024);
+  auto wrong_size_write = backend->SubmitWrite(tag, page.data(), 1024);
   assert(!wrong_size_write.ok());
-  assert(wrong_size_write.status().code() ==
-         telepath::StatusCode::kInvalidArgument);
+  assert(wrong_size_write.status().code() == telepath::StatusCode::kInvalidArgument);
+}
 
-  auto first_write_completion = backend.PollCompletion();
-  assert(first_write_completion.ok());
-  assert(first_write_completion.value().request_id == first_write.value());
-  assert(first_write_completion.value().operation ==
-         telepath::DiskOperation::kWrite);
-  assert(first_write_completion.value().tag == first_write_tag);
-  assert(first_write_completion.value().status.ok());
+void AssertWriteCompletes(
+    telepath::IoUringDiskBackend *backend,
+    const telepath::BufferTag &tag,
+    const std::array<std::byte, 4096> &page) {
+  auto request = backend->SubmitWrite(tag, page.data(), page.size());
+  assert(request.ok());
 
-  auto second_write =
-      backend.SubmitWrite(second_write_tag, second_page.data(), second_page.size());
-  assert(second_write.ok());
-  auto second_write_completion = backend.PollCompletion();
-  assert(second_write_completion.ok());
-  assert(second_write_completion.value().request_id == second_write.value());
-  assert(second_write_completion.value().operation ==
-         telepath::DiskOperation::kWrite);
-  assert(second_write_completion.value().tag == second_write_tag);
-  assert(second_write_completion.value().status.ok());
+  auto completion = backend->PollCompletion();
+  assert(completion.ok());
+  assert(completion.value().request_id == request.value());
+  assert(completion.value().operation == telepath::DiskOperation::kWrite);
+  assert(completion.value().tag == tag);
+  assert(completion.value().status.ok());
+}
 
+void AssertPersistedWrites(
+    const std::filesystem::path &root,
+    const telepath::BufferTag &first_tag,
+    const std::array<std::byte, 4096> &first_page,
+    const telepath::BufferTag &second_tag,
+    const std::array<std::byte, 4096> &second_page) {
   telepath::PosixDiskBackend verifier(root.string(), 4096);
   std::array<std::byte, 4096> verify_first{};
   std::array<std::byte, 4096> verify_second{};
-  auto verify_first_request =
-      verifier.SubmitRead(first_write_tag, verify_first.data(), verify_first.size());
-  auto verify_second_request = verifier.SubmitRead(second_write_tag,
-                                                   verify_second.data(),
-                                                   verify_second.size());
+
+  auto verify_first_request = verifier.SubmitRead(first_tag, verify_first.data(), verify_first.size());
+  auto verify_second_request = verifier.SubmitRead(second_tag, verify_second.data(), verify_second.size());
   assert(verify_first_request.ok());
   assert(verify_second_request.ok());
+
   auto verify_first_completion = verifier.PollCompletion();
   auto verify_second_completion = verifier.PollCompletion();
   assert(verify_first_completion.ok());
   assert(verify_second_completion.ok());
   assert(verify_first_completion.value().status.ok());
   assert(verify_second_completion.value().status.ok());
-  assert(verify_first[0] == std::byte{0x11});
-  assert(verify_first[4095] == std::byte{0x22});
-  assert(verify_second[0] == std::byte{0x33});
-  assert(verify_second[4095] == std::byte{0x44});
+  AssertPageMarkers(verify_first, first_page[0], first_page[4095]);
+  AssertPageMarkers(verify_second, second_page[0], second_page[4095]);
+}
 
+}  // namespace
+
+int main() {
+  telepath::io_test_support::TestRootGuard root_guard("telepath_io_uring_edge_cases_test");
+  telepath::IoUringDiskBackend backend(root_guard.path().string(), 4096, 1);
+  if (HandleUnavailableIoUringBackend(backend)) return 0;
+
+  const telepath::BufferTag zero_fill_tag{23, 7};
+  const telepath::BufferTag first_write_tag{23, 0};
+  const telepath::BufferTag second_write_tag{23, 1};
+  auto first_page = BuildMarkedPage(std::byte{0x11}, std::byte{0x22});
+  auto second_page = BuildMarkedPage(std::byte{0x33}, std::byte{0x44});
+  AssertMissingReadZeroFillsPage(&backend, zero_fill_tag);
+  AssertWriteCompletes(&backend, first_write_tag, first_page);
+  AssertInvalidArgumentsRejected(&backend, second_write_tag, second_page);
+  AssertWriteCompletes(&backend, second_write_tag, second_page);
+  AssertPersistedWrites(root_guard.path(), first_write_tag, first_page, second_write_tag, second_page);
   backend.Shutdown();
-  fs::remove_all(root);
   return 0;
 }

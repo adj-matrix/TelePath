@@ -3,22 +3,23 @@
 #include <cstddef>
 #include <filesystem>
 
+#include "io_test_support.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/io/posix_disk_backend.h"
 
-int main() {
-  namespace fs = std::filesystem;
+namespace {
 
-  const fs::path root = fs::temp_directory_path() / "telepath_disk_backend_data";
-  fs::remove_all(root);
-  fs::create_directories(root);
+auto BuildMarkedPage(std::byte first, std::byte last) -> std::array<std::byte, 4096> {
+  std::array<std::byte, 4096> page{};
+  page[0] = first;
+  page[4095] = last;
+  return page;
+}
 
+void AssertRoundTripReadWrite(const std::filesystem::path &root) {
   telepath::PosixDiskBackend backend(root.string(), 4096);
-  std::array<std::byte, 4096> write_buffer{};
+  auto write_buffer = BuildMarkedPage(std::byte{0x33}, std::byte{0x7A});
   std::array<std::byte, 4096> read_buffer{};
-  write_buffer[0] = std::byte{0x33};
-  write_buffer[4095] = std::byte{0x7A};
-
   const telepath::BufferTag tag{5, 9};
 
   auto write_submit = backend.SubmitWrite(tag, write_buffer.data(), write_buffer.size());
@@ -39,18 +40,24 @@ int main() {
 
   assert(read_buffer[0] == std::byte{0x33});
   assert(read_buffer[4095] == std::byte{0x7A});
+}
+
+void AssertInvalidReadSizeRejected(const std::filesystem::path &root) {
+  telepath::PosixDiskBackend backend(root.string(), 4096);
+  std::array<std::byte, 4096> read_buffer{};
+  const telepath::BufferTag tag{5, 9};
 
   auto invalid_read = backend.SubmitRead(tag, read_buffer.data(), read_buffer.size() - 1);
   assert(!invalid_read.ok());
   assert(invalid_read.status().code() == telepath::StatusCode::kInvalidArgument);
+}
 
+void AssertShutdownDrainsPendingWrites(const std::filesystem::path &root) {
   telepath::PosixDiskBackend shutdown_backend(root.string(), 4096);
-  auto first_shutdown_submit =
-      shutdown_backend.SubmitWrite(telepath::BufferTag{7, 1}, write_buffer.data(),
-                                   write_buffer.size());
-  auto second_shutdown_submit =
-      shutdown_backend.SubmitWrite(telepath::BufferTag{7, 2}, write_buffer.data(),
-                                   write_buffer.size());
+  auto write_buffer = BuildMarkedPage(std::byte{0x33}, std::byte{0x7A});
+
+  auto first_shutdown_submit = shutdown_backend.SubmitWrite(telepath::BufferTag{7, 1}, write_buffer.data(), write_buffer.size());
+  auto second_shutdown_submit = shutdown_backend.SubmitWrite(telepath::BufferTag{7, 2}, write_buffer.data(), write_buffer.size());
   assert(first_shutdown_submit.ok());
   assert(second_shutdown_submit.ok());
 
@@ -69,7 +76,14 @@ int main() {
   auto drained_completion = shutdown_backend.PollCompletion();
   assert(!drained_completion.ok());
   assert(drained_completion.status().code() == telepath::StatusCode::kUnavailable);
+}
 
-  fs::remove_all(root);
+}  // namespace
+
+int main() {
+  telepath::io_test_support::TestRootGuard root_guard("telepath_disk_backend_data");
+  AssertRoundTripReadWrite(root_guard.path());
+  AssertInvalidReadSizeRejected(root_guard.path());
+  AssertShutdownDrainsPendingWrites(root_guard.path());
   return 0;
 }

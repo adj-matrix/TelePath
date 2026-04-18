@@ -1,93 +1,82 @@
 #include <cassert>
-#include <memory>
-#include <vector>
 
 #include "telepath/replacer/replacer.h"
 
+namespace {
+
+void AssertFramesBelowKUseOldestAccessOrder() {
+  auto replacer = telepath::MakeLruKReplacer(6, 2);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(2);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(3);
+  replacer->SetEvictable(0, true);
+  replacer->SetEvictable(1, true);
+  replacer->SetEvictable(2, true);
+  replacer->SetEvictable(3, true);
+
+  telepath::FrameId victim = telepath::kInvalidFrameId;
+  assert(replacer->Victim(&victim));
+  assert(victim == 2);
+}
+
+void AssertFullyQualifiedFramesUseBackwardKDistance() {
+  auto replacer = telepath::MakeLruKReplacer(6, 2);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(2);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(2);
+  replacer->SetEvictable(0, true);
+  replacer->SetEvictable(1, true);
+  replacer->SetEvictable(2, true);
+
+  telepath::FrameId victim = telepath::kInvalidFrameId;
+  assert(replacer->Victim(&victim));
+  assert(victim == 0);
+}
+
+void AssertNonEvictableFramesAreSkipped() {
+  auto replacer = telepath::MakeLruKReplacer(6, 2);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->SetEvictable(0, true);
+  replacer->SetEvictable(1, false);
+
+  telepath::FrameId victim = telepath::kInvalidFrameId;
+  assert(replacer->Victim(&victim));
+  assert(victim == 0);
+  assert(replacer->Size() == 0);
+}
+
+void AssertHigherKStillPrefersOlderKthReference() {
+  auto replacer = telepath::MakeLruKReplacer(6, 3);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(1);
+  replacer->RecordAccess(0);
+  replacer->RecordAccess(0);
+  replacer->SetEvictable(0, true);
+  replacer->SetEvictable(1, true);
+
+  telepath::FrameId victim = telepath::kInvalidFrameId;
+  assert(replacer->Victim(&victim));
+  assert(victim == 0);
+}
+
+}  // namespace
+
 int main() {
-  {
-    std::unique_ptr<telepath::Replacer> replacer =
-        telepath::MakeLruKReplacer(6, 2);
-
-    replacer->RecordAccess(0);  // t1
-    replacer->RecordAccess(1);  // t2
-    replacer->RecordAccess(2);  // t3
-    replacer->RecordAccess(0);  // t4
-    replacer->RecordAccess(1);  // t5
-    replacer->RecordAccess(3);  // t6
-
-    replacer->SetEvictable(0, true);
-    replacer->SetEvictable(1, true);
-    replacer->SetEvictable(2, true);
-    replacer->SetEvictable(3, true);
-
-    telepath::FrameId victim = telepath::kInvalidFrameId;
-    assert(replacer->Victim(&victim));
-    // Frame 2 and 3 have fewer than K accesses. Frame 2 is older.
-    assert(victim == 2);
-  }
-
-  {
-    std::unique_ptr<telepath::Replacer> replacer =
-        telepath::MakeLruKReplacer(6, 2);
-
-    replacer->RecordAccess(0);  // t1
-    replacer->RecordAccess(1);  // t2
-    replacer->RecordAccess(2);  // t3
-    replacer->RecordAccess(0);  // t4
-    replacer->RecordAccess(1);  // t5
-    replacer->RecordAccess(2);  // t6
-
-    replacer->SetEvictable(0, true);
-    replacer->SetEvictable(1, true);
-    replacer->SetEvictable(2, true);
-
-    telepath::FrameId victim = telepath::kInvalidFrameId;
-    assert(replacer->Victim(&victim));
-    // Compare the 2nd most recent backward distance:
-    // frame 0 uses t1/t4, frame 1 uses t2/t5, frame 2 uses t3/t6.
-    // frame 0 should be evicted first.
-    assert(victim == 0);
-  }
-
-  {
-    std::unique_ptr<telepath::Replacer> replacer =
-        telepath::MakeLruKReplacer(6, 2);
-
-    replacer->RecordAccess(0);
-    replacer->RecordAccess(1);
-    replacer->RecordAccess(0);
-    replacer->RecordAccess(1);
-    replacer->SetEvictable(0, true);
-    replacer->SetEvictable(1, false);
-
-    telepath::FrameId victim = telepath::kInvalidFrameId;
-    assert(replacer->Victim(&victim));
-    assert(victim == 0);
-    assert(replacer->Size() == 0);
-  }
-
-  {
-    std::unique_ptr<telepath::Replacer> replacer =
-        telepath::MakeLruKReplacer(6, 3);
-
-    replacer->RecordAccess(0);  // t1
-    replacer->RecordAccess(0);  // t2
-    replacer->RecordAccess(1);  // t3
-    replacer->RecordAccess(1);  // t4
-    replacer->RecordAccess(1);  // t5
-    replacer->RecordAccess(0);  // t6
-    replacer->RecordAccess(0);  // t7
-
-    replacer->SetEvictable(0, true);
-    replacer->SetEvictable(1, true);
-
-    telepath::FrameId victim = telepath::kInvalidFrameId;
-    assert(replacer->Victim(&victim));
-    // For K=3, frame 0 keeps the older 3rd-most-recent access and should
-    // still be evicted before frame 1 even after its later accesses.
-    assert(victim == 0);
-  }
-
+  AssertFramesBelowKUseOldestAccessOrder();
+  AssertFullyQualifiedFramesUseBackwardKDistance();
+  AssertNonEvictableFramesAreSkipped();
+  AssertHigherKStillPrefersOlderKthReference();
   return 0;
 }

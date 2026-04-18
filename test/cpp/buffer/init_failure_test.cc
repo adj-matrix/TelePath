@@ -9,52 +9,65 @@ namespace {
 
 class NoOpDiskBackend : public telepath::DiskBackend {
  public:
-  telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &,
-                                        std::byte *,
-                                        std::size_t) override {
+  auto SubmitRead(
+    const telepath::BufferTag &,
+    std::byte *,
+    std::size_t
+  ) -> telepath::Result<uint64_t> override {
     return telepath::Status::Unavailable("not expected");
   }
 
-  telepath::Result<uint64_t> SubmitWrite(const telepath::BufferTag &,
-                                         const std::byte *,
-                                         std::size_t) override {
+  auto SubmitWrite(
+    const telepath::BufferTag &,
+    const std::byte *,
+    std::size_t
+  ) -> telepath::Result<uint64_t> override {
     return telepath::Status::Unavailable("not expected");
   }
 
-  telepath::Result<telepath::DiskCompletion> PollCompletion() override {
+  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
     return telepath::Status::Unavailable("not expected");
   }
 
   void Shutdown() override {}
 
-  telepath::DiskBackendCapabilities GetCapabilities() const override {
-    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
+  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
+    return {
+      telepath::DiskBackendKind::kPosix,
+      false,
+      false,
+      1,
+      false,
+    };
   }
 };
 
-}  // namespace
-
-int main() {
+auto BuildInvalidManager() -> telepath::BufferManager {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
   auto disk_backend = std::make_unique<NoOpDiskBackend>();
   auto replacer = telepath::MakeClockReplacer(1);
+  return telepath::BufferManager(0, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+}
 
-  telepath::BufferManager manager(0, 4096, std::move(disk_backend),
-                                  std::move(replacer), telemetry);
-
-  auto read_result = manager.ReadBuffer(1, 0);
+void ExpectInitializationFailurePaths(telepath::BufferManager *manager) {
+  auto read_result = manager->ReadBuffer(1, 0);
   assert(!read_result.ok());
   assert(read_result.status().code() == telepath::StatusCode::kInvalidArgument);
 
-  const telepath::Status flush_all_status = manager.FlushAll();
+  const auto flush_all_status = manager->FlushAll();
   assert(!flush_all_status.ok());
   assert(flush_all_status.code() == telepath::StatusCode::kInvalidArgument);
 
   telepath::BufferHandle invalid_handle;
-  const telepath::Status release_status =
-      manager.ReleaseBuffer(std::move(invalid_handle));
+  const auto release_status = manager->ReleaseBuffer(std::move(invalid_handle));
   assert(!release_status.ok());
   assert(release_status.code() == telepath::StatusCode::kInvalidArgument);
+}
 
+}  // namespace
+
+int main() {
+  auto manager = BuildInvalidManager();
+  ExpectInitializationFailurePaths(&manager);
   return 0;
 }
