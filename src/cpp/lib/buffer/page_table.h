@@ -35,7 +35,7 @@ class BufferManagerPageTable {
   void ReplaceAcrossStripes(
     std::size_t old_stripe,
     const BufferTag &old_tag,
-    std::size_t new_stripe, 
+    std::size_t new_stripe,
     const BufferTag &new_tag,
     FrameId frame_id);
 

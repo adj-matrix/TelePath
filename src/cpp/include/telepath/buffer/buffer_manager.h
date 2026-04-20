@@ -78,19 +78,19 @@ class BufferManager {
 
   // Pins the requested page in memory and returns a scoped handle to it. The
   // page may be loaded from disk or served from the resident cache.
-  Result<BufferHandle> ReadBuffer(FileId file_id, BlockId block_id);
+  auto ReadBuffer(FileId file_id, BlockId block_id) -> Result<BufferHandle>;
   // Explicitly releases a handle before it goes out of scope.
-  Status ReleaseBuffer(BufferHandle &&handle);
+  auto ReleaseBuffer(BufferHandle &&handle) -> Status;
   // Marks the page referenced by the handle as dirty so that it will be
   // written back before eviction or during an explicit flush.
-  Status MarkBufferDirty(const BufferHandle &handle);
+  auto MarkBufferDirty(const BufferHandle &handle) -> Status;
   // Flushes the page referenced by the handle to the backing store.
-  Status FlushBuffer(const BufferHandle &handle);
+  auto FlushBuffer(const BufferHandle &handle) -> Status;
   // Flushes every currently resident dirty page.
-  Status FlushAll();
+  auto FlushAll() -> Status;
   // Returns a point-in-time view of frame metadata for observability and debug
   // tooling. This does not expose direct page memory access.
-  BufferPoolSnapshot ExportSnapshot() const;
+  auto ExportSnapshot() const -> BufferPoolSnapshot;
 
   std::size_t pool_size() const { return pool_size_; }
   std::size_t page_size() const { return page_size_; }
@@ -100,34 +100,42 @@ class BufferManager {
  private:
   friend class BufferHandle;
 
-  Status ReleaseFrame(FrameId frame_id);
-  auto BuildPinnedHandle(FrameId frame_id, const BufferTag &tag) -> BufferHandle;
-  auto UnpinFrame(FrameId frame_id) -> Result<bool>;
-  bool ShouldQueueCleanerCandidate(const BufferDescriptor &descriptor) const;
+  // ReadBuffer
   auto TryReadResidentHit(const BufferTag &tag) -> std::optional<BufferHandle>;
   auto AwaitJoinedMiss(
     const BufferTag &tag,
     const std::shared_ptr<BufferManagerMissState> &state
   ) -> Result<BufferHandle>;
-  auto TryServeMissOwnerHit(
-    const BufferTag &tag,
-    const std::shared_ptr<BufferManagerMissState> &state
-  ) -> std::optional<BufferHandle>;
   auto LoadMissOwnerBuffer(
     const BufferTag &tag,
     const std::shared_ptr<BufferManagerMissState> &state
   ) -> Result<BufferHandle>;
-  void CompleteMiss(
+  auto TryPinResidentFrame(FrameId frame_id, const BufferTag &tag) -> std::optional<BufferHandle>;
+  auto WaitForFrameReady(FrameId frame_id) -> Status;
+  auto ReserveFrameForTag(const BufferTag &tag) -> Result<FrameReservation>;
+  auto CompleteReservation(
     const BufferTag &tag,
-    const std::shared_ptr<BufferManagerMissState> &state,
-    const Status &status, FrameId frame_id);
+    const FrameReservation &reservation
+  ) -> Result<FrameId>;
+  auto RestoreEvictionFailure(
+    const FrameReservation &reservation,
+    const Status &status
+  ) -> Status;
+  auto AbortLoadReservation(
+    FrameId frame_id,
+    const BufferTag &tag,
+    const Status &status
+  ) -> Status;
+  void CompleteLoadedFrame(FrameId frame_id);
+  void ReleaseFreeFrame(FrameId frame_id);
+  // Common
+  void ResetCleanerCandidate(FrameId frame_id);
+  // Unclassified
+  auto ReleaseFrame(FrameId frame_id) -> Status;
+  auto UnpinFrame(FrameId frame_id) -> Result<bool>;
+  bool ShouldQueueCleanerCandidate(const BufferDescriptor &descriptor) const;
   auto ValidateOwnedHandle(const BufferHandle &handle) const -> Status;
   auto MarkFrameDirty(FrameId frame_id, const BufferTag &tag) -> Result<bool>;
-  bool HandleHasStableFlushSource(const BufferHandle &handle) const;
-  void RecordPinnedAccess(FrameId frame_id);
-  auto TryPinResidentFrame(FrameId frame_id, const BufferTag &tag)
-    -> std::optional<BufferHandle>;
-  auto WaitForFrameReady(FrameId frame_id) -> Status;
   auto WaitForPendingFlush(
     BufferDescriptor *descriptor,
     std::unique_lock<std::mutex> *descriptor_guard,
@@ -147,60 +155,41 @@ class BufferManager {
     BufferTag *tag,
     uint64_t *dirty_generation
   ) -> Result<bool>;
-  auto CaptureFlushSnapshot(FrameId frame_id, const std::byte *stable_data)
-    -> std::vector<std::byte>;
-  auto BuildDirtyFlushTask(
-    FrameId frame_id,
-    const BufferTag &tag,
-    uint64_t dirty_generation,
-    const std::byte *stable_data,
-    bool cleaner_owned
-  ) -> std::shared_ptr<BufferManagerFlushTask>;
-  auto BuildEvictedFlushTask(const FrameReservation &reservation)
-    -> std::shared_ptr<BufferManagerFlushTask>;
-  auto EnqueueFlushTask(const std::shared_ptr<BufferManagerFlushTask> &task)
-    -> Status;
+  auto CaptureFlushSnapshot(FrameId frame_id, const std::byte *stable_data) -> std::vector<std::byte>;
+  auto EnqueueFlushTask(const std::shared_ptr<BufferManagerFlushTask> &task) -> Status;
   auto RollBackFlushTask(
     FrameId frame_id,
     bool cleaner_owned,
     const Status &status
   ) -> Status;
-  auto WaitForFlushTask(const std::shared_ptr<BufferManagerFlushTask> &task)
-    -> Status;
   auto FlushReservedVictim(const FrameReservation &reservation) -> Status;
-  auto SubmitReadRequest(FrameId frame_id, const BufferTag &tag)
-    -> Result<uint64_t>;
-  auto WaitForReadRequest(uint64_t request_id) -> Status;
-  void FinalizeCleanerFlush(const std::shared_ptr<BufferManagerFlushTask> &task);
   void AcquireReadLatch(BufferHandle *handle) const;
   void AcquireWriteLatch(BufferHandle *handle);
-  auto WaitForScheduledFlushes(
-    const std::vector<std::shared_ptr<BufferManagerFlushTask>> &tasks
-  ) -> Status;
+  auto WaitForScheduledFlushes(const std::vector<std::shared_ptr<BufferManagerFlushTask>> &tasks) -> Status;
   auto FlushBusyFrames(const std::vector<FrameId> &frame_ids) -> Status;
   void BeginFlushTask(const std::shared_ptr<BufferManagerFlushTask> &task);
-  void ResetCleanerCandidate(FrameId frame_id);
   void MaybeEnqueueCleanerCandidate(FrameId frame_id);
   bool ShouldSeedCleanerCandidate(FrameId frame_id) const;
   void SeedCleanerCandidates();
-  Status FlushFrame(FrameId frame_id);
+  auto FlushFrame(FrameId frame_id) -> Status;
   auto TryBuildFlushTask(
     FrameId frame_id,
     const std::byte *stable_data,
     bool *was_busy,
     bool cleaner_owned
   ) -> Result<std::shared_ptr<BufferManagerFlushTask>>;
-  auto RunForegroundFlush(FrameId frame_id, const std::byte *stable_data)
-    -> Status;
-  Status FlushFrameWithStableSource(
+  auto RunForegroundFlush(FrameId frame_id, const std::byte *stable_data) -> Status;
+  auto FlushFrameWithStableSource(
     FrameId frame_id,
-    const std::byte *stable_data);
-  Result<std::shared_ptr<BufferManagerFlushTask>> TryScheduleFlushTask(
+    const std::byte *stable_data
+  ) -> Status;
+  auto TryScheduleFlushTask(
     FrameId frame_id,
     const std::byte *stable_data,
     bool *was_busy,
-    bool cleaner_owned);
-  Status FlushEvictedPage(const FrameReservation &reservation);
+    bool cleaner_owned
+  ) -> Result<std::shared_ptr<BufferManagerFlushTask>>;
+  auto FlushEvictedPage(const FrameReservation &reservation) -> Status;
   void FinalizeFlushTask(
     const std::shared_ptr<BufferManagerFlushTask> &task,
     const Status &flush_status);
@@ -208,10 +197,7 @@ class BufferManager {
   void SeedFreeFrames();
   auto ValidateRuntimeDependencies() const -> Status;
   void ResolveCleanerOptions();
-  void ResolveFlushOptions();
-  auto ResolveFlushWorkerCount(
-    const DiskBackendCapabilities &capabilities
-  ) const -> std::size_t;
+  auto ResolveFlushWorkerCount(const DiskBackendCapabilities &capabilities) const -> std::size_t;
   auto ResolveFlushSubmitBatchSize(
     const DiskBackendCapabilities &capabilities,
     std::size_t flush_worker_count
@@ -222,57 +208,18 @@ class BufferManager {
   auto StartCleanerController() -> Status;
   void StopFlushPipeline(const Status &reason);
   auto AcquireReservationFrame() -> Result<FrameId>;
-  void RequeueReservationCandidate(FrameId frame_id);
-  auto LookupFrameId(const BufferTag &tag) -> std::optional<FrameId>;
   void InstallReservationEntry(
     const BufferTag &tag,
     const FrameReservation &reservation);
-  auto TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag)
-    -> std::optional<FrameReservation>;
-  void RemoveReservationEntry(FrameId frame_id, const BufferTag &tag);
-  void PrepareLoadingFrame(
-    const BufferTag &tag,
-    const FrameReservation &reservation,
-    BufferDescriptor *descriptor);
+  auto TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag) -> std::optional<FrameReservation>;
   void MarkFrameReadInFlight(FrameId frame_id);
-  void CompleteLoadedFrame(FrameId frame_id);
-  void ResetFrameToFree(
-    FrameId frame_id,
-    BufferDescriptor *descriptor,
-    const Status &status);
-  void ReleaseFreeFrame(FrameId frame_id);
-  auto AbortLoadReservation(
-    FrameId frame_id,
-    const BufferTag &tag,
-    const Status &status
-  ) -> Status;
   auto ReadReservedPage(FrameId frame_id, const BufferTag &tag) -> Status;
-  auto RestoreEvictionFailure(
-    const FrameReservation &reservation,
-    const Status &status
-  ) -> Status;
-  void RestoreEvictedMapping(FrameId frame_id, const BufferTag &old_tag);
   void RestoreDirtyEviction(FrameId frame_id);
-  void FinishEvictionFailureRecovery(FrameId frame_id);
-  Result<FrameReservation> ReserveFrameForTag(const BufferTag &tag);
-  Result<FrameId> CompleteReservation(
-    const BufferTag &tag,
-    const FrameReservation &reservation);
-  Status RestoreFrameAfterFailedEviction(
-    FrameId frame_id,
-    const BufferTag &old_tag,
-    bool was_dirty,
-    uint64_t dirty_generation);
-  Status StartCompletionDispatcher();
-  bool ValidateFrame(FrameId frame_id) const;
+  auto StartCompletionDispatcher() -> Status;
   bool ValidateHandle(const BufferHandle &handle) const;
-  Result<BufferHandle> AwaitResidentBuffer(FrameId frame_id, const BufferTag &tag);
-  std::optional<BufferHandle> TryReadResidentBuffer(const BufferTag &tag);
   void NotifyCleaner();
-  const std::byte *AcquireReadPointer(BufferHandle *handle) const;
-  std::byte *AcquireWritePointer(BufferHandle *handle);
-  std::byte *GetFrameData(FrameId frame_id);
-  const std::byte *GetFrameData(FrameId frame_id) const;
+  auto AcquireReadPointer(BufferHandle *handle) const -> const std::byte *;
+  auto AcquireWritePointer(BufferHandle *handle) -> std::byte *;
 
   std::size_t pool_size_{0};
   std::size_t page_size_{0};
