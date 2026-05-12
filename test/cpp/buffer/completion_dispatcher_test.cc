@@ -1,4 +1,5 @@
 #include <cassert>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,11 @@ class ScriptedCompletionBackend : public telepath::DiskBackend {
 
     auto result = std::move(results_.front());
     results_.pop_front();
+    if (result.ok()) {
+      last_polled_request_id_ = result.value().request_id;
+      has_polled_request_ = true;
+      cv_.notify_all();
+    }
     return result;
   }
 
@@ -54,10 +60,19 @@ class ScriptedCompletionBackend : public telepath::DiskBackend {
     cv_.notify_all();
   }
 
+  bool WaitUntilPolled(uint64_t request_id, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(latch_);
+    return cv_.wait_for(lock, timeout, [&]() {
+      return has_polled_request_ && last_polled_request_id_ == request_id;
+    });
+  }
+
  private:
   std::mutex latch_;
   std::condition_variable cv_;
   std::deque<telepath::Result<telepath::DiskCompletion>> results_;
+  uint64_t last_polled_request_id_{0};
+  bool has_polled_request_{false};
   bool shutdown_{false};
 };
 
@@ -108,11 +123,32 @@ void AssertBackendFailureUnblocksRegisteredWaiters() {
   dispatcher.Shutdown(telepath::Status::Unavailable("test shutdown"));
 }
 
+void AssertEarlyCompletionIsDeliveredAfterRegistration() {
+  ScriptedCompletionBackend backend;
+  telepath::BufferManagerCompletionDispatcher dispatcher(&backend);
+  assert(dispatcher.Start().ok());
+
+  dispatcher.Register(41);
+  backend.PushCompletion(42, telepath::Status::Ok());
+  assert(backend.WaitUntilPolled(42, std::chrono::milliseconds(200)));
+
+  dispatcher.Register(42);
+  telepath::Status late_wait_status = dispatcher.Wait(42);
+  assert(late_wait_status.ok());
+
+  backend.PushCompletion(41, telepath::Status::Ok());
+  auto original_wait_status = dispatcher.Wait(41);
+  assert(original_wait_status.ok());
+
+  dispatcher.Shutdown(telepath::Status::Unavailable("test shutdown"));
+}
+
 }  // namespace
 
 int main() {
   AssertWaitReturnsCompletionStatus();
   AssertOutOfOrderCompletionsReachCorrectWaiters();
   AssertBackendFailureUnblocksRegisteredWaiters();
+  AssertEarlyCompletionIsDeliveredAfterRegistration();
   return 0;
 }

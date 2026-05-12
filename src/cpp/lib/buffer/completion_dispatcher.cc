@@ -34,8 +34,8 @@ void BufferManagerCompletionDispatcher::Shutdown(const Status &status) {
 
 void BufferManagerCompletionDispatcher::Register(uint64_t request_id) {
   std::lock_guard<std::mutex> guard(latch_);
-  request_states_.try_emplace(request_id);
-  ++outstanding_requests_;
+  auto [state_it, inserted] = request_states_.try_emplace(request_id);
+  if (inserted && !state_it->second.completed) ++outstanding_requests_;
   cv_.notify_all();
 }
 
@@ -79,9 +79,22 @@ void BufferManagerCompletionDispatcher::Run() {
     }
 
     DiskCompletion completion = completion_result.value();
-    auto &state = request_states_[completion.request_id];
-    state.completed = true;
-    state.status = completion.status;
+    auto state_it = request_states_.find(completion.request_id);
+    if (state_it == request_states_.end()) {
+      // Submit* can return before its caller registers the request id.
+      request_states_.emplace(
+        completion.request_id,
+        RequestState{true, completion.status});
+      cv_.notify_all();
+      continue;
+    }
+    if (state_it->second.completed) {
+      cv_.notify_all();
+      continue;
+    }
+
+    state_it->second.completed = true;
+    state_it->second.status = completion.status;
     if (outstanding_requests_ > 0) --outstanding_requests_;
     cv_.notify_all();
   }

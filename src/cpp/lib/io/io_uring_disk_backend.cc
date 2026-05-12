@@ -68,7 +68,7 @@ IoUringDiskBackend::IoUringDiskBackend(
 }
 
 IoUringDiskBackend::~IoUringDiskBackend() {
-  Shutdown();
+  IoUringDiskBackend::Shutdown();
   DrainInFlightRequestsForShutdown();
 
   std::lock_guard<std::mutex> guard(latch_);

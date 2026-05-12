@@ -26,7 +26,7 @@ PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size,
     worker_(&PosixDiskBackend::WorkerLoop, this) {}
 
 PosixDiskBackend::~PosixDiskBackend() {
-  Shutdown();
+  PosixDiskBackend::Shutdown();
   if (worker_.joinable()) worker_.join();
 }
 

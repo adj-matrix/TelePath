@@ -274,7 +274,7 @@ int main() {
 
   assert(failed_reads.load() == kWorkerCount);
   const int reads_after_failure = backend_ptr->submitted_reads();
-  assert(reads_after_failure >= 1);
+  assert(reads_after_failure == 1);
 
   backend_ptr->set_fail_reads(false);
   backend_ptr->BlockCompletions();
@@ -298,7 +298,7 @@ int main() {
 
   assert(successful_reads.load() == kWorkerCount);
   const int reads_after_recovery = backend_ptr->submitted_reads();
-  assert(reads_after_recovery >= reads_after_failure + 1);
+  assert(reads_after_recovery == reads_after_failure + 1);
 
   ExpectWarmReadHitsRecoveredPage(&manager, backend_ptr, reads_after_recovery);
   ExpectTelemetryShowsFailureThenRecovery(telemetry->Snapshot());

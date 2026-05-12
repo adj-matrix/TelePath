@@ -4,6 +4,12 @@ add_library(telepath
   lib/buffer/buffer_handle.cc
   lib/buffer/buffer_descriptor_state.cc
   lib/buffer/buffer_manager.cc
+  lib/buffer/buffer_manager_cleaner.cc
+  lib/buffer/buffer_manager_eviction.cc
+  lib/buffer/buffer_manager_flush.cc
+  lib/buffer/buffer_manager_handle.cc
+  lib/buffer/buffer_manager_lifecycle.cc
+  lib/buffer/buffer_manager_read.cc
   lib/buffer/buffer_manager_observer.cc
   lib/buffer/page_table.cc
   lib/buffer/cleaner_controller.cc
