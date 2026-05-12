@@ -31,6 +31,9 @@ void ExpectInitialSnapshotShowsFreeFrames(
 ) {
   assert(snapshot.pool_size == 2);
   assert(snapshot.page_size == 4096);
+  assert(snapshot.dirty_page_count == 0);
+  assert(snapshot.flush_queued_count == 0);
+  assert(snapshot.flush_in_flight_count == 0);
   assert(snapshot.frames.size() == 2);
   for (const auto &frame : snapshot.frames) {
     assert(frame.state == telepath::BufferFrameState::kFree);
@@ -63,6 +66,9 @@ void ExpectDirtySnapshotShowsDirtyResidentFrame(
   const telepath::BufferPoolSnapshot &snapshot
 ) {
   const auto dirty_frame = FindLoadedFrame(snapshot);
+  assert(snapshot.dirty_page_count == 1);
+  assert(snapshot.flush_queued_count == 0);
+  assert(snapshot.flush_in_flight_count == 0);
   assert(dirty_frame != snapshot.frames.end());
   assert(dirty_frame->is_dirty);
   assert(dirty_frame->dirty_generation >= 1);
@@ -73,6 +79,7 @@ void ExpectReleasedSnapshotShowsUnpinnedResidentFrame(
   const telepath::BufferPoolSnapshot &snapshot
 ) {
   const auto released_frame = FindLoadedFrame(snapshot);
+  assert(snapshot.dirty_page_count == 1);
   assert(released_frame != snapshot.frames.end());
   assert(released_frame->pin_count == 0);
   assert(released_frame->is_dirty);

@@ -17,6 +17,7 @@ Compared with State 2, the current implementation now includes:
 - batch write submission with configurable limits,
 - background cleaner coordination with dirty-page watermarks,
 - stronger flush consistency handling for re-dirty races,
+- flush, cleaner, eviction-failure, and snapshot aggregate telemetry,
 - backend capability negotiation for fallback and native paths,
 - broader correctness and regression coverage around writeback behavior.
 
@@ -95,6 +96,12 @@ Backends now expose capability information that affects runtime policy decisions
 
 This keeps the public model stable while allowing the implementation to choose different defaults for POSIX fallback and native `io_uring` execution environments.
 
+### 8. Writeback State Is Observable
+
+The telemetry surface now reports flush task scheduling, completion, failures, cleaner-owned scheduling and completion, cleaner skips, and eviction rollback failures.
+
+The exported buffer-pool snapshot also includes aggregate dirty, queued-flush, and in-flight-flush counts, so benchmark output and the Web console can explain writeback pressure without re-deriving it from every frame.
+
 ## Test Coverage
 
 State 3 now validates the following categories:
@@ -104,20 +111,23 @@ State 3 now validates the following categories:
 - same-page miss ownership and recovery,
 - different-page parallel miss behavior,
 - eviction and dirty-page persistence,
+- dirty-victim writeback rollback and retry behavior,
 - flush consistency during re-dirty scenarios,
 - read-lock and write-stable flush behavior,
 - completion ordering and dispatcher idle behavior,
 - async flush scheduling and fairness,
 - `FlushAll()` persistence and failure propagation,
 - cleaner wakeup and background writeback behavior,
+- cleaner failure requeue and retry behavior,
 - submit-time and completion-time writeback failures,
+- flush/cleaner/eviction telemetry and snapshot aggregate output,
 - options resolution,
 - replacer correctness,
 - benchmark workload semantics.
 
 At the time of writing:
 
-- the baseline debug/ASAN suite contains 27 tests,
+- the baseline debug/ASAN suite contains 35 tests,
 - the native Linux `io_uring` workflow adds 6 kernel-sensitive tests,
 - the writeback scheduler is covered by dedicated adversarial cases, including batch failure, foreground/background interaction, cleaner ownership, and in-flight `FlushAll()` coordination.
 
@@ -130,7 +140,7 @@ The following remain future work:
 - stronger long-running stress and soak testing,
 - more mature benchmark interpretation and reporting,
 - shared-memory telemetry transport,
-- a richer observability event model,
+- richer non-counter observability events and transport integrations,
 - deeper `io_uring` optimization beyond correctness-first support,
 - NUMA-aware or contention-aware memory/layout tuning,
 - WAL / recovery,

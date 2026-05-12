@@ -1,6 +1,7 @@
 #include "telepath/buffer/buffer_manager.h"
 
 #include "buffer_descriptor_state.h"
+#include "buffer_manager_observer.h"
 #include "cleaner_controller.h"
 
 namespace telepath {
@@ -28,7 +29,11 @@ void BufferManager::NotifyCleaner() {
 void BufferManager::ScheduleCleanerFlush(FrameId frame_id) {
   bool was_busy = false;
   Result<std::shared_ptr<BufferManagerFlushTask>> schedule_result = TryScheduleFlushTask(frame_id, nullptr, &was_busy, true);
-  if (!schedule_result.ok()) return;
+  if (!schedule_result.ok()) {
+    observer_->RecordCleanerFlushSkipped();
+    return;
+  }
+  if (schedule_result.value() == nullptr) observer_->RecordCleanerFlushSkipped();
 }
 
 auto BufferManager::StartCleanerController() -> Status {

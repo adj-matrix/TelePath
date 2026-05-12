@@ -3,6 +3,7 @@
 
 #include <memory>
 
+#include "telepath/common/status.h"
 #include "telepath/common/types.h"
 
 namespace telepath {
@@ -16,13 +17,18 @@ class BufferManagerObserver {
   void RecordResidentHit(const BufferTag &tag) const;
   void RecordJoinedMissHit(const BufferTag &tag) const;
   void RecordReadMiss(const BufferTag &tag) const;
-  void RecordReservedVictimFlush(const BufferTag &tag) const;
   void RecordLoadCompletion(const BufferTag &tag) const;
   void RecordLoadCompletion(
     const BufferTag &tag,
     const BufferTag &evicted_tag
   ) const;
   void RecordSuccessfulFlush(const BufferTag &tag) const;
+  void RecordFlushTaskScheduled(const BufferTag &tag) const;
+  void RecordFlushTaskCompletion(const BufferTag &tag, const Status &status) const;
+  void RecordCleanerFlushScheduled(const BufferTag &tag) const;
+  void RecordCleanerFlushFinished(const BufferTag &tag) const;
+  void RecordCleanerFlushSkipped() const;
+  void RecordEvictionFailure(const BufferTag &tag) const;
 
  private:
   void RecordHit(const BufferTag &tag) const;
@@ -31,6 +37,7 @@ class BufferManagerObserver {
   void RecordDiskWrite(const BufferTag &tag) const;
   void RecordEviction(const BufferTag &tag) const;
   void RecordDirtyFlush(const BufferTag &tag) const;
+  void RecordFlushFailure(const BufferTag &tag) const;
 
   std::shared_ptr<TelemetrySink> telemetry_sink_;
 };

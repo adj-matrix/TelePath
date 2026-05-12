@@ -20,6 +20,7 @@ auto BufferManager::RestoreEvictionFailure(const FrameReservation &reservation, 
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, true);
   if (was_dirty) RestoreDirtyEviction(frame_id);
+  observer_->RecordEvictionFailure(reservation.evicted_tag);
   return status;
 }
 
@@ -48,6 +49,7 @@ auto BufferManager::FlushEvictedPage(const FrameReservation &reservation) -> Sta
   task->snapshot = CaptureFlushSnapshot(reservation.frame_id, nullptr);
   Status enqueue_status = EnqueueFlushTask(task);
   if (!enqueue_status.ok()) return enqueue_status;
+  observer_->RecordFlushTaskScheduled(task->tag);
   return flush_scheduler_->Wait(task);
 }
 
@@ -96,7 +98,6 @@ auto BufferManager::FlushReservedVictim(const FrameReservation &reservation) -> 
 
   Status flush_status = FlushEvictedPage(reservation);
   if (!flush_status.ok()) return flush_status;
-  observer_->RecordReservedVictimFlush(reservation.evicted_tag);
   return Status::Ok();
 }
 

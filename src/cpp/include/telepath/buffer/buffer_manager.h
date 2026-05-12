@@ -56,6 +56,9 @@ struct FrameSnapshot {
 struct BufferPoolSnapshot {
   std::size_t pool_size{0};
   std::size_t page_size{0};
+  std::size_t dirty_page_count{0};
+  std::size_t flush_queued_count{0};
+  std::size_t flush_in_flight_count{0};
   std::vector<FrameSnapshot> frames;
 };
 

@@ -166,10 +166,13 @@ auto BufferManager::ExportSnapshot() const -> BufferPoolSnapshot{
   BufferPoolSnapshot snapshot;
   snapshot.pool_size = pool_size_;
   snapshot.page_size = page_size_;
+  snapshot.dirty_page_count = dirty_page_count_.load(std::memory_order_acquire);
   snapshot.frames.reserve(descriptors_.size());
 
   for (const BufferDescriptor &descriptor : descriptors_) {
     std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
+    if (descriptor.flush_queued) ++snapshot.flush_queued_count;
+    if (descriptor.flush_in_flight) ++snapshot.flush_in_flight_count;
     snapshot.frames.push_back(FrameSnapshot{
       descriptor.frame_id,
       descriptor.state,

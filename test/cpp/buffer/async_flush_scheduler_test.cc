@@ -749,6 +749,88 @@ void ExpectBackgroundCleanerPersistsAtLeastOneDirtyPage() {
   assert(first_persisted || second_persisted);
 }
 
+void ExpectCleanerFlushFailureRequeuesAndRetries() {
+  auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
+  auto *backend_ptr = backend.get();
+
+  telepath::BufferManagerOptions options;
+  options.pool_size = 1;
+  options.page_size = 4096;
+  options.enable_background_cleaner = true;
+  options.dirty_page_high_watermark = 1;
+  options.dirty_page_low_watermark = 0;
+  auto replacer = telepath::MakeClockReplacer(1);
+  auto telemetry = telepath::MakeCounterTelemetrySink();
+  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+
+  const telepath::BufferTag tag{27, 0};
+  auto handle = ReadHandle(&manager, tag.file_id, tag.block_id);
+  handle.mutable_data()[0] = std::byte{0xD0};
+  assert(manager.MarkBufferDirty(handle).ok());
+  backend_ptr->FailWriteOnce(tag);
+  handle.Reset();
+
+  assert(backend_ptr->WaitForSubmittedWritesFor(2, std::chrono::milliseconds(1000)));
+  assert(backend_ptr->WaitForPersistedByte(tag, 0, std::byte{0xD0}, std::chrono::milliseconds(1000)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  assert(backend_ptr->submitted_writes() == 2);
+
+  const auto snapshot = telemetry->Snapshot();
+  assert(snapshot.flush_tasks_scheduled == 2);
+  assert(snapshot.flush_tasks_completed == 2);
+  assert(snapshot.flush_failures == 1);
+  assert(snapshot.cleaner_flushes_scheduled == 2);
+  assert(snapshot.cleaner_flushes_finished == 2);
+}
+
+void ExpectSnapshotAggregatesQueuedAndInFlightFlushes() {
+  auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
+  auto *backend_ptr = backend.get();
+  backend_ptr->BlockAllWriteCompletions();
+
+  telepath::BufferManagerOptions options;
+  options.pool_size = 2;
+  options.page_size = 4096;
+  options.flush_worker_count = 1;
+  options.flush_submit_batch_size = 1;
+  auto replacer = telepath::MakeClockReplacer(2);
+  auto telemetry = telepath::MakeNoOpTelemetrySink();
+  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+
+  SeedDirtyByte(&manager, 28, 0, std::byte{0xE0});
+  SeedDirtyByte(&manager, 28, 1, std::byte{0xE1});
+
+  telepath::Status flush_all_status = telepath::Status::Ok();
+  std::thread flush_all_thread([&]() {
+    flush_all_status = manager.FlushAll();
+  });
+
+  backend_ptr->WaitForSubmittedWrites(1);
+
+  bool saw_queued_and_in_flight = false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto snapshot = manager.ExportSnapshot();
+    if (snapshot.dirty_page_count == 2 &&
+        snapshot.flush_queued_count == 1 &&
+        snapshot.flush_in_flight_count == 1) {
+      saw_queued_and_in_flight = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+
+  assert(saw_queued_and_in_flight);
+  backend_ptr->AllowAllWriteCompletions();
+  flush_all_thread.join();
+  assert(flush_all_status.ok());
+
+  const auto clean_snapshot = manager.ExportSnapshot();
+  assert(clean_snapshot.dirty_page_count == 0);
+  assert(clean_snapshot.flush_queued_count == 0);
+  assert(clean_snapshot.flush_in_flight_count == 0);
+}
+
 void ExpectPinnedDirtyPageDoesNotFlushUntilReleased() {
   auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
   auto *backend_ptr = backend.get();
@@ -861,6 +943,8 @@ int main() {
   ExpectFailedFlushAllLeavesHealthyPagePersistedAndAllowsRetry();
   ExpectFlushAllReportsSubmitFailureAndAllowsRetry();
   ExpectBackgroundCleanerPersistsAtLeastOneDirtyPage();
+  ExpectCleanerFlushFailureRequeuesAndRetries();
+  ExpectSnapshotAggregatesQueuedAndInFlightFlushes();
   ExpectPinnedDirtyPageDoesNotFlushUntilReleased();
   ExpectFlushAllWaitsForInFlightBackgroundFlush();
   ExpectEvictionAfterCleanerFlushDoesNotDuplicateWriteback();

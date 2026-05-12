@@ -46,9 +46,8 @@ void BufferManagerObserver::RecordDirtyFlush(const BufferTag &tag) const {
   telemetry_sink_->RecordDirtyFlush(tag);
 }
 
-void BufferManagerObserver::RecordReservedVictimFlush(const BufferTag &tag) const {
-  RecordDiskWrite(tag);
-  RecordDirtyFlush(tag);
+void BufferManagerObserver::RecordFlushFailure(const BufferTag &tag) const {
+  telemetry_sink_->RecordFlushFailure(tag);
 }
 
 void BufferManagerObserver::RecordLoadCompletion(const BufferTag &tag) const {
@@ -63,6 +62,31 @@ void BufferManagerObserver::RecordLoadCompletion(const BufferTag &tag, const Buf
 void BufferManagerObserver::RecordSuccessfulFlush(const BufferTag &tag) const {
   RecordDiskWrite(tag);
   RecordDirtyFlush(tag);
+}
+
+void BufferManagerObserver::RecordFlushTaskScheduled(const BufferTag &tag) const {
+  telemetry_sink_->RecordFlushTaskScheduled(tag);
+}
+
+void BufferManagerObserver::RecordFlushTaskCompletion(const BufferTag &tag, const Status &status) const {
+  telemetry_sink_->RecordFlushTaskCompleted(tag);
+  if (!status.ok()) RecordFlushFailure(tag);
+}
+
+void BufferManagerObserver::RecordCleanerFlushScheduled(const BufferTag &tag) const {
+  telemetry_sink_->RecordCleanerFlushScheduled(tag);
+}
+
+void BufferManagerObserver::RecordCleanerFlushFinished(const BufferTag &tag) const {
+  telemetry_sink_->RecordCleanerFlushFinished(tag);
+}
+
+void BufferManagerObserver::RecordCleanerFlushSkipped() const {
+  telemetry_sink_->RecordCleanerFlushSkipped();
+}
+
+void BufferManagerObserver::RecordEvictionFailure(const BufferTag &tag) const {
+  telemetry_sink_->RecordEvictionFailure(tag);
 }
 
 }  // namespace telepath

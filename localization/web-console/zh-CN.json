@@ -144,7 +144,8 @@
       "focus": "访问画像",
       "point_in_time": "真实快照",
       "resident_template": "{resident} / {total}",
-      "dirty_template": "{dirty} / {total}"
+      "dirty_template": "{dirty} / {total}",
+      "dirty_runtime_template": "{dirty} 脏 · {queued} 排队 · {inflight} 写回中"
     },
     "detail": {
       "kicker": "当前 Frame",

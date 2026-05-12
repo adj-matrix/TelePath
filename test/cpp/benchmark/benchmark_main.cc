@@ -32,6 +32,17 @@ struct BenchmarkMetrics {
   uint64_t hits{0};
   uint64_t misses{0};
   double hit_rate{0.0};
+  uint64_t disk_reads{0};
+  uint64_t disk_writes{0};
+  uint64_t evictions{0};
+  uint64_t dirty_flushes{0};
+  uint64_t flush_tasks_scheduled{0};
+  uint64_t flush_tasks_completed{0};
+  uint64_t flush_failures{0};
+  uint64_t cleaner_flushes_scheduled{0};
+  uint64_t cleaner_flushes_finished{0};
+  uint64_t cleaner_flushes_skipped{0};
+  uint64_t eviction_failures{0};
 };
 
 class BenchmarkRootGuard {
@@ -203,6 +214,17 @@ auto BuildBenchmarkMetrics(
     hits,
     misses,
     hit_rate,
+    after.disk_reads - before.disk_reads,
+    after.disk_writes - before.disk_writes,
+    after.evictions - before.evictions,
+    after.dirty_flushes - before.dirty_flushes,
+    after.flush_tasks_scheduled - before.flush_tasks_scheduled,
+    after.flush_tasks_completed - before.flush_tasks_completed,
+    after.flush_failures - before.flush_failures,
+    after.cleaner_flushes_scheduled - before.cleaner_flushes_scheduled,
+    after.cleaner_flushes_finished - before.cleaner_flushes_finished,
+    after.cleaner_flushes_skipped - before.cleaner_flushes_skipped,
+    after.eviction_failures - before.eviction_failures,
   };
 }
 
@@ -268,6 +290,17 @@ void PrintTextSummary(
   std::cout << "buffer_hits=" << metrics.hits << "\n";
   std::cout << "buffer_misses=" << metrics.misses << "\n";
   std::cout << "hit_rate=" << metrics.hit_rate << "\n";
+  std::cout << "disk_reads=" << metrics.disk_reads << "\n";
+  std::cout << "disk_writes=" << metrics.disk_writes << "\n";
+  std::cout << "evictions=" << metrics.evictions << "\n";
+  std::cout << "dirty_flushes=" << metrics.dirty_flushes << "\n";
+  std::cout << "flush_tasks_scheduled=" << metrics.flush_tasks_scheduled << "\n";
+  std::cout << "flush_tasks_completed=" << metrics.flush_tasks_completed << "\n";
+  std::cout << "flush_failures=" << metrics.flush_failures << "\n";
+  std::cout << "cleaner_flushes_scheduled=" << metrics.cleaner_flushes_scheduled << "\n";
+  std::cout << "cleaner_flushes_finished=" << metrics.cleaner_flushes_finished << "\n";
+  std::cout << "cleaner_flushes_skipped=" << metrics.cleaner_flushes_skipped << "\n";
+  std::cout << "eviction_failures=" << metrics.eviction_failures << "\n";
 }
 
 void PrintCsvSummary(
@@ -279,7 +312,10 @@ void PrintCsvSummary(
   std::cout
       << "workload,disk_backend,commit_sha,runner_os,runner_arch,threads,pool_size,"
          "block_count,ops_per_thread,hotset_size,hot_access_percent,total_ops,"
-         "seconds,throughput_ops_per_sec,buffer_hits,buffer_misses,hit_rate\n";
+         "seconds,throughput_ops_per_sec,buffer_hits,buffer_misses,hit_rate,"
+         "disk_reads,disk_writes,evictions,dirty_flushes,flush_tasks_scheduled,"
+         "flush_tasks_completed,flush_failures,cleaner_flushes_scheduled,"
+         "cleaner_flushes_finished,cleaner_flushes_skipped,eviction_failures\n";
   std::cout << NormalizeWorkloadName(options.workload) << "," << backend_kind
             << "," << metadata.commit_sha << "," << metadata.runner_os << ","
             << metadata.runner_arch << "," << options.thread_count << ","
@@ -288,7 +324,15 @@ void PrintCsvSummary(
             << options.hot_access_percent << "," << metrics.total_ops << ","
             << metrics.seconds << "," << metrics.throughput << ","
             << metrics.hits << "," << metrics.misses << ","
-            << metrics.hit_rate << "\n";
+            << metrics.hit_rate << "," << metrics.disk_reads << ","
+            << metrics.disk_writes << "," << metrics.evictions << ","
+            << metrics.dirty_flushes << "," << metrics.flush_tasks_scheduled
+            << "," << metrics.flush_tasks_completed << ","
+            << metrics.flush_failures << ","
+            << metrics.cleaner_flushes_scheduled << ","
+            << metrics.cleaner_flushes_finished << ","
+            << metrics.cleaner_flushes_skipped << ","
+            << metrics.eviction_failures << "\n";
 }
 
 void PrintJsonMetrics(
@@ -321,7 +365,18 @@ void PrintJsonMetrics(
             << ",\n";
   std::cout << "    \"buffer_hits\": " << metrics.hits << ",\n";
   std::cout << "    \"buffer_misses\": " << metrics.misses << ",\n";
-  std::cout << "    \"hit_rate\": " << metrics.hit_rate << "\n";
+  std::cout << "    \"hit_rate\": " << metrics.hit_rate << ",\n";
+  std::cout << "    \"disk_reads\": " << metrics.disk_reads << ",\n";
+  std::cout << "    \"disk_writes\": " << metrics.disk_writes << ",\n";
+  std::cout << "    \"evictions\": " << metrics.evictions << ",\n";
+  std::cout << "    \"dirty_flushes\": " << metrics.dirty_flushes << ",\n";
+  std::cout << "    \"flush_tasks_scheduled\": " << metrics.flush_tasks_scheduled << ",\n";
+  std::cout << "    \"flush_tasks_completed\": " << metrics.flush_tasks_completed << ",\n";
+  std::cout << "    \"flush_failures\": " << metrics.flush_failures << ",\n";
+  std::cout << "    \"cleaner_flushes_scheduled\": " << metrics.cleaner_flushes_scheduled << ",\n";
+  std::cout << "    \"cleaner_flushes_finished\": " << metrics.cleaner_flushes_finished << ",\n";
+  std::cout << "    \"cleaner_flushes_skipped\": " << metrics.cleaner_flushes_skipped << ",\n";
+  std::cout << "    \"eviction_failures\": " << metrics.eviction_failures << "\n";
   std::cout << "  },\n";
 }
 
@@ -357,6 +412,9 @@ void PrintJsonSnapshot(const telepath::BufferPoolSnapshot &snapshot) {
   std::cout << "  \"snapshot\": {\n";
   std::cout << "    \"pool_size\": " << snapshot.pool_size << ",\n";
   std::cout << "    \"page_size\": " << snapshot.page_size << ",\n";
+  std::cout << "    \"dirty_page_count\": " << snapshot.dirty_page_count << ",\n";
+  std::cout << "    \"flush_queued_count\": " << snapshot.flush_queued_count << ",\n";
+  std::cout << "    \"flush_in_flight_count\": " << snapshot.flush_in_flight_count << ",\n";
   std::cout << "    \"frames\": [\n";
   for (std::size_t index = 0; index < snapshot.frames.size(); ++index) {
     PrintJsonFrame(snapshot.frames[index], index + 1 < snapshot.frames.size());

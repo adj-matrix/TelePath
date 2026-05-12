@@ -256,6 +256,15 @@ target_link_libraries(telepath_eviction_test PRIVATE telepath)
 
 add_test(NAME telepath_eviction_test COMMAND telepath_eviction_test)
 
+add_executable(telepath_dirty_eviction_failure_recovery_test
+  cpp/buffer/dirty_eviction_failure_recovery_test.cc
+)
+
+target_link_libraries(telepath_dirty_eviction_failure_recovery_test PRIVATE telepath)
+
+add_test(NAME telepath_dirty_eviction_failure_recovery_test
+         COMMAND telepath_dirty_eviction_failure_recovery_test)
+
 add_executable(telepath_failure_path_test
   cpp/buffer/failure_path_test.cc
 )
@@ -353,3 +362,5 @@ add_executable(telepath_benchmark
 
 target_include_directories(telepath_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/benchmark)
 target_link_libraries(telepath_benchmark PRIVATE telepath)
+
+add_dependencies(telepath_benchmark_json_output_test telepath_benchmark)

@@ -273,6 +273,17 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "total_ops",
         "buffer_hits",
         "buffer_misses",
+        "disk_reads",
+        "disk_writes",
+        "evictions",
+        "dirty_flushes",
+        "flush_tasks_scheduled",
+        "flush_tasks_completed",
+        "flush_failures",
+        "cleaner_flushes_scheduled",
+        "cleaner_flushes_finished",
+        "cleaner_flushes_skipped",
+        "eviction_failures",
     }
     floats = {"seconds", "throughput_ops_per_sec", "hit_rate"}
 

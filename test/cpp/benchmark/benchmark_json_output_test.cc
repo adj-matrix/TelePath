@@ -58,6 +58,9 @@ int main(int /*argc*/, char **argv) {
 
   assert(output.find("\"access_profile\"") != std::string::npos);
   assert(output.find("\"mode\": \"observed\"") != std::string::npos);
+  assert(output.find("\"flush_tasks_scheduled\"") != std::string::npos);
+  assert(output.find("\"dirty_page_count\"") != std::string::npos);
+  assert(output.find("\"flush_queued_count\"") != std::string::npos);
 
   const uint64_t total_ops = ExtractTotalOps(output);
   const uint64_t access_sum = SumObservedAccesses(output);

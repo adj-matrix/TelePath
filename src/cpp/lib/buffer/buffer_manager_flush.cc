@@ -68,6 +68,8 @@ auto BufferManager::TryScheduleFlushTask(FrameId frame_id, const std::byte *stab
   task->snapshot = CaptureFlushSnapshot(frame_id, stable_data);
   Status enqueue_status = EnqueueFlushTask(task);
   if (!enqueue_status.ok()) return RollBackFlushTask(frame_id, cleaner_owned, enqueue_status);
+  observer_->RecordFlushTaskScheduled(task->tag);
+  if (task->cleaner_owned) observer_->RecordCleanerFlushScheduled(task->tag);
   return task;
 }
 
@@ -113,6 +115,7 @@ auto BufferManager::RollBackFlushTask(FrameId frame_id, bool cleaner_owned, cons
   descriptor.flush_queued = false;
   descriptor.last_flush_status = status;
   descriptor.io_cv.notify_all();
+  observer_->RecordFlushTaskCompletion(descriptor.tag, status);
   return status;
 }
 
@@ -152,6 +155,7 @@ void BufferManager::BeginFlushTask(const std::shared_ptr<BufferManagerFlushTask>
 }
 
 void BufferManager::FinalizeFlushTask( const std::shared_ptr<BufferManagerFlushTask> &task, const Status &flush_status) {
+  observer_->RecordFlushTaskCompletion(task->tag, flush_status);
   if (task->clear_dirty_on_success) {
     BufferDescriptor &descriptor = descriptors_[task->frame_id];
     bool cleared_dirty = false;
@@ -165,7 +169,10 @@ void BufferManager::FinalizeFlushTask( const std::shared_ptr<BufferManagerFlushT
     else if (cleared_dirty) ResetCleanerCandidate(task->frame_id);
   }
 
-  if (task->cleaner_owned && cleaner_controller_ != nullptr) cleaner_controller_->OnFlushFinished();
+  if (task->cleaner_owned && cleaner_controller_ != nullptr) {
+    cleaner_controller_->OnFlushFinished();
+    observer_->RecordCleanerFlushFinished(task->tag);
+  }
   if (flush_status.ok()) observer_->RecordSuccessfulFlush(task->tag);
   NotifyCleaner();
 }

@@ -15,6 +15,13 @@ class CounterTelemetrySink final : public TelemetrySink {
   void DoRecordDiskWrite(const BufferTag &) override {}
   void DoRecordEviction(const BufferTag &) override {}
   void DoRecordDirtyFlush(const BufferTag &) override {}
+  void DoRecordFlushTaskScheduled(const BufferTag &) override {}
+  void DoRecordFlushTaskCompleted(const BufferTag &) override {}
+  void DoRecordFlushFailure(const BufferTag &) override {}
+  void DoRecordCleanerFlushScheduled(const BufferTag &) override {}
+  void DoRecordCleanerFlushFinished(const BufferTag &) override {}
+  void DoRecordCleanerFlushSkipped() override {}
+  void DoRecordEvictionFailure(const BufferTag &) override {}
 
   auto DoSnapshot() const -> TelemetrySnapshot override {
     return ReadCountersSnapshot(counters_);

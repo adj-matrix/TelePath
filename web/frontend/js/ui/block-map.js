@@ -145,8 +145,10 @@
     });
 
     const residentCount = frames.filter((frame) => frame.is_valid).length;
-    const dirtyCount = frames.filter((frame) => frame.is_dirty).length;
+    const dirtyCount = snapshot.dirty_page_count ?? frames.filter((frame) => frame.is_dirty).length;
     const pinnedCount = frames.filter((frame) => frame.pin_count > 0).length;
+    const flushQueuedCount = snapshot.flush_queued_count ?? frames.filter((frame) => frame.flush_queued).length;
+    const flushInFlightCount = snapshot.flush_in_flight_count ?? frames.filter((frame) => frame.flush_in_flight).length;
 
     return {
       poolSize: snapshot.pool_size ?? frames.length,
@@ -155,6 +157,8 @@
       residentCount,
       dirtyCount,
       pinnedCount,
+      flushQueuedCount,
+      flushInFlightCount,
       profileFocus: accessProfile.focus,
       profileNote: accessProfile.note,
     };
@@ -217,9 +221,10 @@
       resident: app.formatNumber(model.residentCount, 0),
       total: app.formatNumber(model.frames.length, 0),
     });
-    elements.blockMapPool.textContent = app.t("block_map.summary.dirty_template", {
+    elements.blockMapPool.textContent = app.t("block_map.summary.dirty_runtime_template", {
       dirty: app.formatNumber(model.dirtyCount, 0),
-      total: app.formatNumber(model.frames.length, 0),
+      queued: app.formatNumber(model.flushQueuedCount, 0),
+      inflight: app.formatNumber(model.flushInFlightCount, 0),
     });
     elements.blockMapFocus.textContent = model.profileFocus;
 

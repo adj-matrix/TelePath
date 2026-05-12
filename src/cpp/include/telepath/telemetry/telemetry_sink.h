@@ -16,6 +16,13 @@ struct TelemetrySnapshot {
   uint64_t disk_writes{0};
   uint64_t evictions{0};
   uint64_t dirty_flushes{0};
+  uint64_t flush_tasks_scheduled{0};
+  uint64_t flush_tasks_completed{0};
+  uint64_t flush_failures{0};
+  uint64_t cleaner_flushes_scheduled{0};
+  uint64_t cleaner_flushes_finished{0};
+  uint64_t cleaner_flushes_skipped{0};
+  uint64_t eviction_failures{0};
 };
 
 // Fast-path counters used by in-process telemetry implementations that want to
@@ -27,6 +34,13 @@ struct TelemetryCounters {
   std::atomic<uint64_t> disk_writes{0};
   std::atomic<uint64_t> evictions{0};
   std::atomic<uint64_t> dirty_flushes{0};
+  std::atomic<uint64_t> flush_tasks_scheduled{0};
+  std::atomic<uint64_t> flush_tasks_completed{0};
+  std::atomic<uint64_t> flush_failures{0};
+  std::atomic<uint64_t> cleaner_flushes_scheduled{0};
+  std::atomic<uint64_t> cleaner_flushes_finished{0};
+  std::atomic<uint64_t> cleaner_flushes_skipped{0};
+  std::atomic<uint64_t> eviction_failures{0};
 };
 
 class TelemetrySink {
@@ -69,6 +83,41 @@ class TelemetrySink {
     DoRecordDirtyFlush(tag);
   }
 
+  void RecordFlushTaskScheduled(const BufferTag &tag) {
+    if (RecordFastPath(&TelemetryCounters::flush_tasks_scheduled)) return;
+    DoRecordFlushTaskScheduled(tag);
+  }
+
+  void RecordFlushTaskCompleted(const BufferTag &tag) {
+    if (RecordFastPath(&TelemetryCounters::flush_tasks_completed)) return;
+    DoRecordFlushTaskCompleted(tag);
+  }
+
+  void RecordFlushFailure(const BufferTag &tag) {
+    if (RecordFastPath(&TelemetryCounters::flush_failures)) return;
+    DoRecordFlushFailure(tag);
+  }
+
+  void RecordCleanerFlushScheduled(const BufferTag &tag) {
+    if (RecordFastPath(&TelemetryCounters::cleaner_flushes_scheduled)) return;
+    DoRecordCleanerFlushScheduled(tag);
+  }
+
+  void RecordCleanerFlushFinished(const BufferTag &tag) {
+    if (RecordFastPath(&TelemetryCounters::cleaner_flushes_finished)) return;
+    DoRecordCleanerFlushFinished(tag);
+  }
+
+  void RecordCleanerFlushSkipped() {
+    if (RecordFastPath(&TelemetryCounters::cleaner_flushes_skipped)) return;
+    DoRecordCleanerFlushSkipped();
+  }
+
+  void RecordEvictionFailure(const BufferTag &tag) {
+    if (RecordFastPath(&TelemetryCounters::eviction_failures)) return;
+    DoRecordEvictionFailure(tag);
+  }
+
   // Returns a point-in-time snapshot of all exported counters.
   TelemetrySnapshot Snapshot() const {
     if (fast_path_counters_ != nullptr) return ReadCountersSnapshot(*fast_path_counters_);
@@ -88,6 +137,13 @@ class TelemetrySink {
       counters.disk_writes.load(std::memory_order_relaxed),
       counters.evictions.load(std::memory_order_relaxed),
       counters.dirty_flushes.load(std::memory_order_relaxed),
+      counters.flush_tasks_scheduled.load(std::memory_order_relaxed),
+      counters.flush_tasks_completed.load(std::memory_order_relaxed),
+      counters.flush_failures.load(std::memory_order_relaxed),
+      counters.cleaner_flushes_scheduled.load(std::memory_order_relaxed),
+      counters.cleaner_flushes_finished.load(std::memory_order_relaxed),
+      counters.cleaner_flushes_skipped.load(std::memory_order_relaxed),
+      counters.eviction_failures.load(std::memory_order_relaxed),
     };
   }
 
@@ -97,6 +153,13 @@ class TelemetrySink {
   virtual void DoRecordDiskWrite(const BufferTag &tag) = 0;
   virtual void DoRecordEviction(const BufferTag &tag) = 0;
   virtual void DoRecordDirtyFlush(const BufferTag &tag) = 0;
+  virtual void DoRecordFlushTaskScheduled(const BufferTag &tag) = 0;
+  virtual void DoRecordFlushTaskCompleted(const BufferTag &tag) = 0;
+  virtual void DoRecordFlushFailure(const BufferTag &tag) = 0;
+  virtual void DoRecordCleanerFlushScheduled(const BufferTag &tag) = 0;
+  virtual void DoRecordCleanerFlushFinished(const BufferTag &tag) = 0;
+  virtual void DoRecordCleanerFlushSkipped() = 0;
+  virtual void DoRecordEvictionFailure(const BufferTag &tag) = 0;
   virtual TelemetrySnapshot DoSnapshot() const = 0;
 
  private:

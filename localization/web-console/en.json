@@ -144,7 +144,8 @@
       "focus": "Access Profile",
       "point_in_time": "Real Snapshot",
       "resident_template": "{resident} / {total}",
-      "dirty_template": "{dirty} / {total}"
+      "dirty_template": "{dirty} / {total}",
+      "dirty_runtime_template": "{dirty} dirty · {queued} queued · {inflight} active"
     },
     "detail": {
       "kicker": "Selected Frame",

@@ -30,8 +30,9 @@ The current suite covers:
 - handle and pin/unpin semantics,
 - concurrent read, same-page miss ownership, and miss recovery,
 - eviction, `FlushBuffer()`, and `FlushAll()` behavior,
+- dirty-victim writeback rollback and retry behavior,
 - async flush scheduling and fairness,
-- cleaner-triggered background writeback,
+- cleaner-triggered background writeback and retry behavior,
 - flush consistency under re-dirty races,
 - writeback failure handling at both submit time and completion time,
 - failure and resource exhaustion paths,
@@ -51,13 +52,13 @@ The current behavior-oriented coverage map is:
 | Basic buffer lifecycle | `smoke_test`, `init_failure_test`, `resource_exhaustion_test` | Covers construction failure surfacing, basic read, release, and no-victim handling. |
 | Handle semantics | `handle_test`, `memory_layout_test`, `frame_snapshot_test` | Covers RAII release, invalid handles, contiguous frame layout, and exported metadata. |
 | Read miss coordination | `same_page_miss_test`, `same_page_miss_failure_recovery_test`, `different_page_parallel_miss_test` | Covers joined same-page misses, failure recovery, and independent parallel misses. |
-| Eviction/writeback | `eviction_test`, `failure_path_test`, `wait_evict_interleave_test` | Covers dirty victim persistence, read/write failure propagation, and waiter/eviction interleaving. |
+| Eviction/writeback | `eviction_test`, `dirty_eviction_failure_recovery_test`, `failure_path_test`, `wait_evict_interleave_test` | Covers dirty victim persistence, failed victim writeback rollback, retry behavior, read/write failure propagation, and waiter/eviction interleaving. |
 | Flush correctness | `flush_consistency_test`, `read_lock_flush_test`, `flush_all_persistence_test` | Covers writer-held flush waiting, read-latch flush progress, and `FlushAll()` persistence. |
 | Async flush scheduler | `async_flush_scheduler_test` | Covers worker-owned flushes, batching, foreground/background interaction, cleaner ownership, retries, and in-flight `FlushAll()`. |
 | Completion dispatch | `completion_dispatcher_test`, `completion_dispatcher_idle_test`, `completion_order_test` | Covers request-id routing, out-of-order completion, early completion before registration, backend failure, idle shutdown, and reordered read completions. |
 | Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers POSIX fallback behavior, factory policy, zero-fill reads, and native/stub `io_uring` paths. |
 | Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test` | Covers shared interface expectations and policy-specific behavior. |
-| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, option resolution, workload selection, and JSON output shape. |
+| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, flush/cleaner/eviction telemetry, option resolution, workload selection, snapshot aggregates, and JSON output shape. |
 
 The remaining intentional gaps are larger-scale rather than unit-test-sized:
 
@@ -114,6 +115,8 @@ Avoid adding tests that only restate behavior already proven elsewhere.
 
 Recent high-value examples include:
 
+- a dirty victim whose first writeback fails, rolls the frame back without losing data, and then evicts cleanly on retry,
 - a batched flush where one page fails during `SubmitWrite()` and the other still persists correctly,
+- a cleaner-owned flush that fails, gets requeued, and succeeds on retry,
 - a `FlushAll()` caller waiting on cleaner-owned in-flight writeback without duplicate submission,
 - foreground/background flush interaction without brittle timing assumptions.
