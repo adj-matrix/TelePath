@@ -15,6 +15,9 @@ struct DiskBackendOptions {
   DiskBackendKind preferred_kind{DiskBackendKind::kAuto};
   bool allow_fallback{true};
   std::size_t queue_depth{0};
+  // Maximum number of data-file descriptors a backend should keep open.
+  // Set to zero to derive a conservative default.
+  std::size_t max_open_files{0};
 
   auto ResolveQueueDepth() const -> std::size_t {
     if (queue_depth != 0) return queue_depth;
@@ -29,6 +32,11 @@ struct DiskBackendOptions {
     }
 
     return 1;
+  }
+
+  auto ResolveMaxOpenFiles() const -> std::size_t {
+    if (max_open_files != 0) return max_open_files;
+    return 64;
   }
 };
 

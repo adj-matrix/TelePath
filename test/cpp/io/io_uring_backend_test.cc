@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
+#include <utility>
 
 #include "io_test_support.h"
 #include "telepath/io/disk_backend_factory.h"
@@ -98,6 +99,67 @@ void AssertPersistedWriteVisibleToPosix(
   AssertPageMarkers(persisted_page, expected_page[0], expected_page[4095]);
 }
 
+void AssertIoUringFactoryHonorsFdCacheLimit(const std::filesystem::path &root) {
+  telepath::DiskBackendOptions options;
+  options.preferred_kind = telepath::DiskBackendKind::kIoUring;
+  options.allow_fallback = false;
+  options.max_open_files = 1;
+
+  auto backend_result = telepath::CreateDiskBackend(root.string(), 4096, options);
+  if (!backend_result.ok()) {
+    assert(!telepath::io_test_support::RequireIoUringSuccess());
+    return;
+  }
+
+  auto backend = std::move(backend_result.value());
+  const auto capabilities = backend->GetCapabilities();
+  assert(capabilities.kind == telepath::DiskBackendKind::kIoUring);
+  assert(!capabilities.is_fallback_backend);
+  auto *io_backend = static_cast<telepath::IoUringDiskBackend *>(backend.get());
+  assert(io_backend != nullptr);
+  if (!io_backend->initialization_status().ok()) {
+    assert(!telepath::io_test_support::RequireIoUringSuccess());
+    return;
+  }
+
+  const auto first_file_path = root / "file_21.tp";
+  const auto second_file_path = root / "file_22.tp";
+  const telepath::BufferTag first_tag{21, 0};
+  const telepath::BufferTag second_tag{22, 0};
+  auto write_buffer = BuildMarkedPage(std::byte{0x51}, std::byte{0x52});
+
+  auto first_submit = io_backend->SubmitWrite(first_tag, write_buffer.data(), write_buffer.size());
+  assert(first_submit.ok());
+  auto first_completion = io_backend->PollCompletion();
+  assert(first_completion.ok());
+  assert(first_completion.value().request_id == first_submit.value());
+  assert(first_completion.value().status.ok());
+
+#if defined(__linux__)
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 1);
+#endif
+
+  auto second_submit = io_backend->SubmitWrite(second_tag, write_buffer.data(), write_buffer.size());
+  assert(second_submit.ok());
+  auto second_completion = io_backend->PollCompletion();
+  assert(second_completion.ok());
+  assert(second_completion.value().request_id == second_submit.value());
+  assert(second_completion.value().status.ok());
+
+#if defined(__linux__)
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 0);
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(second_file_path) == 1);
+#endif
+
+  backend->Shutdown();
+  backend.reset();
+
+#if defined(__linux__)
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 0);
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(second_file_path) == 0);
+#endif
+}
+
 void AssertExplicitIoUringFactorySelection(const std::filesystem::path &root) {
   telepath::DiskBackendOptions options;
   options.preferred_kind = telepath::DiskBackendKind::kIoUring;
@@ -151,6 +213,7 @@ int main() {
   const telepath::BufferTag tag{7, 3};
   AssertRoundTrip(&backend, tag, write_buffer);
   AssertPersistedWriteVisibleToPosix(root_guard.path(), tag, write_buffer);
+  AssertIoUringFactoryHonorsFdCacheLimit(root_guard.path());
   AssertExplicitIoUringFactorySelection(root_guard.path());
   AssertAutoFactorySelectionPrefersIoUring(root_guard.path());
   AssertShutdownStopsNewRequests(&backend, tag, write_buffer);

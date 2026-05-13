@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 #include "telepath/io/disk_backend.h"
 
@@ -22,7 +23,8 @@ class IoUringDiskBackend : public DiskBackend {
   IoUringDiskBackend(
     std::string root_path,
     std::size_t page_size,
-    std::size_t queue_depth
+    std::size_t queue_depth,
+    std::size_t max_open_files = 64
   );
   ~IoUringDiskBackend() override;
 
@@ -43,6 +45,12 @@ class IoUringDiskBackend : public DiskBackend {
 
  private:
   friend class IoUringDiskBackendTestPeer;
+
+  struct CachedFile {
+    int fd{-1};
+    uint64_t last_used{0};
+    std::size_t in_flight{0};
+  };
 
   struct RequestContext;
   struct Impl;
@@ -69,7 +77,7 @@ class IoUringDiskBackend : public DiskBackend {
     std::size_t size,
     DiskOperation operation
   ) const -> Status;
-  auto OpenFile(FileId file_id) const -> Result<int>;
+  auto OpenFileLocked(FileId file_id) -> Result<int>;
   auto BuildRequestContext(
     const BufferTag &tag,
     DiskOperation operation,
@@ -78,8 +86,11 @@ class IoUringDiskBackend : public DiskBackend {
     std::size_t size,
     int fd
   ) -> std::unique_ptr<RequestContext>;
-  void CloseRequestContext(RequestContext *context) const;
-  auto RollBackSubmittedRequest(uint64_t request_id, int submit_result) -> Status;
+  void ReleaseRequestFile(const RequestContext &context);
+  void ReleaseRequestFileLocked(const RequestContext &context);
+  void EvictLeastRecentlyUsedIdleFilesLocked(std::size_t target_size);
+  void CloseCachedFilesLocked();
+  auto RollBackSubmittedRequestLocked(uint64_t request_id, int submit_result) -> Status;
 #if TELEPATH_HAS_LIBURING
   auto WaitForCompletionEntry(io_uring_cqe **cqe) -> Result<bool>;
   auto TakeCompletedContext(
@@ -99,12 +110,15 @@ class IoUringDiskBackend : public DiskBackend {
   std::string root_path_;
   std::size_t page_size_{0};
   std::size_t queue_depth_{0};
+  std::size_t max_open_files_{64};
   uint64_t next_request_id_{1};
+  uint64_t open_file_clock_{0};
   Status init_status_{Status::Ok()};
   mutable std::mutex latch_;
   bool shutdown_{false};
   std::optional<int> next_submit_result_for_test_;
   std::optional<int> next_completion_result_for_test_;
+  std::unordered_map<FileId, CachedFile> open_files_;
   std::unique_ptr<Impl> impl_;
 };
 

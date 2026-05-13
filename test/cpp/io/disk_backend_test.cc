@@ -78,6 +78,79 @@ void AssertShutdownDrainsPendingWrites(const std::filesystem::path &root) {
   assert(drained_completion.status().code() == telepath::StatusCode::kUnavailable);
 }
 
+void AssertRepeatedAccessReusesAndClosesFileDescriptor(const std::filesystem::path &root) {
+#if defined(__linux__)
+  const telepath::FileId file_id = 9;
+  const std::filesystem::path file_path = root / "file_9.tp";
+  auto write_buffer = BuildMarkedPage(std::byte{0x44}, std::byte{0x55});
+  std::array<std::byte, 4096> read_buffer{};
+
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(file_path) == 0);
+  {
+    telepath::PosixDiskBackend backend(root.string(), 4096);
+    for (telepath::BlockId block_id = 0; block_id < 4; ++block_id) {
+      const telepath::BufferTag tag{file_id, block_id};
+      auto write_submit = backend.SubmitWrite(tag, write_buffer.data(), write_buffer.size());
+      assert(write_submit.ok());
+      auto write_completion = backend.PollCompletion();
+      assert(write_completion.ok());
+      assert(write_completion.value().status.ok());
+
+      auto read_submit = backend.SubmitRead(tag, read_buffer.data(), read_buffer.size());
+      assert(read_submit.ok());
+      auto read_completion = backend.PollCompletion();
+      assert(read_completion.ok());
+      assert(read_completion.value().status.ok());
+    }
+
+    assert(telepath::io_test_support::CountOpenDescriptorsForPath(file_path) == 1);
+  }
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(file_path) == 0);
+#else
+  (void)root;
+#endif
+}
+
+void AssertFileDescriptorCacheEvictsLeastRecentlyUsedFile(const std::filesystem::path &root) {
+#if defined(__linux__)
+  const telepath::FileId first_file_id = 10;
+  const telepath::FileId second_file_id = 11;
+  const std::filesystem::path first_file_path = root / "file_10.tp";
+  const std::filesystem::path second_file_path = root / "file_11.tp";
+  auto write_buffer = BuildMarkedPage(std::byte{0x66}, std::byte{0x77});
+
+  {
+    telepath::PosixDiskBackend backend(root.string(), 4096, false, 1);
+    auto first_submit = backend.SubmitWrite({first_file_id, 0}, write_buffer.data(), write_buffer.size());
+    assert(first_submit.ok());
+    auto first_completion = backend.PollCompletion();
+    assert(first_completion.ok());
+    assert(first_completion.value().status.ok());
+    assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 1);
+
+    auto second_submit = backend.SubmitWrite({second_file_id, 0}, write_buffer.data(), write_buffer.size());
+    assert(second_submit.ok());
+    auto second_completion = backend.PollCompletion();
+    assert(second_completion.ok());
+    assert(second_completion.value().status.ok());
+    assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 0);
+    assert(telepath::io_test_support::CountOpenDescriptorsForPath(second_file_path) == 1);
+
+    auto first_reopen = backend.SubmitWrite({first_file_id, 1}, write_buffer.data(), write_buffer.size());
+    assert(first_reopen.ok());
+    auto first_reopen_completion = backend.PollCompletion();
+    assert(first_reopen_completion.ok());
+    assert(first_reopen_completion.value().status.ok());
+    assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 1);
+    assert(telepath::io_test_support::CountOpenDescriptorsForPath(second_file_path) == 0);
+  }
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 0);
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(second_file_path) == 0);
+#else
+  (void)root;
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -85,5 +158,7 @@ int main() {
   AssertRoundTripReadWrite(root_guard.path());
   AssertInvalidReadSizeRejected(root_guard.path());
   AssertShutdownDrainsPendingWrites(root_guard.path());
+  AssertRepeatedAccessReusesAndClosesFileDescriptor(root_guard.path());
+  AssertFileDescriptorCacheEvictsLeastRecentlyUsedFile(root_guard.path());
   return 0;
 }

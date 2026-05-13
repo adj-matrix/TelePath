@@ -19,15 +19,17 @@ std::string BuildErrnoMessage(const std::string &prefix) {
 
 }  // namespace
 
-PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size, bool is_fallback_backend)
+PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size, bool is_fallback_backend, std::size_t max_open_files)
   : is_fallback_backend_(is_fallback_backend),
     root_path_(std::move(root_path)),
     page_size_(page_size),
+    max_open_files_(max_open_files == 0 ? 64 : max_open_files),
     worker_(&PosixDiskBackend::WorkerLoop, this) {}
 
 PosixDiskBackend::~PosixDiskBackend() {
   PosixDiskBackend::Shutdown();
   if (worker_.joinable()) worker_.join();
+  CloseCachedFiles();
 }
 
 auto PosixDiskBackend::SubmitRead(const BufferTag &tag, std::byte *out, std::size_t size) -> Result<uint64_t> {
@@ -133,12 +135,10 @@ auto PosixDiskBackend::ExecuteRead(const BufferTag &tag, std::byte *out, std::si
   const off_t offset = static_cast<off_t>(tag.block_id * page_size_);
   const ssize_t bytes_read = pread(fd, out, size, offset);
   if (bytes_read < 0) {
-    close(fd);
     return Status::IoError(BuildErrnoMessage("pread failed"));
   }
   if (bytes_read < static_cast<ssize_t>(size)) std::memset(out + bytes_read, 0, size - bytes_read);
 
-  close(fd);
   return Status::Ok();
 }
 
@@ -152,29 +152,53 @@ auto PosixDiskBackend::ExecuteWrite(const BufferTag &tag, const std::byte *data,
   const off_t offset = static_cast<off_t>(tag.block_id * page_size_);
   const ssize_t bytes_written = pwrite(fd, data, size, offset);
   if (bytes_written != static_cast<ssize_t>(size)) {
-    close(fd);
     if (bytes_written < 0) return Status::IoError(BuildErrnoMessage("pwrite failed"));
     return Status::IoError("partial page write");
   }
 
   if (fsync(fd) != 0) {
-    close(fd);
     return Status::IoError(BuildErrnoMessage("fsync failed"));
   }
 
-  close(fd);
   return Status::Ok();
 }
 
-auto PosixDiskBackend::OpenFile(FileId file_id, int flags) const -> Result<int> {
+auto PosixDiskBackend::OpenFile(FileId file_id, int flags) -> Result<int> {
+  auto cached = open_files_.find(file_id);
+  if (cached != open_files_.end()) {
+    cached->second.last_used = ++open_file_clock_;
+    return cached->second.fd;
+  }
+
+  EvictLeastRecentlyUsedFileIfNeeded();
   const std::string path = BuildPath(file_id);
   const int fd = open(path.c_str(), flags, 0644);
   if (fd < 0) return Status::IoError(BuildErrnoMessage("open failed"));
+  open_files_.emplace(file_id, CachedFile{fd, ++open_file_clock_});
   return fd;
 }
 
 auto PosixDiskBackend::BuildPath(FileId file_id) const -> std::string {
   return root_path_ + "/file_" + std::to_string(file_id) + ".tp";
+}
+
+void PosixDiskBackend::EvictLeastRecentlyUsedFileIfNeeded() {
+  if (open_files_.size() < max_open_files_) return;
+
+  auto victim = open_files_.begin();
+  for (auto it = open_files_.begin(); it != open_files_.end(); ++it) {
+    if (it->second.last_used < victim->second.last_used) victim = it;
+  }
+  if (victim->second.fd >= 0) close(victim->second.fd);
+  open_files_.erase(victim);
+}
+
+void PosixDiskBackend::CloseCachedFiles() {
+  for (const auto &[file_id, cached_file] : open_files_) {
+    (void)file_id;
+    if (cached_file.fd >= 0) close(cached_file.fd);
+  }
+  open_files_.clear();
 }
 
 void PosixDiskBackend::WorkerLoop() {
@@ -185,7 +209,10 @@ void PosixDiskBackend::WorkerLoop() {
       request_cv_.wait(lock, [this]() {
         return shutdown_ || !pending_requests_.empty();
       });
-      if (shutdown_ && pending_requests_.empty()) return;
+      if (shutdown_ && pending_requests_.empty()) {
+        CloseCachedFiles();
+        return;
+      }
       request = pending_requests_.front();
       pending_requests_.pop_front();
       worker_active_ = true;

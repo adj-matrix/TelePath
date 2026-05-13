@@ -35,6 +35,7 @@ struct IoUringDiskBackend::RequestContext {
   std::byte *mutable_buffer{nullptr};
   const std::byte *const_buffer{nullptr};
   std::size_t size{0};
+  FileId file_id{0};
   int fd{-1};
 };
 
@@ -48,10 +49,12 @@ struct IoUringDiskBackend::Impl {
 IoUringDiskBackend::IoUringDiskBackend(
   std::string root_path,
   std::size_t page_size,
-  std::size_t queue_depth)
+  std::size_t queue_depth,
+  std::size_t max_open_files)
   : root_path_(std::move(root_path)),
     page_size_(page_size),
     queue_depth_(queue_depth == 0 ? 64 : queue_depth),
+    max_open_files_(max_open_files == 0 ? 64 : max_open_files),
     impl_(std::make_unique<Impl>()) {
   if (root_path_.empty()) {
     init_status_ = Status::InvalidArgument("io_uring backend root path must not be empty");
@@ -73,9 +76,7 @@ IoUringDiskBackend::~IoUringDiskBackend() {
 
   std::lock_guard<std::mutex> guard(latch_);
   if (impl_ == nullptr) return;
-  for (auto &entry : impl_->in_flight_requests) {
-    CloseRequestContext(entry.second.get());
-  }
+  CloseCachedFilesLocked();
 #if TELEPATH_HAS_LIBURING
   if (init_status_.ok()) io_uring_queue_exit(&impl_->ring);
 #endif
@@ -113,7 +114,7 @@ auto IoUringDiskBackend::PollCompletion() -> Result<DiskCompletion> {
 
     std::unique_ptr<RequestContext> owned_context = std::move(context_result.value());
     Status completion_status = FinalizeCompletion(owned_context.get(), completion_result);
-    CloseRequestContext(owned_context.get());
+    ReleaseRequestFile(*owned_context);
     return DiskCompletion{owned_context->request_id, owned_context->operation, owned_context->tag, completion_status};
   }
 #endif
@@ -122,6 +123,7 @@ auto IoUringDiskBackend::PollCompletion() -> Result<DiskCompletion> {
 void IoUringDiskBackend::Shutdown() {
   std::lock_guard<std::mutex> guard(latch_);
   shutdown_ = true;
+  if (impl_ == nullptr || impl_->in_flight_requests.empty()) CloseCachedFilesLocked();
 }
 
 auto IoUringDiskBackend::GetCapabilities() const -> DiskBackendCapabilities {
@@ -159,31 +161,32 @@ auto IoUringDiskBackend::SubmitRequest(const BufferTag &tag, DiskOperation opera
   std::lock_guard<std::mutex> guard(latch_);
   if (shutdown_) return Status::Unavailable("io_uring backend is shutting down");
 
+  std::optional<int> forced_submit_result;
   if (next_submit_result_for_test_.has_value()) {
-    const int submit_result = *next_submit_result_for_test_;
+    forced_submit_result = *next_submit_result_for_test_;
     next_submit_result_for_test_.reset();
-    if (submit_result == 1) return Status::Internal("test submit override must not report success");
-    if (submit_result == 0) return Status::IoError("io_uring submit accepted no requests");
-    return Status::IoError(BuildNegativeErrnoMessage("io_uring submit failed", submit_result));
+    if (*forced_submit_result == 1) return Status::Internal("test submit override must not report success");
   }
 
-  io_uring_sqe *sqe = io_uring_get_sqe(&impl_->ring);
-  if (sqe == nullptr) return Status::ResourceExhausted("io_uring submission queue is full");
-
-  Result<int> fd_result = OpenFile(tag.file_id);
+  Result<int> fd_result = OpenFileLocked(tag.file_id);
   if (!fd_result.ok()) return fd_result.status();
 
   auto context = BuildRequestContext(tag, operation, mutable_buffer, const_buffer, size, fd_result.value());
-
-  const off_t offset = static_cast<off_t>(tag.block_id * page_size_);
-  if (operation == DiskOperation::kRead) io_uring_prep_read(sqe, context->fd, mutable_buffer, size, offset);
-  else io_uring_prep_write(sqe, context->fd, const_buffer, size, offset);
-  io_uring_sqe_set_data(sqe, context.get());
-
   const uint64_t request_id = context->request_id;
   impl_->in_flight_requests.emplace(request_id, std::move(context));
+
+  if (forced_submit_result.has_value()) return RollBackSubmittedRequestLocked(request_id, *forced_submit_result);
+
+  io_uring_sqe *sqe = io_uring_get_sqe(&impl_->ring);
+  if (sqe == nullptr) return RollBackSubmittedRequestLocked(request_id, 0);
+
+  const off_t offset = static_cast<off_t>(tag.block_id * page_size_);
+  auto *request_context = impl_->in_flight_requests.find(request_id)->second.get();
+  if (operation == DiskOperation::kRead) io_uring_prep_read(sqe, request_context->fd, mutable_buffer, size, offset);
+  else io_uring_prep_write(sqe, request_context->fd, const_buffer, size, offset);
+  io_uring_sqe_set_data(sqe, request_context);
   const int submit_result = io_uring_submit(&impl_->ring);
-  if (submit_result != 1) return RollBackSubmittedRequest(request_id, submit_result);
+  if (submit_result != 1) return RollBackSubmittedRequestLocked(request_id, submit_result);
 
   return request_id;
 #endif
@@ -210,9 +213,18 @@ auto IoUringDiskBackend::ValidateRequest(const void *buffer, std::size_t size, D
   return Status::Ok();
 }
 
-auto IoUringDiskBackend::OpenFile(FileId file_id) const -> Result<int> {
+auto IoUringDiskBackend::OpenFileLocked(FileId file_id) -> Result<int> {
+  auto cached = open_files_.find(file_id);
+  if (cached != open_files_.end()) {
+    ++cached->second.in_flight;
+    cached->second.last_used = ++open_file_clock_;
+    return cached->second.fd;
+  }
+
+  EvictLeastRecentlyUsedIdleFilesLocked(max_open_files_ - 1);
   const int fd = open(BuildPath(file_id).c_str(), O_RDWR | O_CREAT, 0644);
   if (fd < 0) return Status::IoError(BuildErrnoMessage("open failed", errno));
+  open_files_.emplace(file_id, CachedFile{fd, ++open_file_clock_, 1});
   return fd;
 }
 
@@ -224,21 +236,56 @@ auto IoUringDiskBackend::BuildRequestContext(const BufferTag &tag, DiskOperation
   context->mutable_buffer = mutable_buffer;
   context->const_buffer = const_buffer;
   context->size = size;
+  context->file_id = tag.file_id;
   context->fd = fd;
   return context;
 }
 
-void IoUringDiskBackend::CloseRequestContext(RequestContext *context) const {
-  if (context == nullptr || context->fd < 0) return;
-  close(context->fd);
-  context->fd = -1;
+void IoUringDiskBackend::ReleaseRequestFile(const RequestContext &context) {
+  std::lock_guard<std::mutex> guard(latch_);
+  ReleaseRequestFileLocked(context);
 }
 
-auto IoUringDiskBackend::RollBackSubmittedRequest(uint64_t request_id, int submit_result) -> Status {
+void IoUringDiskBackend::ReleaseRequestFileLocked(const RequestContext &context) {
+  auto cached = open_files_.find(context.file_id);
+  if (cached == open_files_.end()) return;
+  if (cached->second.in_flight > 0) --cached->second.in_flight;
+  cached->second.last_used = ++open_file_clock_;
+  EvictLeastRecentlyUsedIdleFilesLocked(max_open_files_);
+  if (shutdown_ && (impl_ == nullptr || impl_->in_flight_requests.empty())) CloseCachedFilesLocked();
+}
+
+void IoUringDiskBackend::EvictLeastRecentlyUsedIdleFilesLocked(std::size_t target_size) {
+  while (open_files_.size() > target_size) {
+    auto victim = open_files_.end();
+    for (auto it = open_files_.begin(); it != open_files_.end(); ++it) {
+      if (it->second.in_flight != 0) continue;
+      if (victim == open_files_.end() || it->second.last_used < victim->second.last_used) victim = it;
+    }
+    if (victim == open_files_.end()) return;
+    if (victim->second.fd >= 0) close(victim->second.fd);
+    open_files_.erase(victim);
+  }
+}
+
+void IoUringDiskBackend::CloseCachedFilesLocked() {
+  for (const auto &[file_id, cached_file] : open_files_) {
+    (void)file_id;
+    if (cached_file.fd >= 0) close(cached_file.fd);
+  }
+  open_files_.clear();
+}
+
+auto IoUringDiskBackend::RollBackSubmittedRequestLocked(uint64_t request_id, int submit_result) -> Status {
   auto it = impl_->in_flight_requests.find(request_id);
   if (it != impl_->in_flight_requests.end()) {
-    CloseRequestContext(it->second.get());
-    impl_->in_flight_requests.erase(it);
+    if (it->second != nullptr) {
+      RequestContext context = *it->second;
+      impl_->in_flight_requests.erase(it);
+      ReleaseRequestFileLocked(context);
+    } else {
+      impl_->in_flight_requests.erase(it);
+    }
   }
   if (submit_result == 0) return Status::IoError("io_uring submit accepted no requests");
   return Status::IoError(BuildNegativeErrnoMessage("io_uring submit failed", submit_result));

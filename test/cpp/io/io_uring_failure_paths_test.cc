@@ -81,10 +81,17 @@ int main() {
   const telepath::BufferTag submit_fail_tag{37, 0};
   const telepath::BufferTag completion_fail_tag{37, 1};
   const telepath::BufferTag recovery_tag{37, 2};
+  const std::filesystem::path submit_fail_path = root_guard.path() / "file_37.tp";
   auto page = BuildMarkedPage();
   AssertSubmitFailureDoesNotLeaveInFlightRequest(&backend, submit_fail_tag, page);
+#if defined(__linux__)
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(submit_fail_path) == 1);
+#endif
   AssertCompletionFailureReportsIoError(&backend, completion_fail_tag);
   AssertBackendRecoversAfterFailure(&backend, recovery_tag, page);
   backend.Shutdown();
+#if defined(__linux__)
+  assert(telepath::io_test_support::CountOpenDescriptorsForPath(submit_fail_path) == 0);
+#endif
   return 0;
 }

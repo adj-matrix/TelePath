@@ -274,7 +274,10 @@ int main() {
 
   assert(failed_reads.load() == kWorkerCount);
   const int reads_after_failure = backend_ptr->submitted_reads();
-  assert(reads_after_failure == 1);
+  // The start gate only proves workers were released; a slow worker may enter
+  // after an earlier failed miss state has already been retired.
+  assert(reads_after_failure >= 1);
+  assert(reads_after_failure <= kWorkerCount);
 
   backend_ptr->set_fail_reads(false);
   backend_ptr->BlockCompletions();
@@ -292,7 +295,7 @@ int main() {
 
   StartWorkers(&gate);
   WaitForAllWorkers(started_recovery_reads);
-  backend_ptr->WaitForSubmittedReads(2);
+  backend_ptr->WaitForSubmittedReads(reads_after_failure + 1);
   backend_ptr->AllowCompletions();
   for (auto &worker : recovery_workers) worker.join();
 

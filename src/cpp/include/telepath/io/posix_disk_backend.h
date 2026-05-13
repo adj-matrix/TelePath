@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include "telepath/io/disk_backend.h"
 
@@ -17,7 +18,8 @@ class PosixDiskBackend : public DiskBackend {
   explicit PosixDiskBackend(
     std::string root_path,
     std::size_t page_size,
-    bool is_fallback_backend = false
+    bool is_fallback_backend = false,
+    std::size_t max_open_files = 64
   );
   ~PosixDiskBackend() override;
 
@@ -36,6 +38,11 @@ class PosixDiskBackend : public DiskBackend {
   auto GetCapabilities() const -> DiskBackendCapabilities override;
 
  private:
+  struct CachedFile {
+    int fd{-1};
+    uint64_t last_used{0};
+  };
+
   auto SubmitRequest(
     DiskOperation operation,
     const BufferTag &tag,
@@ -69,8 +76,10 @@ class PosixDiskBackend : public DiskBackend {
     const std::byte *data,
     std::size_t size
   ) -> Status;
-  auto OpenFile(FileId file_id, int flags) const -> Result<int>;
+  auto OpenFile(FileId file_id, int flags) -> Result<int>;
   auto BuildPath(FileId file_id) const -> std::string;
+  void EvictLeastRecentlyUsedFileIfNeeded();
+  void CloseCachedFiles();
   void WorkerLoop();
 
   std::mutex queue_latch_;
@@ -84,6 +93,9 @@ class PosixDiskBackend : public DiskBackend {
   bool is_fallback_backend_{false};
   std::string root_path_;
   std::size_t page_size_{0};
+  std::size_t max_open_files_{64};
+  uint64_t open_file_clock_{0};
+  std::unordered_map<FileId, CachedFile> open_files_;
   std::thread worker_;
 };
 
