@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "telepath/common/types.h"
+#include "telepath/telemetry/telemetry_sink.h"
 
 namespace telepath::benchmark_support {
 
@@ -27,6 +28,7 @@ struct BenchmarkOptions {
   std::string replacer{"lru_k"};
   std::string disk_backend{"auto"};
   std::string telemetry_export_path{};
+  std::string telemetry_shm_name{};
   std::size_t pool_size{256};
   std::size_t page_size{4096};
   std::size_t block_count{1024};
@@ -44,6 +46,7 @@ struct BenchmarkOptions {
   std::size_t dirty_page_low_watermark{0};
   std::size_t queue_depth{0};
   std::size_t max_open_files{0};
+  std::size_t telemetry_shm_capacity{telepath::kDefaultTelemetrySharedMemoryPayloadCapacity};
 };
 
 struct BenchmarkMetadata {
@@ -192,6 +195,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseStringArg(arg, "--replacer", argc, argv, &i, &options.replacer)) continue;
     if (TryParseStringArg(arg, "--disk-backend", argc, argv, &i, &options.disk_backend)) continue;
     if (TryParseStringArg(arg, "--telemetry-export-path", argc, argv, &i, &options.telemetry_export_path)) continue;
+    if (TryParseStringArg(arg, "--telemetry-shm-name", argc, argv, &i, &options.telemetry_shm_name)) continue;
     if (TryParsePositiveArg(arg, "--pool-size", argc, argv, &i, &options.pool_size)) continue;
     if (TryParsePositiveArg(arg, "--block-count", argc, argv, &i, &options.block_count)) continue;
     if (TryParsePositiveArg(arg, "--threads", argc, argv, &i, &options.thread_count)) continue;
@@ -207,6 +211,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseNonNegativeArg(arg, "--dirty-page-high-watermark", argc, argv, &i, &options.dirty_page_high_watermark)) continue;
     if (TryParseNonNegativeArg(arg, "--dirty-page-low-watermark", argc, argv, &i, &options.dirty_page_low_watermark)) continue;
     if (TryParseNonNegativeArg(arg, "--queue-depth", argc, argv, &i, &options.queue_depth)) continue;
+    if (TryParsePositiveArg(arg, "--telemetry-shm-capacity", argc, argv, &i, &options.telemetry_shm_capacity)) continue;
     if (!TryParseNonNegativeArg(arg, "--max-open-files", argc, argv, &i, &options.max_open_files)) continue;
   }
   NormalizeBenchmarkOptions(&options);

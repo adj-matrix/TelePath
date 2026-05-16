@@ -40,7 +40,7 @@ The current suite covers:
 - completion dispatcher behavior,
 - replacer correctness,
 - telemetry correctness,
-- telemetry JSONL export shape,
+- telemetry JSONL and shared-memory snapshot export shape,
 - options resolution,
 - benchmark workload, experiment-parameter, and operation-latency summary semantics.
 
@@ -59,12 +59,13 @@ The current behavior-oriented coverage map is:
 | Completion dispatch | `completion_dispatcher_test`, `completion_dispatcher_idle_test`, `completion_order_test` | Covers request-id routing, out-of-order completion, early completion before registration, backend failure, idle shutdown, and reordered read completions. |
 | Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers POSIX fallback behavior, factory policy, zero-fill reads, and native/stub `io_uring` paths. |
 | Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test` | Covers shared interface expectations and policy-specific behavior. |
-| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, JSONL telemetry export, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, operation-latency summaries, snapshot aggregates, and JSON output shape. |
+| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, JSONL telemetry export, POSIX shared-memory telemetry snapshot export, malformed shared-memory headers/bounds, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, operation-latency summaries, snapshot aggregates, and JSON output shape. |
 
 The remaining intentional gaps are larger-scale rather than unit-test-sized:
 
 - long-running stress/soak tests under sustained dirty-page pressure,
 - native `io_uring` performance validation on real hardware,
+- live shared-memory event streaming and external consumer behavior,
 - crash/recovery semantics, which are outside the current project scope,
 - cross-run latency stability assertions, which should come from benchmark artifact analysis rather than brittle unit tests.
 

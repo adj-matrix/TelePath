@@ -145,7 +145,7 @@
     "item1": "Data plane stays in the C++ engine.",
     "item2": "Observation remains out of the hot path.",
     "item3": "Run history and sweep results make trend inspection easier.",
-    "item4": "Future GUI and shared-memory telemetry can replace this shell without changing engine semantics."
+    "item4": "The shared-memory snapshot path can feed future monitoring shells without changing engine semantics."
   },
   "history": {
     "empty_runs": "No recent runs yet.",

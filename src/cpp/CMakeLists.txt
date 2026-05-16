@@ -25,6 +25,7 @@ add_library(telepath
   lib/replacer/two_queue_replacer.cc
   lib/telemetry/counter_telemetry_sink.cc
   lib/telemetry/telemetry_export.cc
+  lib/telemetry/shared_memory_telemetry.cc
   lib/telemetry/noop_telemetry_sink.cc
 )
 
@@ -36,6 +37,13 @@ target_include_directories(telepath
 if(TELEPATH_HAS_LIBURING)
   target_include_directories(telepath PRIVATE ${TELEPATH_LIBURING_INCLUDE_DIR})
   target_link_libraries(telepath PRIVATE ${TELEPATH_LIBURING_LIBRARY})
+endif()
+
+if(UNIX AND NOT APPLE)
+  find_library(TELEPATH_RT_LIBRARY rt)
+  if(TELEPATH_RT_LIBRARY)
+    target_link_libraries(telepath PRIVATE ${TELEPATH_RT_LIBRARY})
+  endif()
 endif()
 
 target_compile_features(telepath PUBLIC cxx_std_17)

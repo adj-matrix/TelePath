@@ -30,6 +30,27 @@ The benchmark output reports the following paper-facing metrics:
 
 Operation latency measures a benchmark operation from `ReadBuffer()` through optional dirty marking and foreground flush completion.
 
+## Observation Export
+
+Benchmark runs can export the same point-in-time buffer-pool snapshot through two paths:
+
+- `--telemetry-export-path <path>` appends one compact JSON document per run as JSONL.
+- `--telemetry-shm-name /telepath_name` publishes the latest compact JSON document into a POSIX shared-memory object.
+
+The shared-memory path is meant for observation-plane prototype validation. It proves that the telemetry snapshot format can cross a process boundary without changing the buffer manager hot path. It is not yet a live event stream or a final real-time monitoring protocol.
+
+Example:
+
+```bash
+./scripts/bench/run.sh \
+  --output-format json \
+  --workload hotspot \
+  --replacer lru_k \
+  --disk-backend posix \
+  --telemetry-shm-name /telepath_benchmark_snapshot \
+  --telemetry-shm-capacity 65536
+```
+
 ## Local Collection
 
 Single focused run:
@@ -152,6 +173,7 @@ For each paper figure or table, keep:
 
 - the exact command,
 - raw CSV or JSON output,
+- any JSONL or shared-memory snapshot validation used to explain runtime state,
 - summarized Markdown table,
 - commit SHA,
 - machine and OS description,

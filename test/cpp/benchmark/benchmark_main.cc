@@ -415,10 +415,21 @@ auto MaybeExportTelemetry(
   const BenchmarkMetrics &metrics,
   const telepath::BufferPoolSnapshot &snapshot
 ) -> telepath::Status {
-  if (options.telemetry_export_path.empty()) return telepath::Status::Ok();
-  return telepath::AppendTelemetryExportJsonLine(
-    options.telemetry_export_path,
-    BuildTelemetryExportSnapshot(options, metrics, snapshot));
+  if (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty()) return telepath::Status::Ok();
+
+  const telepath::TelemetryExportSnapshot export_snapshot = BuildTelemetryExportSnapshot(options, metrics, snapshot);
+  if (!options.telemetry_export_path.empty()) {
+    auto file_status = telepath::AppendTelemetryExportJsonLine(options.telemetry_export_path, export_snapshot);
+    if (!file_status.ok()) return file_status;
+  }
+  if (!options.telemetry_shm_name.empty()) {
+    auto shared_memory_status = telepath::WriteTelemetryExportSharedMemory(
+      options.telemetry_shm_name,
+      options.telemetry_shm_capacity,
+      export_snapshot);
+    if (!shared_memory_status.ok()) return shared_memory_status;
+  }
+  return telepath::Status::Ok();
 }
 
 void PrintTextSummary(
@@ -452,6 +463,10 @@ void PrintTextSummary(
   std::cout << "queue_depth=" << options.queue_depth << "\n";
   std::cout << "max_open_files=" << options.max_open_files << "\n";
   if (!options.telemetry_export_path.empty()) std::cout << "telemetry_export_path=" << options.telemetry_export_path << "\n";
+  if (!options.telemetry_shm_name.empty()) {
+    std::cout << "telemetry_shm_name=" << options.telemetry_shm_name << "\n";
+    std::cout << "telemetry_shm_capacity=" << options.telemetry_shm_capacity << "\n";
+  }
   std::cout << "total_ops=" << metrics.total_ops << "\n";
   std::cout << "seconds=" << metrics.seconds << "\n";
   std::cout << "throughput_ops_per_sec=" << metrics.throughput << "\n";
@@ -491,7 +506,7 @@ void PrintCsvSummary(
          "requested_disk_backend,write_percent,flush_every_ops,flush_workers,"
          "flush_submit_batch_size,flush_foreground_burst_limit,background_cleaner,"
          "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
-         "telemetry_export_enabled,total_ops,"
+         "telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
          "seconds,throughput_ops_per_sec,operation_latency_min_ns,"
          "operation_latency_avg_ns,operation_latency_p50_ns,operation_latency_p95_ns,"
          "operation_latency_p99_ns,operation_latency_max_ns,buffer_hits,buffer_misses,hit_rate,"
@@ -513,7 +528,10 @@ void PrintCsvSummary(
             << options.dirty_page_high_watermark << ","
             << options.dirty_page_low_watermark << "," << options.queue_depth << ","
             << options.max_open_files << ","
-            << (options.telemetry_export_path.empty() ? "false" : "true") << ","
+            << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ","
+            << (options.telemetry_shm_name.empty() ? "false" : "true") << ","
+            << options.telemetry_shm_name << ","
+            << options.telemetry_shm_capacity << ","
             << metrics.total_ops << ","
             << metrics.seconds << "," << metrics.throughput << ","
             << metrics.operation_latency.min_ns << ","
@@ -566,7 +584,10 @@ void PrintJsonMetrics(
   std::cout << "    \"dirty_page_low_watermark\": " << options.dirty_page_low_watermark << ",\n";
   std::cout << "    \"queue_depth\": " << options.queue_depth << ",\n";
   std::cout << "    \"max_open_files\": " << options.max_open_files << ",\n";
-  std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() ? "false" : "true") << ",\n";
+  std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
+  std::cout << "    \"telemetry_shm_enabled\": " << (options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
+  std::cout << "    \"telemetry_shm_name\": \"" << JsonEscape(options.telemetry_shm_name) << "\",\n";
+  std::cout << "    \"telemetry_shm_capacity\": " << options.telemetry_shm_capacity << ",\n";
   std::cout << "    \"total_ops\": " << metrics.total_ops << ",\n";
   std::cout << "    \"seconds\": " << metrics.seconds << ",\n";
   std::cout << "    \"throughput_ops_per_sec\": " << metrics.throughput << ",\n";

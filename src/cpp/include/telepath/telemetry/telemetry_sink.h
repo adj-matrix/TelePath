@@ -2,6 +2,7 @@
 #define TELEPATH_TELEMETRY_TELEMETRY_SINK_H_
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <memory>
@@ -52,6 +53,20 @@ struct TelemetryExportSnapshot {
   std::size_t flush_in_flight_count{0};
   TelemetrySnapshot counters{};
   std::vector<TelemetryExportFrame> frames;
+};
+
+inline constexpr uint32_t kTelemetrySharedMemoryMagic = 0x54505448;
+inline constexpr uint16_t kTelemetrySharedMemoryVersion = 1;
+inline constexpr uint16_t kTelemetrySharedMemoryReady = 1;
+inline constexpr std::size_t kDefaultTelemetrySharedMemoryPayloadCapacity = 64 * 1024;
+
+struct TelemetrySharedMemoryHeader {
+  uint32_t magic{kTelemetrySharedMemoryMagic};
+  uint16_t version{kTelemetrySharedMemoryVersion};
+  uint16_t flags{0};
+  uint64_t sequence{0};
+  uint64_t payload_size{0};
+  uint64_t payload_capacity{0};
 };
 
 // Fast-path counters used by in-process telemetry implementations that want to
@@ -210,6 +225,17 @@ std::shared_ptr<TelemetrySink> MakeNoOpTelemetrySink();
 auto SerializeTelemetryExportJson(const TelemetryExportSnapshot &snapshot) -> std::string;
 // Appends one JSON line to `path`, creating parent directories when needed.
 auto AppendTelemetryExportJsonLine(const std::string &path, const TelemetryExportSnapshot &snapshot) -> Status;
+// Publishes the latest telemetry snapshot into a POSIX shared-memory object.
+auto WriteTelemetryExportSharedMemory(
+  const std::string &name,
+  std::size_t payload_capacity,
+  const TelemetryExportSnapshot &snapshot
+) -> Status;
+// Reads the compact JSON payload from a POSIX shared-memory telemetry snapshot.
+auto ReadTelemetryExportSharedMemory(const std::string &name) -> Result<std::string>;
+// Removes a POSIX shared-memory telemetry snapshot object. Missing objects are
+// treated as already cleaned up.
+auto UnlinkTelemetryExportSharedMemory(const std::string &name) -> Status;
 
 }  // namespace telepath
 

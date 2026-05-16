@@ -1,10 +1,18 @@
-# TelePath State 3
+# TelePath State 4
 
 ## Overview
 
-State 3 is the phase where TelePath stops being only "async-ready in shape" and starts behaving like a usable writeback-oriented concurrent buffer engine.
+State 4 is the phase where TelePath turns the State 3 writeback-oriented buffer engine into a prototype with stronger observability, benchmark evidence, and engineering proof material.
 
-The goal of this stage is not to finish every long-term subsystem. The goal is to make the current architecture internally coherent enough that future `io_uring`, shared-memory telemetry, and higher-contention experiments can land on top of a working writeback pipeline rather than on top of placeholders.
+The goal of this stage is not to finish every long-term subsystem. The goal is to make the current architecture internally coherent enough that future `io_uring`, richer telemetry transports, and higher-contention experiments can land on top of a working writeback pipeline rather than on top of placeholders.
+
+The post-midterm items from `docs/archive/archive2.md` are now represented in the implementation as:
+
+- expanded writeback and cleaner telemetry,
+- operation-level latency summaries and benchmark matrix tooling,
+- JSONL plus shared-memory snapshot export paths,
+- Web and script output that expose benchmark parameters, throughput, hit rate, writeback pressure, and tail latency together,
+- documentation for experiment collection, CI evidence, and test coverage.
 
 ## What Was Added Beyond State 2
 
@@ -22,11 +30,12 @@ Compared with State 2, the current implementation now includes:
 - benchmark parameterization for replacer/backend/write-pressure/writeback experiments,
 - benchmark operation-latency summaries for p50/p95/p99 tail-latency analysis,
 - JSONL telemetry export for point-in-time benchmark snapshots,
+- POSIX shared-memory telemetry snapshot export for prototype IPC validation,
 - broader correctness and regression coverage around writeback behavior.
 
 ## Implemented Components
 
-The current State 3 codebase includes:
+The current State 4 codebase includes:
 
 - `BufferManager`
 - `BufferHandle`
@@ -45,6 +54,7 @@ The current State 3 codebase includes:
 - `TelemetrySink`
 - `CounterTelemetrySink`
 - `NoOpTelemetrySink`
+- telemetry JSONL and shared-memory snapshot export helpers
 
 ## Architectural Changes
 
@@ -52,7 +62,7 @@ The current State 3 codebase includes:
 
 Disk completions are no longer consumed opportunistically by whichever caller happens to be waiting.
 
-State 3 introduces a dedicated completion-dispatch path that registers request ids, waits for backend completions, and routes the result back to the owning waiter. This closes the earlier class of completion-stealing bugs and gives the storage layer a model that can scale from the POSIX fallback backend to a native `io_uring` backend.
+The implementation uses a dedicated completion-dispatch path that registers request ids, waits for backend completions, and routes the result back to the owning waiter. This closes the earlier class of completion-stealing bugs and gives the storage layer a model that can scale from the POSIX fallback backend to a native `io_uring` backend.
 
 ### 2. Same-Page Misses Now Coordinate Explicitly
 
@@ -62,7 +72,7 @@ This reduces duplicate load attempts and keeps page install semantics much close
 
 ### 3. Writeback Is Now a First-Class Subsystem
 
-State 3 introduces an actual flush scheduler instead of ad hoc direct writeback.
+The implementation uses an actual flush scheduler instead of ad hoc direct writeback.
 
 The scheduler now supports:
 
@@ -79,7 +89,7 @@ The implementation now maintains separate foreground and background queues plus 
 
 ### 5. Cleaner Policy Is Usable, Not Decorative
 
-State 3 adds a background cleaner that reacts to dirty-page watermarks and only targets evictable dirty pages.
+The implementation includes a background cleaner that reacts to dirty-page watermarks and only targets evictable dirty pages.
 
 The cleaner is still intentionally conservative, but it is now real enough to:
 
@@ -106,7 +116,9 @@ The telemetry surface now reports flush task scheduling, completion, failures, c
 
 The exported buffer-pool snapshot also includes aggregate dirty, queued-flush, and in-flight-flush counts, so benchmark output and the Web console can explain writeback pressure without re-deriving it from every frame.
 
-Benchmark runs can now append compact JSONL telemetry snapshots containing counters, aggregate writeback state, and per-frame state. This is still a file-based export path rather than a live shared-memory transport, but it gives the observation plane a stable serialized shape for later IPC work.
+Benchmark runs can now append compact JSONL telemetry snapshots containing counters, aggregate writeback state, and per-frame state. They can also publish the latest compact snapshot into a POSIX shared-memory object with `--telemetry-shm-name`, using a fixed header with magic, version, ready flag, sequence, payload size, and payload capacity followed by the serialized JSON payload.
+
+This closes the minimum prototype requirement for shared-memory telemetry export without pretending that the final observation plane is done. The current shared-memory path is a snapshot transport, not a live multi-consumer event ring.
 
 ### 9. Benchmark Experiments Are Parameterized
 
@@ -120,7 +132,7 @@ Benchmark output now includes operation-level latency summaries: min, average, p
 
 ## Test Coverage
 
-State 3 now validates the following categories:
+State 4 now validates the following categories:
 
 - smoke-path lifecycle behavior,
 - handle and pin/unpin semantics,
@@ -137,6 +149,7 @@ State 3 now validates the following categories:
 - cleaner failure requeue and retry behavior,
 - submit-time and completion-time writeback failures,
 - flush/cleaner/eviction telemetry and snapshot aggregate output,
+- JSONL and shared-memory telemetry snapshot export,
 - options resolution,
 - replacer correctness,
 - benchmark workload semantics,
@@ -150,14 +163,15 @@ At the time of writing:
 
 ## Current Limits
 
-State 3 still does **not** mean TelePath is finished.
+State 4 still does **not** mean TelePath is finished.
 
 The following remain future work:
 
 - stronger long-running stress and soak testing,
 - richer benchmark interpretation, charting, and cross-run statistical reporting,
-- live shared-memory telemetry transport,
-- richer non-counter observability events and transport integrations,
+- live shared-memory event-ring telemetry and standalone consumers,
+- Socket or other IPC transport integrations,
+- richer non-counter observability events,
 - deeper `io_uring` optimization beyond correctness-first support,
 - NUMA-aware or contention-aware memory/layout tuning,
 - WAL / recovery,
@@ -165,7 +179,7 @@ The following remain future work:
 
 ## Practical Conclusion
 
-State 3 is the point where TelePath becomes a credible concurrent buffer-engine core rather than only a promising architecture direction.
+State 4 is the point where TelePath becomes a credible prototype rather than only a promising architecture direction.
 
 It now has:
 
@@ -176,4 +190,4 @@ It now has:
 - fallback and native backend separation,
 - and a regression suite broad enough to support the next stage of implementation work.
 
-That is enough to treat State 3 as a real architectural milestone.
+That is enough to treat State 4 as a real architectural milestone.

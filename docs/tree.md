@@ -241,7 +241,7 @@ Recommended internal areas:
 - `buffer/`: frame table, descriptor state machine, latch helpers,
 - `io/`: posix backend, future uring backend,
 - `replacer/`: LRU, LRU-K, Clock implementations,
-- `telemetry/`: in-process sink, future shared-memory sink,
+- `telemetry/`: in-process sink, JSONL export, shared-memory snapshot export,
 - `common/`: low-level utilities and platform abstractions.
 
 ### `/src/cpp/apps`

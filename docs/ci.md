@@ -70,6 +70,7 @@ Current CI is intended to catch:
 
 - compile failures,
 - unit and integration test regressions,
+- telemetry JSONL/shared-memory snapshot export regressions,
 - sanitizer-detectable memory problems,
 - basic compiler-environment differences between GCC and Clang.
 

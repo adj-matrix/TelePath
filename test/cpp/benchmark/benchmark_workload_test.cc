@@ -73,6 +73,10 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
     "2q",
     "--disk-backend",
     "uring",
+    "--telemetry-shm-name",
+    "/telepath_benchmark_workload_test",
+    "--telemetry-shm-capacity",
+    "32768",
   };
   auto options = telepath::benchmark_support::ParseArgs(
     static_cast<int>(sizeof(argv) / sizeof(argv[0])),
@@ -83,6 +87,8 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
   assert(options.enable_background_cleaner);
   assert(options.replacer == "two_queue");
   assert(options.disk_backend == "io_uring");
+  assert(options.telemetry_shm_name == "/telepath_benchmark_workload_test");
+  assert(options.telemetry_shm_capacity == 32768);
 }
 
 void ExpectInvalidExperimentKnobsFallBackToDefaults() {

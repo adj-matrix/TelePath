@@ -55,9 +55,9 @@ TelePath does **not** currently aim to include:
 - WAL or crash recovery,
 - production-grade monitoring integrations in the first milestone.
 
-## State 3 Status
+## State 4 Status
 
-The current implementation has moved beyond the original State 1/2 skeleton and now includes a usable State 3 writeback core:
+The current implementation has moved beyond the original State 1/2 skeleton and now includes a State 4 prototype built on a usable writeback core:
 
 - `BufferManager`, `BufferHandle`, and `BufferDescriptor`
 - contiguous frame memory allocation
@@ -69,6 +69,7 @@ The current implementation has moved beyond the original State 1/2 skeleton and 
 - cleaner-backed dirty-page writeback with watermark-driven activation
 - `ClockReplacer`, `LruReplacer`, and `LruKReplacer`
 - counter-based and no-op telemetry sinks
+- JSONL and POSIX shared-memory telemetry snapshot export
 - benchmark and CI paths for fallback and native validation
 
 This means TelePath now supports not only the basic buffer lifecycle, but also:
@@ -179,7 +180,7 @@ The main implementation currently lives under:
 - Phase 1: establish a stable, testable buffer pool skeleton
 - Phase 2: strengthen concurrent lifecycle semantics, async-ready I/O boundaries, and benchmark scaffolding
 - Phase 3: deliver centralized completion ownership, async writeback scheduling, and cleaner-backed dirty-page management
-- Phase 4: continue toward shared-memory telemetry transport, deeper native backend optimization, and larger-scale experimentation
+- Phase 4: continue toward live shared-memory event transport, deeper native backend optimization, and larger-scale experimentation
 
 The current implementation is still early-stage. The main focus is architectural correctness, stable interfaces, and controlled extensibility rather than premature performance claims.
 

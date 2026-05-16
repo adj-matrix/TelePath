@@ -453,6 +453,7 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "dirty_page_low_watermark",
         "queue_depth",
         "max_open_files",
+        "telemetry_shm_capacity",
         "flush_tasks_scheduled",
         "flush_tasks_completed",
         "flush_failures",
