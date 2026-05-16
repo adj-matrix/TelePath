@@ -41,6 +41,10 @@
     return t(`backends.${backend}`);
   }
 
+  function replacerLabel(replacer) {
+    return t(`replacers.${replacer}`);
+  }
+
   function applyTranslations() {
     document.documentElement.lang = app.state.currentLanguage;
     document.title = t("meta.title");
@@ -82,6 +86,7 @@
     t,
     workloadLabel,
     backendLabel,
+    replacerLabel,
     applyTranslations,
     preferredLanguage,
     loadLanguage,

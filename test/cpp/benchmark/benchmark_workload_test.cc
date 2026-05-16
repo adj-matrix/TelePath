@@ -57,6 +57,65 @@ void ExpectHotspotUsesHotsetWhenConfiguredForOneHundredPercent() {
   }
 }
 
+void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
+  const char *argv[] = {
+    "telepath_benchmark",
+    "--workload",
+    "dirty",
+    "--write-percent",
+    "100",
+    "--flush-every-ops",
+    "8",
+    "--background-cleaner",
+    "true",
+    "--replacer",
+    "2q",
+    "--disk-backend",
+    "uring",
+  };
+  auto options = telepath::benchmark_support::ParseArgs(
+    static_cast<int>(sizeof(argv) / sizeof(argv[0])),
+    const_cast<char **>(argv));
+  assert(options.workload == "hotspot");
+  assert(options.write_percent == 100);
+  assert(options.flush_every_ops == 8);
+  assert(options.enable_background_cleaner);
+  assert(options.replacer == "two_queue");
+  assert(options.disk_backend == "io_uring");
+}
+
+void ExpectInvalidExperimentKnobsFallBackToDefaults() {
+  const char *argv[] = {
+    "telepath_benchmark",
+    "--replacer",
+    "not-a-replacer",
+    "--disk-backend",
+    "not-a-backend",
+    "--write-percent",
+    "125",
+    "--hot-access-percent",
+    "-1",
+  };
+  auto options = telepath::benchmark_support::ParseArgs(
+    static_cast<int>(sizeof(argv) / sizeof(argv[0])),
+    const_cast<char **>(argv));
+  assert(options.replacer == "lru_k");
+  assert(options.disk_backend == "auto");
+  assert(options.write_percent == 100);
+  assert(options.hot_access_percent == 80);
+}
+
+void ExpectWriteOperationHonorsZeroAndHundredPercent() {
+  telepath::benchmark_support::BenchmarkOptions options;
+  std::mt19937_64 rng(23);
+
+  options.write_percent = 0;
+  assert(!telepath::benchmark_support::ShouldWriteOperation(&rng, 0, options));
+
+  options.write_percent = 100;
+  assert(telepath::benchmark_support::ShouldWriteOperation(&rng, 0, options));
+}
+
 }  // namespace
 
 int main() {
@@ -64,6 +123,9 @@ int main() {
   ExpectSequentialSharedUsesSameBlockAcrossThreads();
   ExpectSequentialDisjointUsesDistinctBlocks();
   ExpectHotspotUsesHotsetWhenConfiguredForOneHundredPercent();
+  ExpectDirtyAliasNormalizesToHotspotWithWrites();
+  ExpectInvalidExperimentKnobsFallBackToDefaults();
+  ExpectWriteOperationHonorsZeroAndHundredPercent();
 
   return 0;
 }

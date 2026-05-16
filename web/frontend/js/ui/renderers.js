@@ -36,6 +36,28 @@
     document.getElementById("backendValue").textContent = app.backendLabel(
       metrics.disk_backend
     );
+    document.getElementById("replacerValue").textContent = app.replacerLabel(
+      metrics.replacer
+    );
+    document.getElementById("writePressureValue").textContent = app.t(
+      "metrics.write_pressure_template",
+      {
+        percent: metrics.write_percent,
+        dirty: app.formatNumber(metrics.writes_marked_dirty),
+      }
+    );
+    document.getElementById("diskWritesValue").textContent = app.formatNumber(
+      metrics.disk_writes
+    );
+    const snapshot = payload.snapshot || {};
+    document.getElementById("dirtyRuntimeValue").textContent = app.t(
+      "metrics.writeback_state_template",
+      {
+        dirty: app.formatNumber(snapshot.dirty_page_count || 0),
+        queued: app.formatNumber(snapshot.flush_queued_count || 0),
+        inflight: app.formatNumber(snapshot.flush_in_flight_count || 0),
+      }
+    );
     document.getElementById("workloadValue").textContent = app.workloadLabel(
       metrics.workload
     );
@@ -209,6 +231,8 @@
           app.t("history.run_detail", {
             throughput: app.formatNumber(run.metrics.throughput_ops_per_sec, 0),
             hit_rate: app.formatPercent(run.metrics.hit_rate),
+            replacer: app.replacerLabel(run.request.replacer),
+            write_percent: run.request.write_percent,
           })
         )
       );
@@ -230,6 +254,8 @@
           }),
           app.t("history.sweep_subtitle", {
             thread_candidates: sweep.request.thread_candidates.join(", "),
+            replacer: app.replacerLabel(sweep.request.replacer),
+            write_percent: sweep.request.write_percent,
           }),
           app.t("history.sweep_detail", {
             sample_count: sweep.summary.sample_count,

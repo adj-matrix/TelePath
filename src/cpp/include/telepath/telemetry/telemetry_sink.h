@@ -3,8 +3,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <memory>
+#include <vector>
 
+#include "telepath/common/status.h"
 #include "telepath/common/types.h"
 
 namespace telepath {
@@ -23,6 +26,32 @@ struct TelemetrySnapshot {
   uint64_t cleaner_flushes_finished{0};
   uint64_t cleaner_flushes_skipped{0};
   uint64_t eviction_failures{0};
+};
+
+struct TelemetryExportFrame {
+  uint64_t frame_id{0};
+  uint64_t file_id{0};
+  uint64_t block_id{0};
+  uint64_t pin_count{0};
+  uint64_t dirty_generation{0};
+  bool is_valid{false};
+  bool is_dirty{false};
+  bool io_in_flight{false};
+  bool flush_queued{false};
+  bool flush_in_flight{false};
+  std::string state{"unknown"};
+};
+
+struct TelemetryExportSnapshot {
+  uint64_t timestamp_ms{0};
+  std::string source{"telepath"};
+  std::size_t pool_size{0};
+  std::size_t page_size{0};
+  std::size_t dirty_page_count{0};
+  std::size_t flush_queued_count{0};
+  std::size_t flush_in_flight_count{0};
+  TelemetrySnapshot counters{};
+  std::vector<TelemetryExportFrame> frames;
 };
 
 // Fast-path counters used by in-process telemetry implementations that want to
@@ -176,6 +205,11 @@ class TelemetrySink {
 std::shared_ptr<TelemetrySink> MakeCounterTelemetrySink();
 // Returns a sink that intentionally drops all events.
 std::shared_ptr<TelemetrySink> MakeNoOpTelemetrySink();
+
+// Serializes a point-in-time telemetry export as one compact JSON document.
+auto SerializeTelemetryExportJson(const TelemetryExportSnapshot &snapshot) -> std::string;
+// Appends one JSON line to `path`, creating parent directories when needed.
+auto AppendTelemetryExportJsonLine(const std::string &path, const TelemetryExportSnapshot &snapshot) -> Status;
 
 }  // namespace telepath
 

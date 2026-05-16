@@ -1,4 +1,5 @@
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -13,7 +14,11 @@
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend_factory.h"
 #include "telepath/options/buffer_manager_options.h"
+#include "telepath/replacer/clock_replacer.h"
+#include "telepath/replacer/lru_replacer.h"
+#include "telepath/replacer/lru_k_replacer.h"
 #include "telepath/replacer/replacer.h"
+#include "telepath/replacer/two_queue_replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
 
 namespace {
@@ -24,6 +29,7 @@ using telepath::benchmark_support::ChooseBlock;
 using telepath::benchmark_support::LoadMetadata;
 using telepath::benchmark_support::NormalizeWorkloadName;
 using telepath::benchmark_support::ParseArgs;
+using telepath::benchmark_support::ShouldWriteOperation;
 
 struct BenchmarkMetrics {
   std::size_t total_ops{0};
@@ -43,6 +49,8 @@ struct BenchmarkMetrics {
   uint64_t cleaner_flushes_finished{0};
   uint64_t cleaner_flushes_skipped{0};
   uint64_t eviction_failures{0};
+  uint64_t writes_marked_dirty{0};
+  uint64_t foreground_flushes_requested{0};
 };
 
 class BenchmarkRootGuard {
@@ -98,6 +106,11 @@ auto FrameStateName(telepath::BufferFrameState state) -> const char * {
   return "unknown";
 }
 
+auto UnixEpochMillis() -> uint64_t {
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
 auto BuildBenchmarkRootPath() -> std::filesystem::path {
   const auto unique_suffix = std::chrono::steady_clock::now().time_since_epoch().count();
   return std::filesystem::temp_directory_path() / ("telepath_benchmark_data_" + std::to_string(unique_suffix));
@@ -112,12 +125,41 @@ auto BuildManagerOptions(
   const BenchmarkOptions &options,
   const telepath::DiskBackendOptions &disk_backend_options
 ) -> telepath::BufferManagerOptions {
-  return telepath::BufferManagerOptions{
+  telepath::BufferManagerOptions manager_options{
     options.pool_size,
     options.page_size,
     0,
     disk_backend_options,
   };
+  manager_options.flush_worker_count = options.flush_worker_count;
+  manager_options.flush_submit_batch_size = options.flush_submit_batch_size;
+  manager_options.flush_foreground_burst_limit = options.flush_foreground_burst_limit;
+  manager_options.enable_background_cleaner = options.enable_background_cleaner;
+  manager_options.dirty_page_high_watermark = options.dirty_page_high_watermark;
+  manager_options.dirty_page_low_watermark = options.dirty_page_low_watermark;
+  return manager_options;
+}
+
+auto ResolveRequestedBackendKind(const std::string &name) -> telepath::DiskBackendKind {
+  if (name == "posix") return telepath::DiskBackendKind::kPosix;
+  if (name == "io_uring") return telepath::DiskBackendKind::kIoUring;
+  return telepath::DiskBackendKind::kAuto;
+}
+
+auto BuildDiskBackendOptions(const BenchmarkOptions &options) -> telepath::DiskBackendOptions {
+  telepath::DiskBackendOptions disk_backend_options;
+  disk_backend_options.preferred_kind = ResolveRequestedBackendKind(options.disk_backend);
+  disk_backend_options.allow_fallback = true;
+  disk_backend_options.queue_depth = options.queue_depth;
+  disk_backend_options.max_open_files = options.max_open_files;
+  return disk_backend_options;
+}
+
+auto BuildReplacer(const BenchmarkOptions &options) -> std::unique_ptr<telepath::Replacer> {
+  if (options.replacer == "clock") return telepath::MakeClockReplacer(options.pool_size);
+  if (options.replacer == "lru") return telepath::MakeLruReplacer(options.pool_size);
+  if (options.replacer == "two_queue") return telepath::MakeTwoQueueReplacer(options.pool_size);
+  return telepath::MakeLruKReplacer(options.pool_size, 2);
 }
 
 auto InitializeDiskBackend(
@@ -167,6 +209,8 @@ void RunWorker(
   telepath::BufferManager *manager,
   const BenchmarkOptions &options,
   std::size_t thread_index,
+  std::atomic<uint64_t> *writes_marked_dirty,
+  std::atomic<uint64_t> *foreground_flushes_requested,
   std::vector<uint64_t> *access_counts
 ) {
   std::mt19937_64 rng(0xBADC0FFEEULL + thread_index);
@@ -178,6 +222,16 @@ void RunWorker(
     if (!result.ok()) continue;
 
     telepath::BufferHandle handle = std::move(result.value());
+    if (ShouldWriteOperation(&rng, op, options)) {
+      std::byte *data = handle.mutable_data();
+      data[0] = static_cast<std::byte>((op + thread_index) % 251);
+      auto dirty_status = manager->MarkBufferDirty(handle);
+      if (dirty_status.ok()) writes_marked_dirty->fetch_add(1, std::memory_order_relaxed);
+    }
+    if (options.flush_every_ops != 0 && (op + 1) % options.flush_every_ops == 0) {
+      auto flush_status = manager->FlushBuffer(handle);
+      if (flush_status.ok()) foreground_flushes_requested->fetch_add(1, std::memory_order_relaxed);
+    }
     volatile std::byte sink = handle.data()[0];
     (void)sink;
   }
@@ -200,7 +254,9 @@ auto BuildBenchmarkMetrics(
   const BenchmarkOptions &options,
   const telepath::TelemetrySnapshot &before,
   const telepath::TelemetrySnapshot &after,
-  double seconds
+  double seconds,
+  uint64_t writes_marked_dirty,
+  uint64_t foreground_flushes_requested
 ) -> BenchmarkMetrics {
   const std::size_t total_ops = options.thread_count * options.ops_per_thread;
   const uint64_t hits = after.buffer_hits - before.buffer_hits;
@@ -225,6 +281,8 @@ auto BuildBenchmarkMetrics(
     after.cleaner_flushes_finished - before.cleaner_flushes_finished,
     after.cleaner_flushes_skipped - before.cleaner_flushes_skipped,
     after.eviction_failures - before.eviction_failures,
+    writes_marked_dirty,
+    foreground_flushes_requested,
   };
 }
 
@@ -236,6 +294,8 @@ auto RunBenchmark(
 ) -> BenchmarkMetrics {
   const telepath::TelemetrySnapshot before = telemetry->Snapshot();
   const auto start = std::chrono::steady_clock::now();
+  std::atomic<uint64_t> writes_marked_dirty{0};
+  std::atomic<uint64_t> foreground_flushes_requested{0};
 
   std::vector<std::thread> workers;
   workers.reserve(options.thread_count);
@@ -243,9 +303,9 @@ auto RunBenchmark(
 
   for (std::size_t thread_index = 0; thread_index < options.thread_count; ++thread_index) {
     workers.emplace_back(
-      [manager, &options, &per_thread_access_counts, thread_index]() {
-      RunWorker(manager, options, thread_index, &per_thread_access_counts[thread_index]);
-    });
+      [manager, &options, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts, thread_index]() {
+        RunWorker(manager, options, thread_index, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts[thread_index]);
+      });
   }
 
   for (auto &worker : workers) worker.join();
@@ -254,7 +314,13 @@ auto RunBenchmark(
   const telepath::TelemetrySnapshot after = telemetry->Snapshot();
   const double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
   *block_access_counts = MergeAccessCounts(per_thread_access_counts, options.block_count);
-  return BuildBenchmarkMetrics(options, before, after, seconds);
+  return BuildBenchmarkMetrics(
+    options,
+    before,
+    after,
+    seconds,
+    writes_marked_dirty.load(std::memory_order_relaxed),
+    foreground_flushes_requested.load(std::memory_order_relaxed));
 }
 
 auto ResolveBackendKindName(const telepath::DiskBackendCapabilities &capabilities) -> const char * {
@@ -266,6 +332,67 @@ auto ResolveBackendKindName(const telepath::DiskBackendCapabilities &capabilitie
   return "posix";
 }
 
+auto BuildTelemetryExportFrame(const telepath::FrameSnapshot &frame) -> telepath::TelemetryExportFrame {
+  return telepath::TelemetryExportFrame{
+    frame.frame_id,
+    frame.tag.file_id,
+    frame.tag.block_id,
+    frame.pin_count,
+    frame.dirty_generation,
+    frame.is_valid,
+    frame.is_dirty,
+    frame.io_in_flight,
+    frame.flush_queued,
+    frame.flush_in_flight,
+    FrameStateName(frame.state),
+  };
+}
+
+auto BuildTelemetryExportSnapshot(
+  const BenchmarkOptions &options,
+  const BenchmarkMetrics &metrics,
+  const telepath::BufferPoolSnapshot &snapshot
+) -> telepath::TelemetryExportSnapshot {
+  (void)options;
+  telepath::TelemetryExportSnapshot export_snapshot;
+  export_snapshot.timestamp_ms = UnixEpochMillis();
+  export_snapshot.source = "telepath_benchmark";
+  export_snapshot.pool_size = snapshot.pool_size;
+  export_snapshot.page_size = snapshot.page_size;
+  export_snapshot.dirty_page_count = snapshot.dirty_page_count;
+  export_snapshot.flush_queued_count = snapshot.flush_queued_count;
+  export_snapshot.flush_in_flight_count = snapshot.flush_in_flight_count;
+  export_snapshot.counters = telepath::TelemetrySnapshot{
+    metrics.hits,
+    metrics.misses,
+    metrics.disk_reads,
+    metrics.disk_writes,
+    metrics.evictions,
+    metrics.dirty_flushes,
+    metrics.flush_tasks_scheduled,
+    metrics.flush_tasks_completed,
+    metrics.flush_failures,
+    metrics.cleaner_flushes_scheduled,
+    metrics.cleaner_flushes_finished,
+    metrics.cleaner_flushes_skipped,
+    metrics.eviction_failures,
+  };
+  export_snapshot.frames.reserve(snapshot.frames.size());
+  for (const auto &frame : snapshot.frames) export_snapshot.frames.push_back(BuildTelemetryExportFrame(frame));
+  return export_snapshot;
+}
+
+auto MaybeExportTelemetry(
+  const BenchmarkOptions &options,
+  const BenchmarkMetrics &metrics,
+  const telepath::BufferPoolSnapshot &snapshot
+) -> telepath::Status {
+  if (options.telemetry_export_path.empty()) return telepath::Status::Ok();
+  return telepath::AppendTelemetryExportJsonLine(
+    options.telemetry_export_path,
+    BuildTelemetryExportSnapshot(options, metrics, snapshot));
+}
+
 void PrintTextSummary(
   const BenchmarkOptions &options,
   const BenchmarkMetadata &metadata,
@@ -274,6 +401,8 @@ void PrintTextSummary(
 ) {
   std::cout << "telepath_benchmark\n";
   std::cout << "workload=" << NormalizeWorkloadName(options.workload) << "\n";
+  std::cout << "replacer=" << options.replacer << "\n";
+  std::cout << "requested_disk_backend=" << options.disk_backend << "\n";
   std::cout << "disk_backend=" << backend_kind << "\n";
   std::cout << "commit_sha=" << metadata.commit_sha << "\n";
   std::cout << "runner_os=" << metadata.runner_os << "\n";
@@ -284,6 +413,17 @@ void PrintTextSummary(
   std::cout << "ops_per_thread=" << options.ops_per_thread << "\n";
   std::cout << "hotset_size=" << options.hotset_size << "\n";
   std::cout << "hot_access_percent=" << options.hot_access_percent << "\n";
+  std::cout << "write_percent=" << options.write_percent << "\n";
+  std::cout << "flush_every_ops=" << options.flush_every_ops << "\n";
+  std::cout << "flush_workers=" << options.flush_worker_count << "\n";
+  std::cout << "flush_submit_batch_size=" << options.flush_submit_batch_size << "\n";
+  std::cout << "flush_foreground_burst_limit=" << options.flush_foreground_burst_limit << "\n";
+  std::cout << "background_cleaner=" << (options.enable_background_cleaner ? "true" : "false") << "\n";
+  std::cout << "dirty_page_high_watermark=" << options.dirty_page_high_watermark << "\n";
+  std::cout << "dirty_page_low_watermark=" << options.dirty_page_low_watermark << "\n";
+  std::cout << "queue_depth=" << options.queue_depth << "\n";
+  std::cout << "max_open_files=" << options.max_open_files << "\n";
+  if (!options.telemetry_export_path.empty()) std::cout << "telemetry_export_path=" << options.telemetry_export_path << "\n";
   std::cout << "total_ops=" << metrics.total_ops << "\n";
   std::cout << "seconds=" << metrics.seconds << "\n";
   std::cout << "throughput_ops_per_sec=" << metrics.throughput << "\n";
@@ -301,6 +441,8 @@ void PrintTextSummary(
   std::cout << "cleaner_flushes_finished=" << metrics.cleaner_flushes_finished << "\n";
   std::cout << "cleaner_flushes_skipped=" << metrics.cleaner_flushes_skipped << "\n";
   std::cout << "eviction_failures=" << metrics.eviction_failures << "\n";
+  std::cout << "writes_marked_dirty=" << metrics.writes_marked_dirty << "\n";
+  std::cout << "foreground_flushes_requested=" << metrics.foreground_flushes_requested << "\n";
 }
 
 void PrintCsvSummary(
@@ -311,17 +453,32 @@ void PrintCsvSummary(
 ) {
   std::cout
       << "workload,disk_backend,commit_sha,runner_os,runner_arch,threads,pool_size,"
-         "block_count,ops_per_thread,hotset_size,hot_access_percent,total_ops,"
+         "block_count,ops_per_thread,hotset_size,hot_access_percent,replacer,"
+         "requested_disk_backend,write_percent,flush_every_ops,flush_workers,"
+         "flush_submit_batch_size,flush_foreground_burst_limit,background_cleaner,"
+         "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
+         "telemetry_export_enabled,total_ops,"
          "seconds,throughput_ops_per_sec,buffer_hits,buffer_misses,hit_rate,"
          "disk_reads,disk_writes,evictions,dirty_flushes,flush_tasks_scheduled,"
          "flush_tasks_completed,flush_failures,cleaner_flushes_scheduled,"
-         "cleaner_flushes_finished,cleaner_flushes_skipped,eviction_failures\n";
+         "cleaner_flushes_finished,cleaner_flushes_skipped,eviction_failures,"
+         "writes_marked_dirty,foreground_flushes_requested\n";
   std::cout << NormalizeWorkloadName(options.workload) << "," << backend_kind
             << "," << metadata.commit_sha << "," << metadata.runner_os << ","
             << metadata.runner_arch << "," << options.thread_count << ","
             << options.pool_size << "," << options.block_count << ","
             << options.ops_per_thread << "," << options.hotset_size << ","
-            << options.hot_access_percent << "," << metrics.total_ops << ","
+            << options.hot_access_percent << "," << options.replacer << ","
+            << options.disk_backend << "," << options.write_percent << ","
+            << options.flush_every_ops << "," << options.flush_worker_count << ","
+            << options.flush_submit_batch_size << ","
+            << options.flush_foreground_burst_limit << ","
+            << (options.enable_background_cleaner ? "true" : "false") << ","
+            << options.dirty_page_high_watermark << ","
+            << options.dirty_page_low_watermark << "," << options.queue_depth << ","
+            << options.max_open_files << ","
+            << (options.telemetry_export_path.empty() ? "false" : "true") << ","
+            << metrics.total_ops << ","
             << metrics.seconds << "," << metrics.throughput << ","
             << metrics.hits << "," << metrics.misses << ","
             << metrics.hit_rate << "," << metrics.disk_reads << ","
@@ -332,7 +489,9 @@ void PrintCsvSummary(
             << metrics.cleaner_flushes_scheduled << ","
             << metrics.cleaner_flushes_finished << ","
             << metrics.cleaner_flushes_skipped << ","
-            << metrics.eviction_failures << "\n";
+            << metrics.eviction_failures << ","
+            << metrics.writes_marked_dirty << ","
+            << metrics.foreground_flushes_requested << "\n";
 }
 
 void PrintJsonMetrics(
@@ -342,27 +501,33 @@ void PrintJsonMetrics(
   const BenchmarkMetrics &metrics
 ) {
   std::cout << "  \"metrics\": {\n";
-  std::cout << "    \"workload\": \""
-            << JsonEscape(NormalizeWorkloadName(options.workload)) << "\",\n";
-  std::cout << "    \"disk_backend\": \"" << JsonEscape(backend_kind)
-            << "\",\n";
-  std::cout << "    \"commit_sha\": \"" << JsonEscape(metadata.commit_sha)
-            << "\",\n";
-  std::cout << "    \"runner_os\": \"" << JsonEscape(metadata.runner_os)
-            << "\",\n";
-  std::cout << "    \"runner_arch\": \"" << JsonEscape(metadata.runner_arch)
-            << "\",\n";
+  std::cout << "    \"workload\": \"" << JsonEscape(NormalizeWorkloadName(options.workload)) << "\",\n";
+  std::cout << "    \"replacer\": \"" << JsonEscape(options.replacer) << "\",\n";
+  std::cout << "    \"requested_disk_backend\": \"" << JsonEscape(options.disk_backend) << "\",\n";
+  std::cout << "    \"disk_backend\": \"" << JsonEscape(backend_kind) << "\",\n";
+  std::cout << "    \"commit_sha\": \"" << JsonEscape(metadata.commit_sha) << "\",\n";
+  std::cout << "    \"runner_os\": \"" << JsonEscape(metadata.runner_os) << "\",\n";
+  std::cout << "    \"runner_arch\": \"" << JsonEscape(metadata.runner_arch) << "\",\n";
   std::cout << "    \"threads\": " << options.thread_count << ",\n";
   std::cout << "    \"pool_size\": " << options.pool_size << ",\n";
   std::cout << "    \"block_count\": " << options.block_count << ",\n";
   std::cout << "    \"ops_per_thread\": " << options.ops_per_thread << ",\n";
   std::cout << "    \"hotset_size\": " << options.hotset_size << ",\n";
-  std::cout << "    \"hot_access_percent\": " << options.hot_access_percent
-            << ",\n";
+  std::cout << "    \"hot_access_percent\": " << options.hot_access_percent << ",\n";
+  std::cout << "    \"write_percent\": " << options.write_percent << ",\n";
+  std::cout << "    \"flush_every_ops\": " << options.flush_every_ops << ",\n";
+  std::cout << "    \"flush_workers\": " << options.flush_worker_count << ",\n";
+  std::cout << "    \"flush_submit_batch_size\": " << options.flush_submit_batch_size << ",\n";
+  std::cout << "    \"flush_foreground_burst_limit\": " << options.flush_foreground_burst_limit << ",\n";
+  std::cout << "    \"background_cleaner\": " << (options.enable_background_cleaner ? "true" : "false") << ",\n";
+  std::cout << "    \"dirty_page_high_watermark\": " << options.dirty_page_high_watermark << ",\n";
+  std::cout << "    \"dirty_page_low_watermark\": " << options.dirty_page_low_watermark << ",\n";
+  std::cout << "    \"queue_depth\": " << options.queue_depth << ",\n";
+  std::cout << "    \"max_open_files\": " << options.max_open_files << ",\n";
+  std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() ? "false" : "true") << ",\n";
   std::cout << "    \"total_ops\": " << metrics.total_ops << ",\n";
   std::cout << "    \"seconds\": " << metrics.seconds << ",\n";
-  std::cout << "    \"throughput_ops_per_sec\": " << metrics.throughput
-            << ",\n";
+  std::cout << "    \"throughput_ops_per_sec\": " << metrics.throughput << ",\n";
   std::cout << "    \"buffer_hits\": " << metrics.hits << ",\n";
   std::cout << "    \"buffer_misses\": " << metrics.misses << ",\n";
   std::cout << "    \"hit_rate\": " << metrics.hit_rate << ",\n";
@@ -376,7 +541,9 @@ void PrintJsonMetrics(
   std::cout << "    \"cleaner_flushes_scheduled\": " << metrics.cleaner_flushes_scheduled << ",\n";
   std::cout << "    \"cleaner_flushes_finished\": " << metrics.cleaner_flushes_finished << ",\n";
   std::cout << "    \"cleaner_flushes_skipped\": " << metrics.cleaner_flushes_skipped << ",\n";
-  std::cout << "    \"eviction_failures\": " << metrics.eviction_failures << "\n";
+  std::cout << "    \"eviction_failures\": " << metrics.eviction_failures << ",\n";
+  std::cout << "    \"writes_marked_dirty\": " << metrics.writes_marked_dirty << ",\n";
+  std::cout << "    \"foreground_flushes_requested\": " << metrics.foreground_flushes_requested << "\n";
   std::cout << "  },\n";
 }
 
@@ -386,23 +553,16 @@ void PrintJsonFrame(
 ) {
   std::cout << "      {\n";
   std::cout << "        \"frame_id\": " << frame.frame_id << ",\n";
-  std::cout << "        \"state\": \"" << FrameStateName(frame.state)
-            << "\",\n";
+  std::cout << "        \"state\": \"" << FrameStateName(frame.state) << "\",\n";
   std::cout << "        \"file_id\": " << frame.tag.file_id << ",\n";
   std::cout << "        \"block_id\": " << frame.tag.block_id << ",\n";
   std::cout << "        \"pin_count\": " << frame.pin_count << ",\n";
-  std::cout << "        \"dirty_generation\": " << frame.dirty_generation
-            << ",\n";
-  std::cout << "        \"is_valid\": "
-            << (frame.is_valid ? "true" : "false") << ",\n";
-  std::cout << "        \"is_dirty\": "
-            << (frame.is_dirty ? "true" : "false") << ",\n";
-  std::cout << "        \"io_in_flight\": "
-            << (frame.io_in_flight ? "true" : "false") << ",\n";
-  std::cout << "        \"flush_queued\": "
-            << (frame.flush_queued ? "true" : "false") << ",\n";
-  std::cout << "        \"flush_in_flight\": "
-            << (frame.flush_in_flight ? "true" : "false") << "\n";
+  std::cout << "        \"dirty_generation\": " << frame.dirty_generation << ",\n";
+  std::cout << "        \"is_valid\": " << (frame.is_valid ? "true" : "false") << ",\n";
+  std::cout << "        \"is_dirty\": " << (frame.is_dirty ? "true" : "false") << ",\n";
+  std::cout << "        \"io_in_flight\": " << (frame.io_in_flight ? "true" : "false") << ",\n";
+  std::cout << "        \"flush_queued\": " << (frame.flush_queued ? "true" : "false") << ",\n";
+  std::cout << "        \"flush_in_flight\": " << (frame.flush_in_flight ? "true" : "false") << "\n";
   std::cout << "      }";
   if (has_next_frame) std::cout << ",";
   std::cout << "\n";
@@ -496,7 +656,7 @@ int main(int argc, char **argv) {
   PrepareBenchmarkRoot(root_guard.path());
 
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  const telepath::DiskBackendOptions disk_backend_options{};
+  const telepath::DiskBackendOptions disk_backend_options = BuildDiskBackendOptions(options);
   std::unique_ptr<telepath::DiskBackend> disk_backend;
   telepath::DiskBackendCapabilities disk_backend_capabilities;
   auto disk_backend_status = InitializeDiskBackend(root_guard.path(), options, disk_backend_options, &disk_backend, &disk_backend_capabilities);
@@ -505,7 +665,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  auto replacer = telepath::MakeLruKReplacer(options.pool_size, 2);
+  auto replacer = BuildReplacer(options);
   const telepath::BufferManagerOptions manager_options = BuildManagerOptions(options, disk_backend_options);
   telepath::BufferManager manager(manager_options, std::move(disk_backend), std::move(replacer), telemetry);
 
@@ -518,6 +678,11 @@ int main(int argc, char **argv) {
   std::vector<uint64_t> block_access_counts;
   const BenchmarkMetrics metrics = RunBenchmark(&manager, telemetry, options, &block_access_counts);
   const telepath::BufferPoolSnapshot snapshot = manager.ExportSnapshot();
+  auto export_status = MaybeExportTelemetry(options, metrics, snapshot);
+  if (!export_status.ok()) {
+    std::cerr << "telemetry export failed: " << export_status.message() << "\n";
+    return 1;
+  }
   PrintSummary(options, metadata, ResolveBackendKindName(disk_backend_capabilities), metrics, snapshot, block_access_counts);
   return 0;
 }

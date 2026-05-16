@@ -40,8 +40,9 @@ The current suite covers:
 - completion dispatcher behavior,
 - replacer correctness,
 - telemetry correctness,
+- telemetry JSONL export shape,
 - options resolution,
-- benchmark workload semantics.
+- benchmark workload and experiment-parameter semantics.
 
 ## Coverage Matrix
 
@@ -58,7 +59,7 @@ The current behavior-oriented coverage map is:
 | Completion dispatch | `completion_dispatcher_test`, `completion_dispatcher_idle_test`, `completion_order_test` | Covers request-id routing, out-of-order completion, early completion before registration, backend failure, idle shutdown, and reordered read completions. |
 | Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers POSIX fallback behavior, factory policy, zero-fill reads, and native/stub `io_uring` paths. |
 | Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test` | Covers shared interface expectations and policy-specific behavior. |
-| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, flush/cleaner/eviction telemetry, option resolution, workload selection, snapshot aggregates, and JSON output shape. |
+| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, JSONL telemetry export, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, snapshot aggregates, and JSON output shape. |
 
 The remaining intentional gaps are larger-scale rather than unit-test-sized:
 
@@ -99,6 +100,8 @@ Benchmark correctness is tested separately from benchmark performance output.
 In practice this means:
 
 - normal tests validate workload-selection logic,
+- benchmark tests validate experiment parameter parsing and output shape,
+- `scripts/bench/matrix.sh` emits clean CSV for reproducible matrix collection,
 - GitHub benchmark workflows collect trend data,
 - benchmark numbers are useful for regression observation, not final performance claims.
 

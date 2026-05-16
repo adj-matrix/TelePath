@@ -69,12 +69,24 @@
   },
   "form": {
     "workload": "Workload",
+    "replacer": "Replacer",
+    "disk_backend": "Disk Backend",
     "threads": "Threads",
     "pool_size": "Pool Size",
     "block_count": "Block Count",
     "ops_per_thread": "Ops / Thread",
     "hotset_size": "Hotset Size",
     "hot_access_percent": "Hot Access %",
+    "write_percent": "Write %",
+    "flush_every_ops": "Flush Every Ops",
+    "background_cleaner": "Background Cleaner",
+    "dirty_page_high_watermark": "Dirty High Watermark",
+    "dirty_page_low_watermark": "Dirty Low Watermark",
+    "flush_workers": "Flush Workers",
+    "flush_submit_batch_size": "Flush Batch Size",
+    "flush_foreground_burst_limit": "Foreground Burst Limit",
+    "queue_depth": "Queue Depth",
+    "max_open_files": "Max Open Files",
     "thread_candidates": "Thread Candidates",
     "thread_candidates_placeholder": "1,2,4,8"
   },
@@ -90,6 +102,12 @@
     "buffer_hits": "Buffer Hits",
     "buffer_misses": "Buffer Misses",
     "backend": "Backend",
+    "replacer": "Replacer",
+    "write_pressure": "Write Pressure",
+    "write_pressure_template": "{percent}% · {dirty} dirty marks",
+    "disk_writes": "Disk Writes",
+    "writeback_state": "Writeback State",
+    "writeback_state_template": "{dirty} dirty · {queued} queued · {inflight} active",
     "workload": "Workload",
     "total_ops": "Total Ops",
     "elapsed": "Elapsed",
@@ -131,9 +149,9 @@
     "click_hint": "Click to load",
     "run_title": "{workload} · {threads}",
     "run_subtitle": "pool {pool_size} · blocks {block_count}",
-    "run_detail": "{throughput} ops/s · {hit_rate}",
+    "run_detail": "{throughput} ops/s · {hit_rate} · {replacer} · {write_percent}% writes",
     "sweep_title": "{workload} sweep",
-    "sweep_subtitle": "threads {thread_candidates}",
+    "sweep_subtitle": "threads {thread_candidates} · {replacer} · {write_percent}% writes",
     "sweep_detail": "{sample_count} samples · best {throughput} ops/s"
   },
   "block_map": {
@@ -197,9 +215,16 @@
     "sequential_disjoint": "Sequential Disjoint"
   },
   "backends": {
+    "auto": "Auto",
     "posix": "POSIX",
     "posix_fallback": "POSIX Fallback",
     "io_uring": "io_uring",
     "io_uring_fallback": "io_uring Fallback"
+  },
+  "replacers": {
+    "lru_k": "LRU-K",
+    "clock": "Clock",
+    "lru": "LRU",
+    "two_queue": "2Q"
   }
 }

@@ -24,6 +24,7 @@ add_library(telepath
   lib/replacer/lru_replacer.cc
   lib/replacer/two_queue_replacer.cc
   lib/telemetry/counter_telemetry_sink.cc
+  lib/telemetry/telemetry_export.cc
   lib/telemetry/noop_telemetry_sink.cc
 )
 

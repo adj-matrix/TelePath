@@ -62,6 +62,8 @@ The benchmark workflow:
 - uploads CSV results as GitHub Actions artifacts,
 - publishes a compact workflow summary directly in the Actions UI.
 
+Local benchmark collection should use `scripts/bench/run.sh` for one-off runs and `scripts/bench/matrix.sh` for matrix collection. Both scripts keep benchmark stdout suitable for CSV/JSON capture and send build logs to stderr.
+
 ## What CI Is For
 
 Current CI is intended to catch:
@@ -99,6 +101,6 @@ At this point, automatic Linux-side validation is part of basic engineering hygi
 
 Reasonable next steps for CI include:
 
-- artifact upload for benchmark CSV output,
 - broader compiler and Ubuntu matrices,
-- stricter branch protection based on required CI checks.
+- stricter branch protection based on required CI checks,
+- scheduled benchmark matrices that cover replacer/backend/write-pressure dimensions.

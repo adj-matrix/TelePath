@@ -4,6 +4,10 @@
     sweepForm: document.getElementById("sweepForm"),
     workloadSelect: document.getElementById("workload"),
     sweepWorkloadSelect: document.getElementById("sweep_workload"),
+    replacerSelect: document.getElementById("replacer"),
+    sweepReplacerSelect: document.getElementById("sweep_replacer"),
+    diskBackendSelect: document.getElementById("disk_backend"),
+    sweepDiskBackendSelect: document.getElementById("sweep_disk_backend"),
     runButton: document.getElementById("runButton"),
     sweepButton: document.getElementById("sweepButton"),
     languageSelect: document.getElementById("languageSelect"),
@@ -43,6 +47,32 @@
     "ops_per_thread",
     "hotset_size",
     "hot_access_percent",
+    "write_percent",
+    "flush_every_ops",
+    "dirty_page_high_watermark",
+    "dirty_page_low_watermark",
+    "flush_workers",
+    "flush_submit_batch_size",
+    "flush_foreground_burst_limit",
+    "queue_depth",
+    "max_open_files",
+  ];
+
+  const sweepFields = [
+    "pool_size",
+    "block_count",
+    "ops_per_thread",
+    "hotset_size",
+    "hot_access_percent",
+    "write_percent",
+    "flush_every_ops",
+    "dirty_page_high_watermark",
+    "dirty_page_low_watermark",
+    "flush_workers",
+    "flush_submit_batch_size",
+    "flush_foreground_burst_limit",
+    "queue_depth",
+    "max_open_files",
   ];
 
   const state = {
@@ -63,6 +93,7 @@
     ...(global.TelePath || {}),
     elements,
     singleFields,
+    sweepFields,
     state,
   };
 })(window);

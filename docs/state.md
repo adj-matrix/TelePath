@@ -19,6 +19,8 @@ Compared with State 2, the current implementation now includes:
 - stronger flush consistency handling for re-dirty races,
 - flush, cleaner, eviction-failure, and snapshot aggregate telemetry,
 - backend capability negotiation for fallback and native paths,
+- benchmark parameterization for replacer/backend/write-pressure/writeback experiments,
+- JSONL telemetry export for point-in-time benchmark snapshots,
 - broader correctness and regression coverage around writeback behavior.
 
 ## Implemented Components
@@ -38,6 +40,7 @@ The current State 3 codebase includes:
 - `ClockReplacer`
 - `LruReplacer`
 - `LruKReplacer`
+- `TwoQueueReplacer`
 - `TelemetrySink`
 - `CounterTelemetrySink`
 - `NoOpTelemetrySink`
@@ -102,6 +105,14 @@ The telemetry surface now reports flush task scheduling, completion, failures, c
 
 The exported buffer-pool snapshot also includes aggregate dirty, queued-flush, and in-flight-flush counts, so benchmark output and the Web console can explain writeback pressure without re-deriving it from every frame.
 
+Benchmark runs can now append compact JSONL telemetry snapshots containing counters, aggregate writeback state, and per-frame state. This is still a file-based export path rather than a live shared-memory transport, but it gives the observation plane a stable serialized shape for later IPC work.
+
+### 9. Benchmark Experiments Are Parameterized
+
+The benchmark entry point can now vary workload, replacer, requested disk backend, write percentage, foreground flush cadence, background cleaner settings, dirty-page watermarks, flush worker limits, queue depth, and backend file-cache size.
+
+`scripts/bench/matrix.sh` builds once and emits a clean CSV matrix across workload, thread count, replacement policy, backend, and write pressure dimensions. The Web console also forwards the same experiment knobs to the benchmark binary so ad hoc browser runs and scripted runs use the same parameter surface.
+
 ## Test Coverage
 
 State 3 now validates the following categories:
@@ -123,7 +134,8 @@ State 3 now validates the following categories:
 - flush/cleaner/eviction telemetry and snapshot aggregate output,
 - options resolution,
 - replacer correctness,
-- benchmark workload semantics.
+- benchmark workload semantics,
+- benchmark experiment parameter parsing and JSON output shape.
 
 At the time of writing:
 
@@ -138,8 +150,8 @@ State 3 still does **not** mean TelePath is finished.
 The following remain future work:
 
 - stronger long-running stress and soak testing,
-- more mature benchmark interpretation and reporting,
-- shared-memory telemetry transport,
+- richer benchmark interpretation and statistical reporting,
+- live shared-memory telemetry transport,
 - richer non-counter observability events and transport integrations,
 - deeper `io_uring` optimization beyond correctness-first support,
 - NUMA-aware or contention-aware memory/layout tuning,

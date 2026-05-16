@@ -9,5 +9,5 @@ TELEPATH_ROOT_DIR="$(telepath_root_dir)"
 BUILD_DIR="${TELEPATH_ROOT_DIR}/build/debug"
 BENCH_BIN="${BUILD_DIR}/test/telepath_benchmark"
 
-telepath_configure_and_build debug
+telepath_configure_and_build debug >&2
 "${BENCH_BIN}" "$@"

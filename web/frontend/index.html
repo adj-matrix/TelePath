@@ -79,6 +79,14 @@
               <select id="workload" name="workload"></select>
             </label>
             <label>
+              <span data-i18n="form.replacer">Replacer</span>
+              <select id="replacer" name="replacer"></select>
+            </label>
+            <label>
+              <span data-i18n="form.disk_backend">Disk Backend</span>
+              <select id="disk_backend" name="disk_backend"></select>
+            </label>
+            <label>
               <span data-i18n="form.threads">Threads</span>
               <input id="threads" name="threads" type="number" min="1" />
             </label>
@@ -104,9 +112,75 @@
                 id="hot_access_percent"
                 name="hot_access_percent"
                 type="number"
-                min="1"
+                min="0"
                 max="100"
               />
+            </label>
+            <label>
+              <span data-i18n="form.write_percent">Write %</span>
+              <input
+                id="write_percent"
+                name="write_percent"
+                type="number"
+                min="0"
+                max="100"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.flush_every_ops">Flush Every Ops</span>
+              <input id="flush_every_ops" name="flush_every_ops" type="number" min="0" />
+            </label>
+            <label class="checkbox-label">
+              <input id="background_cleaner" name="background_cleaner" type="checkbox" />
+              <span data-i18n="form.background_cleaner">Background Cleaner</span>
+            </label>
+            <label>
+              <span data-i18n="form.dirty_page_high_watermark">Dirty High Watermark</span>
+              <input
+                id="dirty_page_high_watermark"
+                name="dirty_page_high_watermark"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.dirty_page_low_watermark">Dirty Low Watermark</span>
+              <input
+                id="dirty_page_low_watermark"
+                name="dirty_page_low_watermark"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.flush_workers">Flush Workers</span>
+              <input id="flush_workers" name="flush_workers" type="number" min="0" />
+            </label>
+            <label>
+              <span data-i18n="form.flush_submit_batch_size">Flush Batch Size</span>
+              <input
+                id="flush_submit_batch_size"
+                name="flush_submit_batch_size"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.flush_foreground_burst_limit">Foreground Burst Limit</span>
+              <input
+                id="flush_foreground_burst_limit"
+                name="flush_foreground_burst_limit"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.queue_depth">Queue Depth</span>
+              <input id="queue_depth" name="queue_depth" type="number" min="0" />
+            </label>
+            <label>
+              <span data-i18n="form.max_open_files">Max Open Files</span>
+              <input id="max_open_files" name="max_open_files" type="number" min="0" />
             </label>
 
             <button id="runButton" type="submit">Run Benchmark</button>
@@ -183,6 +257,22 @@
                 <p id="backendValue" class="summary-value">-</p>
               </div>
               <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.replacer">Replacer</p>
+                <p id="replacerValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.write_pressure">Write Pressure</p>
+                <p id="writePressureValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.disk_writes">Disk Writes</p>
+                <p id="diskWritesValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
+                <p class="summary-label" data-i18n="metrics.writeback_state">Writeback State</p>
+                <p id="dirtyRuntimeValue" class="summary-value">-</p>
+              </div>
+              <div class="summary-card">
                 <p class="summary-label" data-i18n="metrics.workload">Workload</p>
                 <p id="workloadValue" class="summary-value">-</p>
               </div>
@@ -208,6 +298,14 @@
             <label>
               <span data-i18n="form.workload">Workload</span>
               <select id="sweep_workload" name="sweep_workload"></select>
+            </label>
+            <label>
+              <span data-i18n="form.replacer">Replacer</span>
+              <select id="sweep_replacer" name="sweep_replacer"></select>
+            </label>
+            <label>
+              <span data-i18n="form.disk_backend">Disk Backend</span>
+              <select id="sweep_disk_backend" name="sweep_disk_backend"></select>
             </label>
             <label>
               <span data-i18n="form.thread_candidates">Thread Candidates</span>
@@ -246,8 +344,84 @@
                 id="sweep_hot_access_percent"
                 name="sweep_hot_access_percent"
                 type="number"
-                min="1"
+                min="0"
                 max="100"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.write_percent">Write %</span>
+              <input
+                id="sweep_write_percent"
+                name="sweep_write_percent"
+                type="number"
+                min="0"
+                max="100"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.flush_every_ops">Flush Every Ops</span>
+              <input
+                id="sweep_flush_every_ops"
+                name="sweep_flush_every_ops"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label class="checkbox-label">
+              <input id="sweep_background_cleaner" name="sweep_background_cleaner" type="checkbox" />
+              <span data-i18n="form.background_cleaner">Background Cleaner</span>
+            </label>
+            <label>
+              <span data-i18n="form.dirty_page_high_watermark">Dirty High Watermark</span>
+              <input
+                id="sweep_dirty_page_high_watermark"
+                name="sweep_dirty_page_high_watermark"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.dirty_page_low_watermark">Dirty Low Watermark</span>
+              <input
+                id="sweep_dirty_page_low_watermark"
+                name="sweep_dirty_page_low_watermark"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.flush_workers">Flush Workers</span>
+              <input id="sweep_flush_workers" name="sweep_flush_workers" type="number" min="0" />
+            </label>
+            <label>
+              <span data-i18n="form.flush_submit_batch_size">Flush Batch Size</span>
+              <input
+                id="sweep_flush_submit_batch_size"
+                name="sweep_flush_submit_batch_size"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.flush_foreground_burst_limit">Foreground Burst Limit</span>
+              <input
+                id="sweep_flush_foreground_burst_limit"
+                name="sweep_flush_foreground_burst_limit"
+                type="number"
+                min="0"
+              />
+            </label>
+            <label>
+              <span data-i18n="form.queue_depth">Queue Depth</span>
+              <input id="sweep_queue_depth" name="sweep_queue_depth" type="number" min="0" />
+            </label>
+            <label>
+              <span data-i18n="form.max_open_files">Max Open Files</span>
+              <input
+                id="sweep_max_open_files"
+                name="sweep_max_open_files"
+                type="number"
+                min="0"
               />
             </label>
             <button id="sweepButton" type="submit">Run Sweep</button>

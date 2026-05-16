@@ -1,6 +1,6 @@
 (function initTelePathApp(global) {
   const app = global.TelePath;
-  const { elements, singleFields } = app;
+  const { elements, singleFields, sweepFields } = app;
 
   async function bootstrap() {
     try {
@@ -37,6 +37,9 @@
     event.preventDefault();
     const payload = {
       workload: elements.workloadSelect.value,
+      replacer: elements.replacerSelect.value,
+      disk_backend: elements.diskBackendSelect.value,
+      background_cleaner: document.getElementById("background_cleaner").checked,
     };
     for (const field of singleFields) {
       payload[field] = Number(document.getElementById(field).value);
@@ -76,15 +79,14 @@
     event.preventDefault();
     const payload = {
       workload: elements.sweepWorkloadSelect.value,
+      replacer: elements.sweepReplacerSelect.value,
+      disk_backend: elements.sweepDiskBackendSelect.value,
       thread_candidates: document.getElementById("thread_candidates").value,
-      pool_size: Number(document.getElementById("sweep_pool_size").value),
-      block_count: Number(document.getElementById("sweep_block_count").value),
-      ops_per_thread: Number(document.getElementById("sweep_ops_per_thread").value),
-      hotset_size: Number(document.getElementById("sweep_hotset_size").value),
-      hot_access_percent: Number(
-        document.getElementById("sweep_hot_access_percent").value
-      ),
+      background_cleaner: document.getElementById("sweep_background_cleaner").checked,
     };
+    for (const field of sweepFields) {
+      payload[field] = Number(document.getElementById(`sweep_${field}`).value);
+    }
 
     app.setButtonLoading(
       elements.sweepButton,

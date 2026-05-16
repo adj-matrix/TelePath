@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,23 +31,61 @@ WORKLOADS = [
     "sequential_disjoint",
 ]
 
+REPLACERS = [
+    "lru_k",
+    "clock",
+    "lru",
+    "two_queue",
+]
+
+DISK_BACKENDS = [
+    "auto",
+    "posix",
+    "io_uring",
+]
+
 DEFAULTS = {
     "workload": "hotspot",
+    "replacer": "lru_k",
+    "disk_backend": "auto",
     "pool_size": 256,
     "block_count": 1024,
     "threads": 4,
     "ops_per_thread": 10000,
     "hotset_size": 64,
     "hot_access_percent": 80,
+    "write_percent": 0,
+    "flush_every_ops": 0,
+    "background_cleaner": False,
+    "dirty_page_high_watermark": 0,
+    "dirty_page_low_watermark": 0,
+    "flush_workers": 0,
+    "flush_submit_batch_size": 0,
+    "flush_foreground_burst_limit": 0,
+    "queue_depth": 0,
+    "max_open_files": 0,
 }
 
 DEFAULT_SWEEP = {
+    "workload": "hotspot",
+    "replacer": "lru_k",
+    "disk_backend": "auto",
     "thread_candidates": [1, 2, 4, 8],
     "pool_size": 256,
     "block_count": 1024,
     "ops_per_thread": 10000,
     "hotset_size": 64,
     "hot_access_percent": 80,
+    "write_percent": 0,
+    "flush_every_ops": 0,
+    "background_cleaner": False,
+    "dirty_page_high_watermark": 0,
+    "dirty_page_low_watermark": 0,
+    "flush_workers": 0,
+    "flush_submit_batch_size": 0,
+    "flush_foreground_burst_limit": 0,
+    "queue_depth": 0,
+    "max_open_files": 0,
 }
 
 SUPPORTED_LANGUAGES = [
@@ -65,23 +103,47 @@ _localization_cache: dict[str, dict[str, Any]] = {}
 @dataclass(frozen=True)
 class BenchmarkRequest:
     workload: str
+    replacer: str
+    disk_backend: str
     pool_size: int
     block_count: int
     threads: int
     ops_per_thread: int
     hotset_size: int
     hot_access_percent: int
+    write_percent: int
+    flush_every_ops: int
+    background_cleaner: bool
+    dirty_page_high_watermark: int
+    dirty_page_low_watermark: int
+    flush_workers: int
+    flush_submit_batch_size: int
+    flush_foreground_burst_limit: int
+    queue_depth: int
+    max_open_files: int
 
 
 @dataclass(frozen=True)
 class SweepRequest:
     workload: str
+    replacer: str
+    disk_backend: str
     pool_size: int
     block_count: int
     thread_candidates: list[int]
     ops_per_thread: int
     hotset_size: int
     hot_access_percent: int
+    write_percent: int
+    flush_every_ops: int
+    background_cleaner: bool
+    dirty_page_high_watermark: int
+    dirty_page_low_watermark: int
+    flush_workers: int
+    flush_submit_batch_size: int
+    flush_foreground_burst_limit: int
+    queue_depth: int
+    max_open_files: int
 
 
 def now_epoch_ms() -> int:
@@ -127,8 +189,129 @@ def positive_int_from_payload(payload: dict[str, Any], name: str, fallback: int)
     return parsed
 
 
+def non_negative_int_from_payload(
+    payload: dict[str, Any], name: str, fallback: int
+) -> int:
+    value = payload.get(name, fallback)
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a non-negative integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-negative integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return parsed
+
+
+def bool_from_payload(payload: dict[str, Any], name: str, fallback: bool) -> bool:
+    value = payload.get(name, fallback)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def enum_from_payload(
+    payload: dict[str, Any],
+    name: str,
+    fallback: str,
+    allowed: list[str],
+) -> str:
+    value = str(payload.get(name, fallback))
+    if value not in allowed:
+        raise ValueError(f"unsupported {name}: {value}")
+    return value
+
+
 def clamp_hot_fields(block_count: int, hotset_size: int, hot_access_percent: int) -> tuple[int, int]:
     return min(hotset_size, block_count), min(hot_access_percent, 100)
+
+
+def parse_common_options(payload: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    workload = enum_from_payload(payload, "workload", defaults["workload"], WORKLOADS)
+    replacer = enum_from_payload(payload, "replacer", defaults["replacer"], REPLACERS)
+    disk_backend = enum_from_payload(
+        payload, "disk_backend", defaults["disk_backend"], DISK_BACKENDS
+    )
+    pool_size = positive_int_from_payload(payload, "pool_size", defaults["pool_size"])
+    block_count = positive_int_from_payload(
+        payload, "block_count", defaults["block_count"]
+    )
+    ops_per_thread = positive_int_from_payload(
+        payload, "ops_per_thread", defaults["ops_per_thread"]
+    )
+    hotset_size = positive_int_from_payload(
+        payload, "hotset_size", defaults["hotset_size"]
+    )
+    hot_access_percent = non_negative_int_from_payload(
+        payload, "hot_access_percent", defaults["hot_access_percent"]
+    )
+    hotset_size, hot_access_percent = clamp_hot_fields(
+        block_count, hotset_size, hot_access_percent
+    )
+    write_percent = min(
+        non_negative_int_from_payload(
+            payload, "write_percent", defaults["write_percent"]
+        ),
+        100,
+    )
+    return {
+        "workload": workload,
+        "replacer": replacer,
+        "disk_backend": disk_backend,
+        "pool_size": pool_size,
+        "block_count": block_count,
+        "ops_per_thread": ops_per_thread,
+        "hotset_size": hotset_size,
+        "hot_access_percent": hot_access_percent,
+        "write_percent": write_percent,
+        "flush_every_ops": non_negative_int_from_payload(
+            payload, "flush_every_ops", defaults["flush_every_ops"]
+        ),
+        "background_cleaner": bool_from_payload(
+            payload, "background_cleaner", defaults["background_cleaner"]
+        ),
+        "dirty_page_high_watermark": non_negative_int_from_payload(
+            payload,
+            "dirty_page_high_watermark",
+            defaults["dirty_page_high_watermark"],
+        ),
+        "dirty_page_low_watermark": non_negative_int_from_payload(
+            payload,
+            "dirty_page_low_watermark",
+            defaults["dirty_page_low_watermark"],
+        ),
+        "flush_workers": non_negative_int_from_payload(
+            payload, "flush_workers", defaults["flush_workers"]
+        ),
+        "flush_submit_batch_size": non_negative_int_from_payload(
+            payload,
+            "flush_submit_batch_size",
+            defaults["flush_submit_batch_size"],
+        ),
+        "flush_foreground_burst_limit": non_negative_int_from_payload(
+            payload,
+            "flush_foreground_burst_limit",
+            defaults["flush_foreground_burst_limit"],
+        ),
+        "queue_depth": non_negative_int_from_payload(
+            payload, "queue_depth", defaults["queue_depth"]
+        ),
+        "max_open_files": non_negative_int_from_payload(
+            payload, "max_open_files", defaults["max_open_files"]
+        ),
+    }
 
 
 def ensure_benchmark_binary() -> None:
@@ -154,36 +337,29 @@ def ensure_benchmark_binary() -> None:
 
 
 def parse_benchmark_request(payload: dict[str, Any]) -> BenchmarkRequest:
-    workload = str(payload.get("workload", DEFAULTS["workload"]))
-    if workload not in WORKLOADS:
-        raise ValueError(f"unsupported workload: {workload}")
-
-    pool_size = positive_int_from_payload(payload, "pool_size", DEFAULTS["pool_size"])
-    block_count = positive_int_from_payload(
-        payload, "block_count", DEFAULTS["block_count"]
-    )
+    options = parse_common_options(payload, DEFAULTS)
     threads = positive_int_from_payload(payload, "threads", DEFAULTS["threads"])
-    ops_per_thread = positive_int_from_payload(
-        payload, "ops_per_thread", DEFAULTS["ops_per_thread"]
-    )
-    hotset_size = positive_int_from_payload(
-        payload, "hotset_size", DEFAULTS["hotset_size"]
-    )
-    hot_access_percent = positive_int_from_payload(
-        payload, "hot_access_percent", DEFAULTS["hot_access_percent"]
-    )
-    hotset_size, hot_access_percent = clamp_hot_fields(
-        block_count, hotset_size, hot_access_percent
-    )
 
     return BenchmarkRequest(
-        workload=workload,
-        pool_size=pool_size,
-        block_count=block_count,
+        workload=options["workload"],
+        replacer=options["replacer"],
+        disk_backend=options["disk_backend"],
+        pool_size=options["pool_size"],
+        block_count=options["block_count"],
         threads=threads,
-        ops_per_thread=ops_per_thread,
-        hotset_size=hotset_size,
-        hot_access_percent=hot_access_percent,
+        ops_per_thread=options["ops_per_thread"],
+        hotset_size=options["hotset_size"],
+        hot_access_percent=options["hot_access_percent"],
+        write_percent=options["write_percent"],
+        flush_every_ops=options["flush_every_ops"],
+        background_cleaner=options["background_cleaner"],
+        dirty_page_high_watermark=options["dirty_page_high_watermark"],
+        dirty_page_low_watermark=options["dirty_page_low_watermark"],
+        flush_workers=options["flush_workers"],
+        flush_submit_batch_size=options["flush_submit_batch_size"],
+        flush_foreground_burst_limit=options["flush_foreground_burst_limit"],
+        queue_depth=options["queue_depth"],
+        max_open_files=options["max_open_files"],
     )
 
 
@@ -212,37 +388,28 @@ def parse_thread_candidates(payload: dict[str, Any]) -> list[int]:
 
 
 def parse_sweep_request(payload: dict[str, Any]) -> SweepRequest:
-    workload = str(payload.get("workload", DEFAULTS["workload"]))
-    if workload not in WORKLOADS:
-        raise ValueError(f"unsupported workload: {workload}")
-
-    pool_size = positive_int_from_payload(
-        payload, "pool_size", DEFAULT_SWEEP["pool_size"]
-    )
-    block_count = positive_int_from_payload(
-        payload, "block_count", DEFAULT_SWEEP["block_count"]
-    )
-    ops_per_thread = positive_int_from_payload(
-        payload, "ops_per_thread", DEFAULT_SWEEP["ops_per_thread"]
-    )
-    hotset_size = positive_int_from_payload(
-        payload, "hotset_size", DEFAULT_SWEEP["hotset_size"]
-    )
-    hot_access_percent = positive_int_from_payload(
-        payload, "hot_access_percent", DEFAULT_SWEEP["hot_access_percent"]
-    )
-    hotset_size, hot_access_percent = clamp_hot_fields(
-        block_count, hotset_size, hot_access_percent
-    )
+    options = parse_common_options(payload, DEFAULT_SWEEP)
 
     return SweepRequest(
-        workload=workload,
-        pool_size=pool_size,
-        block_count=block_count,
+        workload=options["workload"],
+        replacer=options["replacer"],
+        disk_backend=options["disk_backend"],
+        pool_size=options["pool_size"],
+        block_count=options["block_count"],
         thread_candidates=parse_thread_candidates(payload),
-        ops_per_thread=ops_per_thread,
-        hotset_size=hotset_size,
-        hot_access_percent=hot_access_percent,
+        ops_per_thread=options["ops_per_thread"],
+        hotset_size=options["hotset_size"],
+        hot_access_percent=options["hot_access_percent"],
+        write_percent=options["write_percent"],
+        flush_every_ops=options["flush_every_ops"],
+        background_cleaner=options["background_cleaner"],
+        dirty_page_high_watermark=options["dirty_page_high_watermark"],
+        dirty_page_low_watermark=options["dirty_page_low_watermark"],
+        flush_workers=options["flush_workers"],
+        flush_submit_batch_size=options["flush_submit_batch_size"],
+        flush_foreground_burst_limit=options["flush_foreground_burst_limit"],
+        queue_depth=options["queue_depth"],
+        max_open_files=options["max_open_files"],
     )
 
 
@@ -277,6 +444,15 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "disk_writes",
         "evictions",
         "dirty_flushes",
+        "write_percent",
+        "flush_every_ops",
+        "flush_workers",
+        "flush_submit_batch_size",
+        "flush_foreground_burst_limit",
+        "dirty_page_high_watermark",
+        "dirty_page_low_watermark",
+        "queue_depth",
+        "max_open_files",
         "flush_tasks_scheduled",
         "flush_tasks_completed",
         "flush_failures",
@@ -284,6 +460,8 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "cleaner_flushes_finished",
         "cleaner_flushes_skipped",
         "eviction_failures",
+        "writes_marked_dirty",
+        "foreground_flushes_requested",
     }
     floats = {"seconds", "throughput_ops_per_sec", "hit_rate"}
 
@@ -324,6 +502,10 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         output_format,
         "--workload",
         request.workload,
+        "--replacer",
+        request.replacer,
+        "--disk-backend",
+        request.disk_backend,
         "--pool-size",
         str(request.pool_size),
         "--block-count",
@@ -336,6 +518,26 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         str(request.hotset_size),
         "--hot-access-percent",
         str(request.hot_access_percent),
+        "--write-percent",
+        str(request.write_percent),
+        "--flush-every-ops",
+        str(request.flush_every_ops),
+        "--background-cleaner",
+        "true" if request.background_cleaner else "false",
+        "--dirty-page-high-watermark",
+        str(request.dirty_page_high_watermark),
+        "--dirty-page-low-watermark",
+        str(request.dirty_page_low_watermark),
+        "--flush-workers",
+        str(request.flush_workers),
+        "--flush-submit-batch-size",
+        str(request.flush_submit_batch_size),
+        "--flush-foreground-burst-limit",
+        str(request.flush_foreground_burst_limit),
+        "--queue-depth",
+        str(request.queue_depth),
+        "--max-open-files",
+        str(request.max_open_files),
     ]
     result = subprocess.run(
         command,
@@ -361,15 +563,7 @@ def run_benchmark(request: BenchmarkRequest) -> dict[str, Any]:
     response = {
         "kind": "single_run",
         "timestamp_ms": now_epoch_ms(),
-        "request": {
-            "workload": request.workload,
-            "pool_size": request.pool_size,
-            "block_count": request.block_count,
-            "threads": request.threads,
-            "ops_per_thread": request.ops_per_thread,
-            "hotset_size": request.hotset_size,
-            "hot_access_percent": request.hot_access_percent,
-        },
+        "request": asdict(request),
         "metrics": metrics,
         "snapshot": benchmark_payload.get("snapshot"),
         "access_profile": benchmark_payload.get("access_profile"),
@@ -384,12 +578,24 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
     for thread_count in request.thread_candidates:
         sample_request = BenchmarkRequest(
             workload=request.workload,
+            replacer=request.replacer,
+            disk_backend=request.disk_backend,
             pool_size=request.pool_size,
             block_count=request.block_count,
             threads=thread_count,
             ops_per_thread=request.ops_per_thread,
             hotset_size=request.hotset_size,
             hot_access_percent=request.hot_access_percent,
+            write_percent=request.write_percent,
+            flush_every_ops=request.flush_every_ops,
+            background_cleaner=request.background_cleaner,
+            dirty_page_high_watermark=request.dirty_page_high_watermark,
+            dirty_page_low_watermark=request.dirty_page_low_watermark,
+            flush_workers=request.flush_workers,
+            flush_submit_batch_size=request.flush_submit_batch_size,
+            flush_foreground_burst_limit=request.flush_foreground_burst_limit,
+            queue_depth=request.queue_depth,
+            max_open_files=request.max_open_files,
         )
         samples.append(run_benchmark_once(sample_request, "csv"))
 
@@ -401,15 +607,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
     response = {
         "kind": "sweep",
         "timestamp_ms": now_epoch_ms(),
-        "request": {
-            "workload": request.workload,
-            "pool_size": request.pool_size,
-            "block_count": request.block_count,
-            "thread_candidates": request.thread_candidates,
-            "ops_per_thread": request.ops_per_thread,
-            "hotset_size": request.hotset_size,
-            "hot_access_percent": request.hot_access_percent,
-        },
+        "request": asdict(request),
         "samples": samples,
         "summary": {
             "sample_count": len(samples),
@@ -467,6 +665,8 @@ class TelePathDemoHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "workloads": WORKLOADS,
+                    "replacers": REPLACERS,
+                    "disk_backends": DISK_BACKENDS,
                     "defaults": DEFAULTS,
                     "sweep_defaults": DEFAULT_SWEEP,
                     "default_language": "en",

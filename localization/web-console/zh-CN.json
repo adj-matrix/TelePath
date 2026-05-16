@@ -69,12 +69,24 @@
   },
   "form": {
     "workload": "负载类型",
+    "replacer": "替换策略",
+    "disk_backend": "磁盘后端",
     "threads": "线程数",
     "pool_size": "缓冲池大小",
     "block_count": "块数量",
     "ops_per_thread": "每线程操作数",
     "hotset_size": "热点集合大小",
     "hot_access_percent": "热点访问比例 %",
+    "write_percent": "写比例 %",
+    "flush_every_ops": "每 N 次显式刷盘",
+    "background_cleaner": "后台 Cleaner",
+    "dirty_page_high_watermark": "脏页高水位",
+    "dirty_page_low_watermark": "脏页低水位",
+    "flush_workers": "刷盘 Worker 数",
+    "flush_submit_batch_size": "刷盘批量大小",
+    "flush_foreground_burst_limit": "前台突发上限",
+    "queue_depth": "队列深度",
+    "max_open_files": "最大打开文件数",
     "thread_candidates": "线程候选集",
     "thread_candidates_placeholder": "1,2,4,8"
   },
@@ -90,6 +102,12 @@
     "buffer_hits": "命中次数",
     "buffer_misses": "未命中次数",
     "backend": "后端",
+    "replacer": "替换策略",
+    "write_pressure": "写入压力",
+    "write_pressure_template": "{percent}% · {dirty} 次置脏",
+    "disk_writes": "磁盘写次数",
+    "writeback_state": "写回状态",
+    "writeback_state_template": "{dirty} 脏 · {queued} 排队 · {inflight} 写回中",
     "workload": "负载",
     "total_ops": "总操作数",
     "elapsed": "耗时",
@@ -131,9 +149,9 @@
     "click_hint": "点击回放",
     "run_title": "{workload} · {threads}",
     "run_subtitle": "池大小 {pool_size} · 块数 {block_count}",
-    "run_detail": "{throughput} 次/秒 · {hit_rate}",
+    "run_detail": "{throughput} 次/秒 · {hit_rate} · {replacer} · {write_percent}% 写",
     "sweep_title": "{workload} 参数扫描",
-    "sweep_subtitle": "线程 {thread_candidates}",
+    "sweep_subtitle": "线程 {thread_candidates} · {replacer} · {write_percent}% 写",
     "sweep_detail": "{sample_count} 个样本 · 最佳 {throughput} 次/秒"
   },
   "block_map": {
@@ -197,9 +215,16 @@
     "sequential_disjoint": "顺序分离"
   },
   "backends": {
+    "auto": "自动",
     "posix": "POSIX",
     "posix_fallback": "POSIX 回退路径",
     "io_uring": "io_uring",
     "io_uring_fallback": "io_uring 回退路径"
+  },
+  "replacers": {
+    "lru_k": "LRU-K",
+    "clock": "Clock",
+    "lru": "LRU",
+    "two_queue": "2Q"
   }
 }

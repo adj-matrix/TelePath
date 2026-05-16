@@ -1,17 +1,36 @@
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <regex>
 #include <string>
 
 namespace {
 
-auto BuildBenchmarkCommand(const std::filesystem::path &benchmark_bin) -> std::string {
-  return benchmark_bin.string() +
-         " --output-format json --workload hotspot --pool-size 16"
-         " --block-count 32 --threads 2 --ops-per-thread 12"
-         " --hotset-size 8 --hot-access-percent 80";
+struct BenchmarkCommand {
+  std::string command;
+  std::filesystem::path export_path;
+};
+
+auto BuildBenchmarkCommand(const std::filesystem::path &benchmark_bin) -> BenchmarkCommand {
+  const auto unique_suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+  const std::filesystem::path export_path = std::filesystem::temp_directory_path() / ("telepath_benchmark_json_output_export_" + std::to_string(unique_suffix) + ".jsonl");
+  std::filesystem::remove(export_path);
+  BenchmarkCommand command;
+  command.export_path = export_path;
+  command.command = benchmark_bin.string() +
+                    " --output-format json --workload hotspot --pool-size 16"
+                    " --block-count 32 --threads 2 --ops-per-thread 12"
+                    " --hotset-size 8 --hot-access-percent 80"
+                    " --replacer clock --disk-backend posix"
+                    " --write-percent 25 --flush-every-ops 6"
+                    " --background-cleaner true --dirty-page-high-watermark 12"
+                    " --dirty-page-low-watermark 4 --flush-workers 2"
+                    " --flush-submit-batch-size 2 --max-open-files 8"
+                    " --telemetry-export-path " + export_path.string();
+  return command;
 }
 
 auto ReadProcessOutput(const std::string &command, int *exit_code) -> std::string {
@@ -43,6 +62,24 @@ auto SumObservedAccesses(const std::string &output) -> uint64_t {
   return access_sum;
 }
 
+void AssertTelemetryExportFileWritten(const std::filesystem::path &path) {
+  assert(std::filesystem::exists(path));
+  std::ifstream in(path);
+  assert(in.is_open());
+
+  std::string line;
+  std::size_t line_count = 0;
+  while (std::getline(in, line)) {
+    assert(!line.empty());
+    assert(line.find("\"source\":\"telepath_benchmark\"") != std::string::npos);
+    assert(line.find("\"frames\":[") != std::string::npos);
+    assert(line.find("\"dirty_page_count\"") != std::string::npos);
+    ++line_count;
+  }
+  assert(line_count == 1);
+  std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main(int /*argc*/, char **argv) {
@@ -50,14 +87,20 @@ int main(int /*argc*/, char **argv) {
 
   const fs::path executable_dir = fs::path(argv[0]).parent_path();
   const fs::path benchmark_bin = executable_dir / "telepath_benchmark";
-  const std::string command = BuildBenchmarkCommand(benchmark_bin);
+  const BenchmarkCommand command = BuildBenchmarkCommand(benchmark_bin);
 
   int exit_code = 0;
-  const std::string output = ReadProcessOutput(command, &exit_code);
+  const std::string output = ReadProcessOutput(command.command, &exit_code);
   assert(exit_code == 0);
 
   assert(output.find("\"access_profile\"") != std::string::npos);
   assert(output.find("\"mode\": \"observed\"") != std::string::npos);
+  assert(output.find("\"replacer\": \"clock\"") != std::string::npos);
+  assert(output.find("\"requested_disk_backend\": \"posix\"") != std::string::npos);
+  assert(output.find("\"write_percent\": 25") != std::string::npos);
+  assert(output.find("\"writes_marked_dirty\"") != std::string::npos);
+  assert(output.find("\"foreground_flushes_requested\"") != std::string::npos);
+  assert(output.find("\"telemetry_export_enabled\": true") != std::string::npos);
   assert(output.find("\"flush_tasks_scheduled\"") != std::string::npos);
   assert(output.find("\"dirty_page_count\"") != std::string::npos);
   assert(output.find("\"flush_queued_count\"") != std::string::npos);
@@ -65,5 +108,6 @@ int main(int /*argc*/, char **argv) {
   const uint64_t total_ops = ExtractTotalOps(output);
   const uint64_t access_sum = SumObservedAccesses(output);
   assert(access_sum == total_ops);
+  AssertTelemetryExportFileWritten(command.export_path);
   return 0;
 }
