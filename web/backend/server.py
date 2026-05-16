@@ -462,8 +462,18 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "eviction_failures",
         "writes_marked_dirty",
         "foreground_flushes_requested",
+        "operation_latency_min_ns",
+        "operation_latency_p50_ns",
+        "operation_latency_p95_ns",
+        "operation_latency_p99_ns",
+        "operation_latency_max_ns",
     }
-    floats = {"seconds", "throughput_ops_per_sec", "hit_rate"}
+    floats = {
+        "seconds",
+        "throughput_ops_per_sec",
+        "hit_rate",
+        "operation_latency_avg_ns",
+    }
 
     parsed: dict[str, Any] = {}
     for key, value in row.items():

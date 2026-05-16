@@ -26,10 +26,12 @@ namespace {
 using telepath::benchmark_support::BenchmarkMetadata;
 using telepath::benchmark_support::BenchmarkOptions;
 using telepath::benchmark_support::ChooseBlock;
+using telepath::benchmark_support::LatencySummary;
 using telepath::benchmark_support::LoadMetadata;
 using telepath::benchmark_support::NormalizeWorkloadName;
 using telepath::benchmark_support::ParseArgs;
 using telepath::benchmark_support::ShouldWriteOperation;
+using telepath::benchmark_support::SummarizeLatencySamples;
 
 struct BenchmarkMetrics {
   std::size_t total_ops{0};
@@ -51,6 +53,7 @@ struct BenchmarkMetrics {
   uint64_t eviction_failures{0};
   uint64_t writes_marked_dirty{0};
   uint64_t foreground_flushes_requested{0};
+  LatencySummary operation_latency;
 };
 
 class BenchmarkRootGuard {
@@ -211,15 +214,22 @@ void RunWorker(
   std::size_t thread_index,
   std::atomic<uint64_t> *writes_marked_dirty,
   std::atomic<uint64_t> *foreground_flushes_requested,
-  std::vector<uint64_t> *access_counts
+  std::vector<uint64_t> *access_counts,
+  std::vector<uint64_t> *latency_samples_ns
 ) {
   std::mt19937_64 rng(0xBADC0FFEEULL + thread_index);
+  latency_samples_ns->reserve(options.ops_per_thread);
   for (std::size_t op = 0; op < options.ops_per_thread; ++op) {
+    const auto operation_start = std::chrono::steady_clock::now();
     const telepath::BlockId block_id = ChooseBlock(&rng, op, thread_index, options);
     ++(*access_counts)[block_id];
 
     auto result = manager->ReadBuffer(1, block_id);
-    if (!result.ok()) continue;
+    if (!result.ok()) {
+      const auto operation_end = std::chrono::steady_clock::now();
+      latency_samples_ns->push_back(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(operation_end - operation_start).count()));
+      continue;
+    }
 
     telepath::BufferHandle handle = std::move(result.value());
     if (ShouldWriteOperation(&rng, op, options)) {
@@ -234,6 +244,8 @@ void RunWorker(
     }
     volatile std::byte sink = handle.data()[0];
     (void)sink;
+    const auto operation_end = std::chrono::steady_clock::now();
+    latency_samples_ns->push_back(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(operation_end - operation_start).count()));
   }
 }
 
@@ -256,7 +268,8 @@ auto BuildBenchmarkMetrics(
   const telepath::TelemetrySnapshot &after,
   double seconds,
   uint64_t writes_marked_dirty,
-  uint64_t foreground_flushes_requested
+  uint64_t foreground_flushes_requested,
+  const LatencySummary &operation_latency
 ) -> BenchmarkMetrics {
   const std::size_t total_ops = options.thread_count * options.ops_per_thread;
   const uint64_t hits = after.buffer_hits - before.buffer_hits;
@@ -283,6 +296,7 @@ auto BuildBenchmarkMetrics(
     after.eviction_failures - before.eviction_failures,
     writes_marked_dirty,
     foreground_flushes_requested,
+    operation_latency,
   };
 }
 
@@ -300,11 +314,19 @@ auto RunBenchmark(
   std::vector<std::thread> workers;
   workers.reserve(options.thread_count);
   std::vector<std::vector<uint64_t>> per_thread_access_counts(options.thread_count, std::vector<uint64_t>(options.block_count, 0));
+  std::vector<std::vector<uint64_t>> per_thread_latency_samples(options.thread_count);
 
   for (std::size_t thread_index = 0; thread_index < options.thread_count; ++thread_index) {
     workers.emplace_back(
-      [manager, &options, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts, thread_index]() {
-        RunWorker(manager, options, thread_index, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts[thread_index]);
+      [manager, &options, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts, &per_thread_latency_samples, thread_index]() {
+        RunWorker(
+          manager,
+          options,
+          thread_index,
+          &writes_marked_dirty,
+          &foreground_flushes_requested,
+          &per_thread_access_counts[thread_index],
+          &per_thread_latency_samples[thread_index]);
       });
   }
 
@@ -314,13 +336,19 @@ auto RunBenchmark(
   const telepath::TelemetrySnapshot after = telemetry->Snapshot();
   const double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
   *block_access_counts = MergeAccessCounts(per_thread_access_counts, options.block_count);
+  std::vector<uint64_t> latency_samples;
+  latency_samples.reserve(options.thread_count * options.ops_per_thread);
+  for (auto &thread_samples : per_thread_latency_samples) {
+    latency_samples.insert(latency_samples.end(), thread_samples.begin(), thread_samples.end());
+  }
   return BuildBenchmarkMetrics(
     options,
     before,
     after,
     seconds,
     writes_marked_dirty.load(std::memory_order_relaxed),
-    foreground_flushes_requested.load(std::memory_order_relaxed));
+    foreground_flushes_requested.load(std::memory_order_relaxed),
+    SummarizeLatencySamples(std::move(latency_samples)));
 }
 
 auto ResolveBackendKindName(const telepath::DiskBackendCapabilities &capabilities) -> const char * {
@@ -427,6 +455,12 @@ void PrintTextSummary(
   std::cout << "total_ops=" << metrics.total_ops << "\n";
   std::cout << "seconds=" << metrics.seconds << "\n";
   std::cout << "throughput_ops_per_sec=" << metrics.throughput << "\n";
+  std::cout << "operation_latency_min_ns=" << metrics.operation_latency.min_ns << "\n";
+  std::cout << "operation_latency_avg_ns=" << metrics.operation_latency.average_ns << "\n";
+  std::cout << "operation_latency_p50_ns=" << metrics.operation_latency.p50_ns << "\n";
+  std::cout << "operation_latency_p95_ns=" << metrics.operation_latency.p95_ns << "\n";
+  std::cout << "operation_latency_p99_ns=" << metrics.operation_latency.p99_ns << "\n";
+  std::cout << "operation_latency_max_ns=" << metrics.operation_latency.max_ns << "\n";
   std::cout << "buffer_hits=" << metrics.hits << "\n";
   std::cout << "buffer_misses=" << metrics.misses << "\n";
   std::cout << "hit_rate=" << metrics.hit_rate << "\n";
@@ -458,7 +492,9 @@ void PrintCsvSummary(
          "flush_submit_batch_size,flush_foreground_burst_limit,background_cleaner,"
          "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
          "telemetry_export_enabled,total_ops,"
-         "seconds,throughput_ops_per_sec,buffer_hits,buffer_misses,hit_rate,"
+         "seconds,throughput_ops_per_sec,operation_latency_min_ns,"
+         "operation_latency_avg_ns,operation_latency_p50_ns,operation_latency_p95_ns,"
+         "operation_latency_p99_ns,operation_latency_max_ns,buffer_hits,buffer_misses,hit_rate,"
          "disk_reads,disk_writes,evictions,dirty_flushes,flush_tasks_scheduled,"
          "flush_tasks_completed,flush_failures,cleaner_flushes_scheduled,"
          "cleaner_flushes_finished,cleaner_flushes_skipped,eviction_failures,"
@@ -480,6 +516,12 @@ void PrintCsvSummary(
             << (options.telemetry_export_path.empty() ? "false" : "true") << ","
             << metrics.total_ops << ","
             << metrics.seconds << "," << metrics.throughput << ","
+            << metrics.operation_latency.min_ns << ","
+            << metrics.operation_latency.average_ns << ","
+            << metrics.operation_latency.p50_ns << ","
+            << metrics.operation_latency.p95_ns << ","
+            << metrics.operation_latency.p99_ns << ","
+            << metrics.operation_latency.max_ns << ","
             << metrics.hits << "," << metrics.misses << ","
             << metrics.hit_rate << "," << metrics.disk_reads << ","
             << metrics.disk_writes << "," << metrics.evictions << ","
@@ -528,6 +570,12 @@ void PrintJsonMetrics(
   std::cout << "    \"total_ops\": " << metrics.total_ops << ",\n";
   std::cout << "    \"seconds\": " << metrics.seconds << ",\n";
   std::cout << "    \"throughput_ops_per_sec\": " << metrics.throughput << ",\n";
+  std::cout << "    \"operation_latency_min_ns\": " << metrics.operation_latency.min_ns << ",\n";
+  std::cout << "    \"operation_latency_avg_ns\": " << metrics.operation_latency.average_ns << ",\n";
+  std::cout << "    \"operation_latency_p50_ns\": " << metrics.operation_latency.p50_ns << ",\n";
+  std::cout << "    \"operation_latency_p95_ns\": " << metrics.operation_latency.p95_ns << ",\n";
+  std::cout << "    \"operation_latency_p99_ns\": " << metrics.operation_latency.p99_ns << ",\n";
+  std::cout << "    \"operation_latency_max_ns\": " << metrics.operation_latency.max_ns << ",\n";
   std::cout << "    \"buffer_hits\": " << metrics.hits << ",\n";
   std::cout << "    \"buffer_misses\": " << metrics.misses << ",\n";
   std::cout << "    \"hit_rate\": " << metrics.hit_rate << ",\n";

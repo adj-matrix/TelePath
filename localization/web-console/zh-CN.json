@@ -101,6 +101,8 @@
     "hit_rate": "命中率",
     "buffer_hits": "命中次数",
     "buffer_misses": "未命中次数",
+    "p95_latency": "P95 延迟",
+    "p99_latency": "P99 延迟",
     "backend": "后端",
     "replacer": "替换策略",
     "write_pressure": "写入压力",
@@ -118,6 +120,7 @@
   },
   "units": {
     "ops_per_sec": "次 / 秒",
+    "microseconds_suffix": "微秒",
     "seconds_suffix": "秒",
     "threads_template": "{threads} 线程"
   },
@@ -126,6 +129,7 @@
     "throughput": "吞吐量",
     "scale": "扩展倍数",
     "hit_rate": "命中率",
+    "p95_latency": "P95 延迟",
     "hits": "命中",
     "misses": "未命中",
     "notes": "说明"

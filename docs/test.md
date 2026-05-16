@@ -42,7 +42,7 @@ The current suite covers:
 - telemetry correctness,
 - telemetry JSONL export shape,
 - options resolution,
-- benchmark workload and experiment-parameter semantics.
+- benchmark workload, experiment-parameter, and operation-latency summary semantics.
 
 ## Coverage Matrix
 
@@ -59,14 +59,14 @@ The current behavior-oriented coverage map is:
 | Completion dispatch | `completion_dispatcher_test`, `completion_dispatcher_idle_test`, `completion_order_test` | Covers request-id routing, out-of-order completion, early completion before registration, backend failure, idle shutdown, and reordered read completions. |
 | Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers POSIX fallback behavior, factory policy, zero-fill reads, and native/stub `io_uring` paths. |
 | Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test` | Covers shared interface expectations and policy-specific behavior. |
-| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, JSONL telemetry export, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, snapshot aggregates, and JSON output shape. |
+| Telemetry/options/benchmark | `telemetry_test`, `options_test`, `benchmark_*` | Covers counter snapshots, JSONL telemetry export, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, operation-latency summaries, snapshot aggregates, and JSON output shape. |
 
 The remaining intentional gaps are larger-scale rather than unit-test-sized:
 
 - long-running stress/soak tests under sustained dirty-page pressure,
 - native `io_uring` performance validation on real hardware,
 - crash/recovery semantics, which are outside the current project scope,
-- latency distribution assertions, which should come from benchmark/telemetry work rather than brittle unit tests.
+- cross-run latency stability assertions, which should come from benchmark artifact analysis rather than brittle unit tests.
 
 In addition to the baseline suite, native Linux CI runs a separate `io_uring`-only test group so that kernel-sensitive validation does not get mixed into the normal fallback path.
 
@@ -101,7 +101,9 @@ In practice this means:
 
 - normal tests validate workload-selection logic,
 - benchmark tests validate experiment parameter parsing and output shape,
+- benchmark output reports operation-level min/average/p50/p95/p99/max latency,
 - `scripts/bench/matrix.sh` emits clean CSV for reproducible matrix collection,
+- `scripts/bench/summarize.py` converts CSV artifacts into Markdown summaries for paper-facing tables,
 - GitHub benchmark workflows collect trend data,
 - benchmark numbers are useful for regression observation, not final performance claims.
 

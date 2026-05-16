@@ -356,6 +356,14 @@ target_link_libraries(telepath_benchmark_json_output_test PRIVATE telepath)
 
 add_test(NAME telepath_benchmark_json_output_test COMMAND telepath_benchmark_json_output_test)
 
+find_program(TELEPATH_PYTHON3 python3)
+if(TELEPATH_PYTHON3)
+  add_test(NAME telepath_benchmark_summarize_test
+           COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/benchmark_summarize_test.py)
+  add_test(NAME telepath_web_backend_parser_test
+           COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/web_backend_parser_test.py)
+endif()
+
 add_executable(telepath_benchmark
   cpp/benchmark/benchmark_main.cc
 )

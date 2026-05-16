@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <random>
 #include <unordered_set>
+#include <vector>
 
 #include "benchmark_support.h"
 
@@ -116,6 +117,24 @@ void ExpectWriteOperationHonorsZeroAndHundredPercent() {
   assert(telepath::benchmark_support::ShouldWriteOperation(&rng, 0, options));
 }
 
+void ExpectLatencySummaryUsesNearestRankPercentiles() {
+  auto empty = telepath::benchmark_support::SummarizeLatencySamples({});
+  assert(empty.min_ns == 0);
+  assert(empty.p50_ns == 0);
+  assert(empty.p95_ns == 0);
+  assert(empty.p99_ns == 0);
+  assert(empty.max_ns == 0);
+  assert(empty.average_ns == 0.0);
+
+  auto summary = telepath::benchmark_support::SummarizeLatencySamples(std::vector<uint64_t>{50, 10, 40, 20, 30});
+  assert(summary.min_ns == 10);
+  assert(summary.p50_ns == 30);
+  assert(summary.p95_ns == 50);
+  assert(summary.p99_ns == 50);
+  assert(summary.max_ns == 50);
+  assert(summary.average_ns == 30.0);
+}
+
 }  // namespace
 
 int main() {
@@ -126,6 +145,7 @@ int main() {
   ExpectDirtyAliasNormalizesToHotspotWithWrites();
   ExpectInvalidExperimentKnobsFallBackToDefaults();
   ExpectWriteOperationHonorsZeroAndHundredPercent();
+  ExpectLatencySummaryUsesNearestRankPercentiles();
 
   return 0;
 }

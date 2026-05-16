@@ -46,13 +46,10 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "# Benchmark Summary"
-            echo
-            echo "These results come from a shared GitHub-hosted runner and should be treated as trend data, not final performance ground truth."
-            echo
+            python3 scripts/bench/summarize.py artifacts/benchmarks/*.csv
             for report in artifacts/benchmarks/*.csv; do
               name="$(basename "${report}" .csv)"
-              echo "## ${name}"
+              echo "## Raw ${name}"
               echo
               echo '```csv'
               cat "${report}"

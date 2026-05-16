@@ -53,6 +53,13 @@ auto ExtractTotalOps(const std::string &output) -> uint64_t {
   return std::stoull(total_ops_match[1].str());
 }
 
+auto ExtractUint64Metric(const std::string &output, const std::string &name) -> uint64_t {
+  const std::regex metric_pattern("\"" + name + R"(":\s*([0-9]+))");
+  std::smatch metric_match;
+  assert(std::regex_search(output, metric_match, metric_pattern));
+  return std::stoull(metric_match[1].str());
+}
+
 auto SumObservedAccesses(const std::string &output) -> uint64_t {
   const std::regex access_pattern(R"("accesses":\s*([0-9]+))");
   uint64_t access_sum = 0;
@@ -100,6 +107,7 @@ int main(int /*argc*/, char **argv) {
   assert(output.find("\"write_percent\": 25") != std::string::npos);
   assert(output.find("\"writes_marked_dirty\"") != std::string::npos);
   assert(output.find("\"foreground_flushes_requested\"") != std::string::npos);
+  assert(output.find("\"operation_latency_avg_ns\"") != std::string::npos);
   assert(output.find("\"telemetry_export_enabled\": true") != std::string::npos);
   assert(output.find("\"flush_tasks_scheduled\"") != std::string::npos);
   assert(output.find("\"dirty_page_count\"") != std::string::npos);
@@ -108,6 +116,15 @@ int main(int /*argc*/, char **argv) {
   const uint64_t total_ops = ExtractTotalOps(output);
   const uint64_t access_sum = SumObservedAccesses(output);
   assert(access_sum == total_ops);
+  const uint64_t min_latency = ExtractUint64Metric(output, "operation_latency_min_ns");
+  const uint64_t p50_latency = ExtractUint64Metric(output, "operation_latency_p50_ns");
+  const uint64_t p95_latency = ExtractUint64Metric(output, "operation_latency_p95_ns");
+  const uint64_t p99_latency = ExtractUint64Metric(output, "operation_latency_p99_ns");
+  const uint64_t max_latency = ExtractUint64Metric(output, "operation_latency_max_ns");
+  assert(min_latency <= p50_latency);
+  assert(p50_latency <= p95_latency);
+  assert(p95_latency <= p99_latency);
+  assert(p99_latency <= max_latency);
   AssertTelemetryExportFileWritten(command.export_path);
   return 0;
 }

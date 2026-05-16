@@ -6,8 +6,10 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <random>
 #include <string>
+#include <vector>
 
 #include "telepath/common/types.h"
 
@@ -48,6 +50,15 @@ struct BenchmarkMetadata {
   std::string commit_sha{"local"};
   std::string runner_os{"local"};
   std::string runner_arch{"unknown"};
+};
+
+struct LatencySummary {
+  uint64_t min_ns{0};
+  uint64_t p50_ns{0};
+  uint64_t p95_ns{0};
+  uint64_t p99_ns{0};
+  uint64_t max_ns{0};
+  double average_ns{0.0};
 };
 
 inline auto ParseNonNegative(const char *value, std::size_t fallback) -> std::size_t {
@@ -217,6 +228,39 @@ inline auto LoadMetadata() -> BenchmarkMetadata {
   LoadMetadataFromEnv("RUNNER_OS", &metadata.runner_os);
   LoadMetadataFromEnv("RUNNER_ARCH", &metadata.runner_arch);
   return metadata;
+}
+
+inline auto PercentileFromSorted(const std::vector<uint64_t> &sorted_values, std::size_t percentile) -> uint64_t {
+  if (sorted_values.empty()) return 0;
+  if (percentile == 0) return sorted_values.front();
+  if (percentile >= 100) return sorted_values.back();
+  std::size_t rank = (sorted_values.size() * percentile + 99) / 100;
+  if (rank == 0) rank = 1;
+  if (rank > sorted_values.size()) rank = sorted_values.size();
+  return sorted_values[rank - 1];
+}
+
+inline auto SummarizeLatencySamples(std::vector<uint64_t> samples) -> LatencySummary {
+  if (samples.empty()) return LatencySummary{};
+
+  std::sort(samples.begin(), samples.end());
+  uint64_t sum = 0;
+  for (const uint64_t sample : samples) {
+    if (sample > std::numeric_limits<uint64_t>::max() - sum) {
+      sum = std::numeric_limits<uint64_t>::max();
+      break;
+    }
+    sum += sample;
+  }
+
+  return LatencySummary{
+    samples.front(),
+    PercentileFromSorted(samples, 50),
+    PercentileFromSorted(samples, 95),
+    PercentileFromSorted(samples, 99),
+    samples.back(),
+    static_cast<double>(sum) / static_cast<double>(samples.size()),
+  };
 }
 
 inline bool ShouldWriteOperation(

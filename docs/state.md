@@ -20,6 +20,7 @@ Compared with State 2, the current implementation now includes:
 - flush, cleaner, eviction-failure, and snapshot aggregate telemetry,
 - backend capability negotiation for fallback and native paths,
 - benchmark parameterization for replacer/backend/write-pressure/writeback experiments,
+- benchmark operation-latency summaries for p50/p95/p99 tail-latency analysis,
 - JSONL telemetry export for point-in-time benchmark snapshots,
 - broader correctness and regression coverage around writeback behavior.
 
@@ -111,7 +112,11 @@ Benchmark runs can now append compact JSONL telemetry snapshots containing count
 
 The benchmark entry point can now vary workload, replacer, requested disk backend, write percentage, foreground flush cadence, background cleaner settings, dirty-page watermarks, flush worker limits, queue depth, and backend file-cache size.
 
-`scripts/bench/matrix.sh` builds once and emits a clean CSV matrix across workload, thread count, replacement policy, backend, and write pressure dimensions. The Web console also forwards the same experiment knobs to the benchmark binary so ad hoc browser runs and scripted runs use the same parameter surface.
+`scripts/bench/sweep.sh` runs thread sweeps with the same replacer, backend, write pressure, and writeback knobs accepted by the benchmark binary. `scripts/bench/matrix.sh` builds once and emits a clean CSV matrix across workload, thread count, replacement policy, backend, and write pressure dimensions. `scripts/bench/summarize.py` turns CSV artifacts into Markdown tables that call out best throughput, best hit rate, and lowest p95 latency. The Web console also forwards the same experiment knobs to the benchmark binary so ad hoc browser runs and scripted runs use the same parameter surface.
+
+Benchmark output now includes operation-level latency summaries: min, average, p50, p95, p99, and max. These values measure each logical benchmark operation from `ReadBuffer()` through optional dirty marking and foreground flush completion. This gives the experiment plane enough signal to compare throughput, hit rate, writeback pressure, and tail latency together.
+
+`docs/experiment.md` records the paper-facing experiment path, including recommended matrices, metric definitions, and validity boundaries for GitHub-hosted versus controlled-hardware results.
 
 ## Test Coverage
 
@@ -135,11 +140,11 @@ State 3 now validates the following categories:
 - options resolution,
 - replacer correctness,
 - benchmark workload semantics,
-- benchmark experiment parameter parsing and JSON output shape.
+- benchmark experiment parameter parsing, latency summaries, and JSON output shape.
 
 At the time of writing:
 
-- the baseline debug/ASAN suite contains 35 tests,
+- the baseline debug/ASAN suite contains 37 tests,
 - the native Linux `io_uring` workflow adds 6 kernel-sensitive tests,
 - the writeback scheduler is covered by dedicated adversarial cases, including batch failure, foreground/background interaction, cleaner ownership, and in-flight `FlushAll()` coordination.
 
@@ -150,7 +155,7 @@ State 3 still does **not** mean TelePath is finished.
 The following remain future work:
 
 - stronger long-running stress and soak testing,
-- richer benchmark interpretation and statistical reporting,
+- richer benchmark interpretation, charting, and cross-run statistical reporting,
 - live shared-memory telemetry transport,
 - richer non-counter observability events and transport integrations,
 - deeper `io_uring` optimization beyond correctness-first support,

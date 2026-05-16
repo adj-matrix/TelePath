@@ -101,6 +101,8 @@
     "hit_rate": "Hit Rate",
     "buffer_hits": "Buffer Hits",
     "buffer_misses": "Buffer Misses",
+    "p95_latency": "P95 Latency",
+    "p99_latency": "P99 Latency",
     "backend": "Backend",
     "replacer": "Replacer",
     "write_pressure": "Write Pressure",
@@ -118,6 +120,7 @@
   },
   "units": {
     "ops_per_sec": "ops / sec",
+    "microseconds_suffix": "us",
     "seconds_suffix": "s",
     "threads_template": "{threads} threads"
   },
@@ -126,6 +129,7 @@
     "throughput": "Throughput",
     "scale": "Scale",
     "hit_rate": "Hit Rate",
+    "p95_latency": "P95 Latency",
     "hits": "Hits",
     "misses": "Misses",
     "notes": "Notes"

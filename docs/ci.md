@@ -59,10 +59,10 @@ The benchmark workflow:
 - runs on a nightly `schedule`,
 - builds the debug benchmark target,
 - executes workload sweeps for `hotspot`, `uniform`, `sequential_shared`, and `sequential_disjoint`,
-- uploads CSV results as GitHub Actions artifacts,
-- publishes a compact workflow summary directly in the Actions UI.
+- uploads CSV results with throughput, hit-rate, writeback, and operation-latency fields as GitHub Actions artifacts,
+- publishes a compact Markdown summary directly in the Actions UI using `scripts/bench/summarize.py`.
 
-Local benchmark collection should use `scripts/bench/run.sh` for one-off runs and `scripts/bench/matrix.sh` for matrix collection. Both scripts keep benchmark stdout suitable for CSV/JSON capture and send build logs to stderr.
+Local benchmark collection should use `scripts/bench/run.sh` for one-off runs and `scripts/bench/matrix.sh` for matrix collection. Both scripts keep benchmark stdout suitable for CSV/JSON capture and send build logs to stderr. Existing CSV artifacts can be summarized with `python3 scripts/bench/summarize.py <file.csv>`.
 
 ## What CI Is For
 
@@ -103,4 +103,4 @@ Reasonable next steps for CI include:
 
 - broader compiler and Ubuntu matrices,
 - stricter branch protection based on required CI checks,
-- scheduled benchmark matrices that cover replacer/backend/write-pressure dimensions.
+- scheduled benchmark matrices that cover replacer/backend/write-pressure dimensions and compare p95/p99 latency trends over time.

@@ -2,6 +2,10 @@
   const app = global.TelePath;
   const { elements } = app;
 
+  function formatLatencyMicros(valueNs) {
+    return app.formatNumber((valueNs || 0) / 1000, 2);
+  }
+
   function renderSingleRun(payload) {
     app.state.lastSingleRun = payload;
     app.state.lastRawPayload = payload;
@@ -24,6 +28,12 @@
     );
     document.getElementById("missesValue").textContent = app.formatNumber(
       metrics.buffer_misses
+    );
+    document.getElementById("p95LatencyValue").textContent = formatLatencyMicros(
+      metrics.operation_latency_p95_ns
+    );
+    document.getElementById("p99LatencyValue").textContent = formatLatencyMicros(
+      metrics.operation_latency_p99_ns
     );
     document.getElementById("hitsMeta").textContent = app.formatNumber(
       metrics.buffer_hits
@@ -162,6 +172,7 @@
         <td>${app.formatNumber(sample.throughput_ops_per_sec, 0)}</td>
         <td>${app.formatNumber(scale, 2)}x</td>
         <td>${app.formatPercent(sample.hit_rate)}</td>
+        <td>${formatLatencyMicros(sample.operation_latency_p95_ns)}</td>
         <td>${app.formatNumber(sample.buffer_hits)}</td>
         <td>${app.formatNumber(sample.buffer_misses)}</td>
         <td>${badges.join(" / ") || "-"}</td>
