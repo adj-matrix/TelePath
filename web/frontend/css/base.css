@@ -224,6 +224,7 @@ body {
   .sweep-summary-grid,
   .blockmap-summary-grid,
   .blockmap-layout,
+  .blockmap-controls,
   .history-layout,
   .hero-status {
     grid-template-columns: 1fr;

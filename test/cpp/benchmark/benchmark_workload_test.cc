@@ -77,6 +77,8 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
     "/telepath_benchmark_workload_test",
     "--telemetry-shm-capacity",
     "32768",
+    "--snapshot-sample-limit",
+    "6",
   };
   auto options = telepath::benchmark_support::ParseArgs(
     static_cast<int>(sizeof(argv) / sizeof(argv[0])),
@@ -89,6 +91,7 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
   assert(options.disk_backend == "io_uring");
   assert(options.telemetry_shm_name == "/telepath_benchmark_workload_test");
   assert(options.telemetry_shm_capacity == 32768);
+  assert(options.snapshot_sample_limit == 6);
 }
 
 void ExpectInvalidExperimentKnobsFallBackToDefaults() {

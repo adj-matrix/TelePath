@@ -26,6 +26,7 @@
     recentSweeps: document.getElementById("recentSweeps"),
     blockMapLegend: document.getElementById("blockMapLegend"),
     blockMapGrid: document.getElementById("blockMapGrid"),
+    blockMapSnapshotSelect: document.getElementById("blockMapSnapshotSelect"),
     blockMapMode: document.getElementById("blockMapMode"),
     blockMapBlocks: document.getElementById("blockMapBlocks"),
     blockMapPool: document.getElementById("blockMapPool"),
@@ -86,6 +87,8 @@
     lastRawPayload: null,
     activeHistoryKey: null,
     blockMapModel: null,
+    blockMapPayloadKey: null,
+    selectedSnapshotKey: null,
     selectedFrameId: null,
   };
 

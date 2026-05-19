@@ -11,7 +11,7 @@ The post-midterm items from `docs/archive/archive2.md` are now represented in th
 - expanded writeback and cleaner telemetry,
 - operation-level latency summaries and benchmark matrix tooling,
 - JSONL plus shared-memory snapshot export paths,
-- Web and script output that expose benchmark parameters, throughput, hit rate, writeback pressure, and tail latency together,
+- Web and script output that expose benchmark parameters, throughput, hit rate, writeback pressure, sampled runtime snapshots, and tail latency together,
 - documentation for experiment collection, CI evidence, and test coverage.
 
 ## What Was Added Beyond State 2
@@ -128,6 +128,8 @@ The benchmark entry point can now vary workload, replacer, requested disk backen
 
 Benchmark output now includes operation-level latency summaries: min, average, p50, p95, p99, and max. These values measure each logical benchmark operation from `ReadBuffer()` through optional dirty marking and foreground flush completion. This gives the experiment plane enough signal to compare throughput, hit rate, writeback pressure, and tail latency together.
 
+JSON benchmark output also carries a bounded `sampled_snapshots` array. These samples are captured during the run around page reads, dirty marks, and observable runtime I/O states. The Web frame map exposes the final snapshot and the sampled runtime snapshots as selectable views, so pinned, dirty, queued, or in-flight states can be inspected without losing the end-of-run state.
+
 `docs/experiment.md` records the paper-facing experiment path, including recommended matrices, metric definitions, and validity boundaries for GitHub-hosted versus controlled-hardware results.
 
 ## Test Coverage
@@ -153,11 +155,11 @@ State 4 now validates the following categories:
 - options resolution,
 - replacer correctness,
 - benchmark workload semantics,
-- benchmark experiment parameter parsing, latency summaries, and JSON output shape.
+- benchmark experiment parameter parsing, latency summaries, sampled runtime snapshots, selectable Web snapshot views, and JSON output shape.
 
 At the time of writing:
 
-- the baseline debug/ASAN suite contains 37 tests,
+- the baseline debug/ASAN suite contains 38 tests,
 - the native Linux `io_uring` workflow adds 6 kernel-sensitive tests,
 - the writeback scheduler is covered by dedicated adversarial cases, including batch failure, foreground/background interaction, cleaner ownership, and in-flight `FlushAll()` coordination.
 

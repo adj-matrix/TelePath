@@ -153,6 +153,7 @@ TelePath 现在包含一个浏览器端 Console，用于运行负载并查看引
 - 英文与简体中文运行时切换，
 - 单次 benchmark 运行，
 - 线程 sweep 实验，
+- 可切换查看最终快照与运行中采样快照，
 - 进程内 recent run / recent sweep 历史，
 - 以及基于当前 TelePath debug 构建与 benchmark 可执行文件的薄 API 层。
 

@@ -153,6 +153,7 @@ This starts a single local HTTP service that:
 - supports runtime language switching between English and Simplified Chinese,
 - runs single benchmark passes,
 - runs thread-sweep experiments,
+- displays selectable final and sampled runtime buffer-pool snapshots,
 - retains recent run and sweep history in the server session,
 - and exposes all of that through a thin API backed by the existing TelePath debug build.
 

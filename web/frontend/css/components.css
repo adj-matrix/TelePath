@@ -221,6 +221,29 @@
   gap: 20px;
 }
 
+.blockmap-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.blockmap-controls label {
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.blockmap-controls select {
+  min-width: min(100%, 320px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--ink);
+  font: inherit;
+  padding: 10px 12px;
+}
+
 .history-list {
   display: grid;
   gap: 12px;

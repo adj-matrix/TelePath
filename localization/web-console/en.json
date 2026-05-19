@@ -159,12 +159,18 @@
     "sweep_detail": "{sample_count} samples · best {throughput} ops/s"
   },
   "block_map": {
+    "controls": {
+      "snapshot": "Snapshot",
+      "final_snapshot": "Final snapshot",
+      "sample_template": "Sample {index}: {reason} · T{thread} Op{operation}"
+    },
     "summary": {
       "mode": "Capture",
       "blocks": "Resident",
       "pool": "Dirty",
       "focus": "Access Profile",
       "point_in_time": "Real Snapshot",
+      "sampled_runtime": "Sampled Runtime",
       "resident_template": "{resident} / {total}",
       "dirty_template": "{dirty} / {total}",
       "dirty_runtime_template": "{dirty} dirty · {queued} queued · {inflight} active"
@@ -201,6 +207,12 @@
       "flush_in_flight": "Flush in flight",
       "io_in_flight": "Read I/O in flight",
       "none": "None"
+    },
+    "reasons": {
+      "after_read": "After read",
+      "after_mark_dirty": "After mark dirty",
+      "runtime_io": "Runtime I/O",
+      "sampled_runtime": "Sampled runtime"
     },
     "profile": {
       "none": "None",

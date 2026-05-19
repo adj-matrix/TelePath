@@ -362,6 +362,8 @@ if(TELEPATH_PYTHON3)
            COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/benchmark_summarize_test.py)
   add_test(NAME telepath_web_backend_parser_test
            COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/web_backend_parser_test.py)
+  add_test(NAME telepath_web_frontend_contract_test
+           COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/web_frontend_contract_test.py)
 endif()
 
 add_executable(telepath_benchmark

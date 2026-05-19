@@ -50,6 +50,22 @@ def main() -> int:
     assert parsed["operation_latency_max_ns"] == 13000
     assert parsed["flush_tasks_scheduled"] == 4
     assert parsed["cleaner_flushes_skipped"] == 1
+
+    json_payload = """
+    {
+      "metrics": {"throughput_ops_per_sec": 10.0},
+      "snapshot": {"frames": []},
+      "sampled_snapshots": [
+        {
+          "reason": "after_mark_dirty",
+          "snapshot": {"frames": [{"frame_id": 0, "is_dirty": true}]}
+        }
+      ]
+    }
+    """
+    parsed_json = server.parse_json_output(json_payload)
+    assert len(parsed_json["sampled_snapshots"]) == 1
+    assert parsed_json["sampled_snapshots"][0]["reason"] == "after_mark_dirty"
     return 0
 
 

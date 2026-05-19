@@ -124,8 +124,96 @@
     return { byBlockId, focus, note };
   }
 
+  function snapshotReasonLabel(reason) {
+    const key = `block_map.reasons.${reason}`;
+    const translated = app.t(key);
+    return translated === key
+      ? app.t("block_map.reasons.sampled_runtime")
+      : translated;
+  }
+
+  function buildSnapshotChoices(payload) {
+    const choices = [];
+    if (payload?.snapshot && Array.isArray(payload.snapshot.frames)) {
+      choices.push({
+        key: "final",
+        label: app.t("block_map.controls.final_snapshot"),
+        mode: app.t("block_map.summary.point_in_time"),
+        snapshot: payload.snapshot,
+      });
+    }
+
+    const samples = Array.isArray(payload?.sampled_snapshots)
+      ? payload.sampled_snapshots
+      : [];
+    samples.forEach((sample, index) => {
+      if (!sample?.snapshot || !Array.isArray(sample.snapshot.frames)) {
+        return;
+      }
+      const sampleIndex = Number(sample.sample_index ?? index);
+      choices.push({
+        key: `sample-${index}`,
+        label: app.t("block_map.controls.sample_template", {
+          index: sampleIndex + 1,
+          reason: snapshotReasonLabel(sample.reason ?? "sampled_runtime"),
+          thread: Number(sample.thread_index ?? 0),
+          operation: Number(sample.operation_index ?? 0),
+        }),
+        mode: app.t("block_map.summary.sampled_runtime"),
+        snapshot: sample.snapshot,
+      });
+    });
+
+    return choices;
+  }
+
+  function blockMapPayloadKey(payload) {
+    if (payload?.timestamp_ms != null) {
+      return `run:${payload.timestamp_ms}`;
+    }
+    return `local:${payload?.metrics?.total_ops ?? 0}:${payload?.metrics?.seconds ?? 0}`;
+  }
+
+  function selectedSnapshotChoice(payload, choices) {
+    if (choices.length === 0) {
+      return null;
+    }
+
+    const payloadKey = blockMapPayloadKey(payload);
+    if (app.state.blockMapPayloadKey !== payloadKey) {
+      app.state.blockMapPayloadKey = payloadKey;
+      app.state.selectedSnapshotKey = choices[0].key;
+    }
+
+    const selectedKey = choices.some(
+      (choice) => choice.key === app.state.selectedSnapshotKey
+    )
+      ? app.state.selectedSnapshotKey
+      : choices[0].key;
+    app.state.selectedSnapshotKey = selectedKey;
+    return choices.find((choice) => choice.key === selectedKey) ?? choices[0];
+  }
+
+  function renderSnapshotSelector(choices, selectedKey) {
+    if (!elements.blockMapSnapshotSelect) {
+      return;
+    }
+
+    elements.blockMapSnapshotSelect.innerHTML = "";
+    for (const choice of choices) {
+      const option = document.createElement("option");
+      option.value = choice.key;
+      option.textContent = choice.label;
+      elements.blockMapSnapshotSelect.appendChild(option);
+    }
+    elements.blockMapSnapshotSelect.value = selectedKey ?? "";
+    elements.blockMapSnapshotSelect.disabled = choices.length <= 1;
+  }
+
   function buildBlockMapModel(payload) {
-    const snapshot = payload?.snapshot;
+    const snapshotChoices = buildSnapshotChoices(payload);
+    const selectedSnapshot = selectedSnapshotChoice(payload, snapshotChoices);
+    const snapshot = selectedSnapshot?.snapshot;
     if (!snapshot || !Array.isArray(snapshot.frames)) {
       return null;
     }
@@ -161,6 +249,9 @@
       flushInFlightCount,
       profileFocus: accessProfile.focus,
       profileNote: accessProfile.note,
+      snapshotChoices,
+      selectedSnapshotKey: selectedSnapshot.key,
+      snapshotMode: selectedSnapshot.mode,
     };
   }
 
@@ -211,12 +302,14 @@
     const model = buildBlockMapModel(payload);
     app.state.blockMapModel = model;
     if (!model) {
+      renderSnapshotSelector([], null);
       elements.blockMapEmpty.classList.remove("hidden");
       elements.blockMapContent.classList.add("hidden");
       return;
     }
 
-    elements.blockMapMode.textContent = app.t("block_map.summary.point_in_time");
+    renderSnapshotSelector(model.snapshotChoices, model.selectedSnapshotKey);
+    elements.blockMapMode.textContent = model.snapshotMode;
     elements.blockMapBlocks.textContent = app.t("block_map.summary.resident_template", {
       resident: app.formatNumber(model.residentCount, 0),
       total: app.formatNumber(model.frames.length, 0),
@@ -272,6 +365,16 @@
 
   Object.assign(app, {
     buildBlockMapModel,
+    buildSnapshotChoices,
     renderBlockMap,
   });
+
+  if (elements.blockMapSnapshotSelect) {
+    elements.blockMapSnapshotSelect.addEventListener("change", (event) => {
+      app.state.selectedSnapshotKey = event.target.value;
+      if (app.state.lastSingleRun) {
+        renderBlockMap(app.state.lastSingleRun);
+      }
+    });
+  }
 })(window);

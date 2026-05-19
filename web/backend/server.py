@@ -498,10 +498,13 @@ def parse_json_output(stdout: str) -> dict[str, Any]:
         raise RuntimeError(f"unexpected benchmark JSON payload:\n{stdout}")
     metrics = payload.get("metrics")
     snapshot = payload.get("snapshot")
+    sampled_snapshots = payload.get("sampled_snapshots")
     if not isinstance(metrics, dict):
         raise RuntimeError(f"benchmark JSON payload is missing metrics:\n{stdout}")
     if snapshot is not None and not isinstance(snapshot, dict):
         raise RuntimeError(f"benchmark JSON payload has invalid snapshot:\n{stdout}")
+    if sampled_snapshots is not None and not isinstance(sampled_snapshots, list):
+        raise RuntimeError(f"benchmark JSON payload has invalid sampled snapshots:\n{stdout}")
     return payload
 
 
@@ -577,6 +580,7 @@ def run_benchmark(request: BenchmarkRequest) -> dict[str, Any]:
         "request": asdict(request),
         "metrics": metrics,
         "snapshot": benchmark_payload.get("snapshot"),
+        "sampled_snapshots": benchmark_payload.get("sampled_snapshots", []),
         "access_profile": benchmark_payload.get("access_profile"),
     }
     with _history_lock:

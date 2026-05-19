@@ -35,6 +35,7 @@ auto BuildBenchmarkCommand(const std::filesystem::path &benchmark_bin) -> Benchm
                     " --background-cleaner true --dirty-page-high-watermark 12"
                     " --dirty-page-low-watermark 4 --flush-workers 2"
                     " --flush-submit-batch-size 2 --max-open-files 8"
+                    " --snapshot-sample-limit 4"
                     " --telemetry-export-path " + export_path.string() +
                     " --telemetry-shm-name " + shm_name +
                     " --telemetry-shm-capacity 65536";
@@ -128,6 +129,10 @@ int main(int /*argc*/, char **argv) {
   assert(output.find("\"telemetry_export_enabled\": true") != std::string::npos);
   assert(output.find("\"telemetry_shm_enabled\": true") != std::string::npos);
   assert(output.find("\"telemetry_shm_capacity\": 65536") != std::string::npos);
+  assert(output.find("\"snapshot_sample_limit\": 4") != std::string::npos);
+  assert(output.find("\"sampled_snapshots\"") != std::string::npos);
+  assert(output.find("\"reason\": \"after_read\"") != std::string::npos);
+  assert(output.find("\"reason\": \"after_mark_dirty\"") != std::string::npos);
   assert(output.find("\"flush_tasks_scheduled\"") != std::string::npos);
   assert(output.find("\"dirty_page_count\"") != std::string::npos);
   assert(output.find("\"flush_queued_count\"") != std::string::npos);

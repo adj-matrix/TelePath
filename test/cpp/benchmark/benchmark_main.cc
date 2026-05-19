@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -54,6 +55,78 @@ struct BenchmarkMetrics {
   uint64_t writes_marked_dirty{0};
   uint64_t foreground_flushes_requested{0};
   LatencySummary operation_latency;
+};
+
+struct BenchmarkSnapshotSample {
+  std::size_t sample_index{0};
+  std::size_t thread_index{0};
+  std::size_t operation_index{0};
+  std::string reason;
+  telepath::BufferPoolSnapshot snapshot;
+};
+
+bool HasRuntimeIoState(const telepath::BufferPoolSnapshot &snapshot) {
+  if (snapshot.flush_queued_count > 0 || snapshot.flush_in_flight_count > 0) return true;
+  for (const telepath::FrameSnapshot &frame : snapshot.frames) {
+    if (frame.io_in_flight || frame.flush_queued || frame.flush_in_flight) return true;
+  }
+  return false;
+}
+
+class BenchmarkSnapshotSampler {
+ public:
+  explicit BenchmarkSnapshotSampler(std::size_t max_samples) : max_samples_(max_samples) {}
+
+  void TryCapture(
+    const std::string &reason,
+    std::size_t thread_index,
+    std::size_t operation_index,
+    const telepath::BufferManager &manager
+  ) {
+    std::lock_guard<std::mutex> guard(latch_);
+    if (max_samples_ == 0 || samples_.size() >= max_samples_) return;
+    if (reason == "after_read" && captured_after_read_) return;
+    if (reason == "after_mark_dirty" && captured_after_mark_dirty_) return;
+
+    if (reason == "after_read") captured_after_read_ = true;
+    if (reason == "after_mark_dirty") captured_after_mark_dirty_ = true;
+    samples_.push_back(BenchmarkSnapshotSample{
+      samples_.size(),
+      thread_index,
+      operation_index,
+      reason,
+      manager.ExportSnapshot(),
+    });
+  }
+
+  void TryCaptureRuntimeIo(const telepath::BufferManager &manager) {
+    std::lock_guard<std::mutex> guard(latch_);
+    if (max_samples_ == 0 || samples_.size() >= max_samples_ || captured_runtime_io_) return;
+
+    telepath::BufferPoolSnapshot snapshot = manager.ExportSnapshot();
+    if (!HasRuntimeIoState(snapshot)) return;
+    captured_runtime_io_ = true;
+    samples_.push_back(BenchmarkSnapshotSample{
+      samples_.size(),
+      0,
+      0,
+      "runtime_io",
+      std::move(snapshot),
+    });
+  }
+
+  auto samples() const -> std::vector<BenchmarkSnapshotSample> {
+    std::lock_guard<std::mutex> guard(latch_);
+    return samples_;
+  }
+
+ private:
+  std::size_t max_samples_{0};
+  mutable std::mutex latch_;
+  bool captured_after_read_{false};
+  bool captured_after_mark_dirty_{false};
+  bool captured_runtime_io_{false};
+  std::vector<BenchmarkSnapshotSample> samples_;
 };
 
 class BenchmarkRootGuard {
@@ -215,7 +288,8 @@ void RunWorker(
   std::atomic<uint64_t> *writes_marked_dirty,
   std::atomic<uint64_t> *foreground_flushes_requested,
   std::vector<uint64_t> *access_counts,
-  std::vector<uint64_t> *latency_samples_ns
+  std::vector<uint64_t> *latency_samples_ns,
+  BenchmarkSnapshotSampler *snapshot_sampler
 ) {
   std::mt19937_64 rng(0xBADC0FFEEULL + thread_index);
   latency_samples_ns->reserve(options.ops_per_thread);
@@ -232,11 +306,15 @@ void RunWorker(
     }
 
     telepath::BufferHandle handle = std::move(result.value());
+    if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_read", thread_index, op, *manager);
     if (ShouldWriteOperation(&rng, op, options)) {
       std::byte *data = handle.mutable_data();
       data[0] = static_cast<std::byte>((op + thread_index) % 251);
       auto dirty_status = manager->MarkBufferDirty(handle);
-      if (dirty_status.ok()) writes_marked_dirty->fetch_add(1, std::memory_order_relaxed);
+      if (dirty_status.ok()) {
+        writes_marked_dirty->fetch_add(1, std::memory_order_relaxed);
+        if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_mark_dirty", thread_index, op, *manager);
+      }
     }
     if (options.flush_every_ops != 0 && (op + 1) % options.flush_every_ops == 0) {
       auto flush_status = manager->FlushBuffer(handle);
@@ -304,7 +382,8 @@ auto RunBenchmark(
   telepath::BufferManager *manager,
   const std::shared_ptr<telepath::TelemetrySink> &telemetry,
   const BenchmarkOptions &options,
-  std::vector<uint64_t> *block_access_counts
+  std::vector<uint64_t> *block_access_counts,
+  std::vector<BenchmarkSnapshotSample> *snapshot_samples
 ) -> BenchmarkMetrics {
   const telepath::TelemetrySnapshot before = telemetry->Snapshot();
   const auto start = std::chrono::steady_clock::now();
@@ -315,10 +394,21 @@ auto RunBenchmark(
   workers.reserve(options.thread_count);
   std::vector<std::vector<uint64_t>> per_thread_access_counts(options.thread_count, std::vector<uint64_t>(options.block_count, 0));
   std::vector<std::vector<uint64_t>> per_thread_latency_samples(options.thread_count);
+  BenchmarkSnapshotSampler snapshot_sampler(options.output_format == "json" ? options.snapshot_sample_limit : 0);
+  std::atomic<bool> runtime_sampler_running{options.output_format == "json" && options.snapshot_sample_limit > 0};
+  std::thread runtime_sampler;
+  if (runtime_sampler_running.load(std::memory_order_relaxed)) {
+    runtime_sampler = std::thread([manager, &snapshot_sampler, &runtime_sampler_running]() {
+      while (runtime_sampler_running.load(std::memory_order_acquire)) {
+        snapshot_sampler.TryCaptureRuntimeIo(*manager);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+  }
 
   for (std::size_t thread_index = 0; thread_index < options.thread_count; ++thread_index) {
     workers.emplace_back(
-      [manager, &options, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts, &per_thread_latency_samples, thread_index]() {
+      [manager, &options, &writes_marked_dirty, &foreground_flushes_requested, &per_thread_access_counts, &per_thread_latency_samples, &snapshot_sampler, thread_index]() {
         RunWorker(
           manager,
           options,
@@ -326,11 +416,15 @@ auto RunBenchmark(
           &writes_marked_dirty,
           &foreground_flushes_requested,
           &per_thread_access_counts[thread_index],
-          &per_thread_latency_samples[thread_index]);
+          &per_thread_latency_samples[thread_index],
+          &snapshot_sampler);
       });
   }
 
   for (auto &worker : workers) worker.join();
+  runtime_sampler_running.store(false, std::memory_order_release);
+  if (runtime_sampler.joinable()) runtime_sampler.join();
+  *snapshot_samples = snapshot_sampler.samples();
 
   const auto end = std::chrono::steady_clock::now();
   const telepath::TelemetrySnapshot after = telemetry->Snapshot();
@@ -462,6 +556,7 @@ void PrintTextSummary(
   std::cout << "dirty_page_low_watermark=" << options.dirty_page_low_watermark << "\n";
   std::cout << "queue_depth=" << options.queue_depth << "\n";
   std::cout << "max_open_files=" << options.max_open_files << "\n";
+  std::cout << "snapshot_sample_limit=" << options.snapshot_sample_limit << "\n";
   if (!options.telemetry_export_path.empty()) std::cout << "telemetry_export_path=" << options.telemetry_export_path << "\n";
   if (!options.telemetry_shm_name.empty()) {
     std::cout << "telemetry_shm_name=" << options.telemetry_shm_name << "\n";
@@ -584,6 +679,7 @@ void PrintJsonMetrics(
   std::cout << "    \"dirty_page_low_watermark\": " << options.dirty_page_low_watermark << ",\n";
   std::cout << "    \"queue_depth\": " << options.queue_depth << ",\n";
   std::cout << "    \"max_open_files\": " << options.max_open_files << ",\n";
+  std::cout << "    \"snapshot_sample_limit\": " << options.snapshot_sample_limit << ",\n";
   std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
   std::cout << "    \"telemetry_shm_enabled\": " << (options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
   std::cout << "    \"telemetry_shm_name\": \"" << JsonEscape(options.telemetry_shm_name) << "\",\n";
@@ -618,38 +714,66 @@ void PrintJsonMetrics(
 
 void PrintJsonFrame(
   const telepath::FrameSnapshot &frame,
-  bool has_next_frame
+  bool has_next_frame,
+  std::string_view indent
 ) {
-  std::cout << "      {\n";
-  std::cout << "        \"frame_id\": " << frame.frame_id << ",\n";
-  std::cout << "        \"state\": \"" << FrameStateName(frame.state) << "\",\n";
-  std::cout << "        \"file_id\": " << frame.tag.file_id << ",\n";
-  std::cout << "        \"block_id\": " << frame.tag.block_id << ",\n";
-  std::cout << "        \"pin_count\": " << frame.pin_count << ",\n";
-  std::cout << "        \"dirty_generation\": " << frame.dirty_generation << ",\n";
-  std::cout << "        \"is_valid\": " << (frame.is_valid ? "true" : "false") << ",\n";
-  std::cout << "        \"is_dirty\": " << (frame.is_dirty ? "true" : "false") << ",\n";
-  std::cout << "        \"io_in_flight\": " << (frame.io_in_flight ? "true" : "false") << ",\n";
-  std::cout << "        \"flush_queued\": " << (frame.flush_queued ? "true" : "false") << ",\n";
-  std::cout << "        \"flush_in_flight\": " << (frame.flush_in_flight ? "true" : "false") << "\n";
-  std::cout << "      }";
+  std::cout << indent << "{\n";
+  std::cout << indent << "  \"frame_id\": " << frame.frame_id << ",\n";
+  std::cout << indent << "  \"state\": \"" << FrameStateName(frame.state) << "\",\n";
+  std::cout << indent << "  \"file_id\": " << frame.tag.file_id << ",\n";
+  std::cout << indent << "  \"block_id\": " << frame.tag.block_id << ",\n";
+  std::cout << indent << "  \"pin_count\": " << frame.pin_count << ",\n";
+  std::cout << indent << "  \"dirty_generation\": " << frame.dirty_generation << ",\n";
+  std::cout << indent << "  \"is_valid\": " << (frame.is_valid ? "true" : "false") << ",\n";
+  std::cout << indent << "  \"is_dirty\": " << (frame.is_dirty ? "true" : "false") << ",\n";
+  std::cout << indent << "  \"io_in_flight\": " << (frame.io_in_flight ? "true" : "false") << ",\n";
+  std::cout << indent << "  \"flush_queued\": " << (frame.flush_queued ? "true" : "false") << ",\n";
+  std::cout << indent << "  \"flush_in_flight\": " << (frame.flush_in_flight ? "true" : "false") << "\n";
+  std::cout << indent << "}";
   if (has_next_frame) std::cout << ",";
   std::cout << "\n";
 }
 
-void PrintJsonSnapshot(const telepath::BufferPoolSnapshot &snapshot) {
-  std::cout << "  \"snapshot\": {\n";
-  std::cout << "    \"pool_size\": " << snapshot.pool_size << ",\n";
-  std::cout << "    \"page_size\": " << snapshot.page_size << ",\n";
-  std::cout << "    \"dirty_page_count\": " << snapshot.dirty_page_count << ",\n";
-  std::cout << "    \"flush_queued_count\": " << snapshot.flush_queued_count << ",\n";
-  std::cout << "    \"flush_in_flight_count\": " << snapshot.flush_in_flight_count << ",\n";
-  std::cout << "    \"frames\": [\n";
+void PrintJsonSnapshotObject(
+  const telepath::BufferPoolSnapshot &snapshot,
+  std::string_view indent
+) {
+  std::cout << "{\n";
+  std::cout << indent << "  \"pool_size\": " << snapshot.pool_size << ",\n";
+  std::cout << indent << "  \"page_size\": " << snapshot.page_size << ",\n";
+  std::cout << indent << "  \"dirty_page_count\": " << snapshot.dirty_page_count << ",\n";
+  std::cout << indent << "  \"flush_queued_count\": " << snapshot.flush_queued_count << ",\n";
+  std::cout << indent << "  \"flush_in_flight_count\": " << snapshot.flush_in_flight_count << ",\n";
+  std::cout << indent << "  \"frames\": [\n";
   for (std::size_t index = 0; index < snapshot.frames.size(); ++index) {
-    PrintJsonFrame(snapshot.frames[index], index + 1 < snapshot.frames.size());
+    PrintJsonFrame(snapshot.frames[index], index + 1 < snapshot.frames.size(), std::string(indent) + "    ");
   }
-  std::cout << "    ]\n";
-  std::cout << "  },\n";
+  std::cout << indent << "  ]\n";
+  std::cout << indent << "}";
+}
+
+void PrintJsonSnapshot(const telepath::BufferPoolSnapshot &snapshot) {
+  std::cout << "  \"snapshot\": ";
+  PrintJsonSnapshotObject(snapshot, "  ");
+  std::cout << ",\n";
+}
+
+void PrintJsonSnapshotSamples(const std::vector<BenchmarkSnapshotSample> &snapshot_samples) {
+  std::cout << "  \"sampled_snapshots\": [\n";
+  for (std::size_t index = 0; index < snapshot_samples.size(); ++index) {
+    const BenchmarkSnapshotSample &sample = snapshot_samples[index];
+    std::cout << "    {\n";
+    std::cout << "      \"sample_index\": " << sample.sample_index << ",\n";
+    std::cout << "      \"reason\": \"" << JsonEscape(sample.reason) << "\",\n";
+    std::cout << "      \"thread_index\": " << sample.thread_index << ",\n";
+    std::cout << "      \"operation_index\": " << sample.operation_index << ",\n";
+    std::cout << "      \"snapshot\": ";
+    PrintJsonSnapshotObject(sample.snapshot, "      ");
+    std::cout << "\n    }";
+    if (index + 1 < snapshot_samples.size()) std::cout << ",";
+    std::cout << "\n";
+  }
+  std::cout << "  ],\n";
 }
 
 void PrintJsonAccessEntry(
@@ -688,11 +812,13 @@ void PrintJsonSummary(
   const char *backend_kind,
   const BenchmarkMetrics &metrics,
   const telepath::BufferPoolSnapshot &snapshot,
+  const std::vector<BenchmarkSnapshotSample> &snapshot_samples,
   const std::vector<uint64_t> &block_access_counts
 ) {
   std::cout << "{\n";
   PrintJsonMetrics(options, metadata, backend_kind, metrics);
   PrintJsonSnapshot(snapshot);
+  PrintJsonSnapshotSamples(snapshot_samples);
   PrintJsonAccessProfile(metrics.total_ops, block_access_counts);
   std::cout << "}\n";
 }
@@ -703,6 +829,7 @@ void PrintSummary(
   const char *backend_kind,
   const BenchmarkMetrics &metrics,
   const telepath::BufferPoolSnapshot &snapshot,
+  const std::vector<BenchmarkSnapshotSample> &snapshot_samples,
   const std::vector<uint64_t> &block_access_counts
 ) {
   if (options.output_format == "csv") {
@@ -710,7 +837,7 @@ void PrintSummary(
     return;
   }
   if (options.output_format == "json") {
-    PrintJsonSummary(options, metadata, backend_kind, metrics, snapshot, block_access_counts);
+    PrintJsonSummary(options, metadata, backend_kind, metrics, snapshot, snapshot_samples, block_access_counts);
     return;
   }
   PrintTextSummary(options, metadata, backend_kind, metrics);
@@ -745,13 +872,14 @@ int main(int argc, char **argv) {
   }
 
   std::vector<uint64_t> block_access_counts;
-  const BenchmarkMetrics metrics = RunBenchmark(&manager, telemetry, options, &block_access_counts);
+  std::vector<BenchmarkSnapshotSample> snapshot_samples;
+  const BenchmarkMetrics metrics = RunBenchmark(&manager, telemetry, options, &block_access_counts, &snapshot_samples);
   const telepath::BufferPoolSnapshot snapshot = manager.ExportSnapshot();
   auto export_status = MaybeExportTelemetry(options, metrics, snapshot);
   if (!export_status.ok()) {
     std::cerr << "telemetry export failed: " << export_status.message() << "\n";
     return 1;
   }
-  PrintSummary(options, metadata, ResolveBackendKindName(disk_backend_capabilities), metrics, snapshot, block_access_counts);
+  PrintSummary(options, metadata, ResolveBackendKindName(disk_backend_capabilities), metrics, snapshot, snapshot_samples, block_access_counts);
   return 0;
 }

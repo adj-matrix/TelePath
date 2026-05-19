@@ -47,6 +47,7 @@ struct BenchmarkOptions {
   std::size_t queue_depth{0};
   std::size_t max_open_files{0};
   std::size_t telemetry_shm_capacity{telepath::kDefaultTelemetrySharedMemoryPayloadCapacity};
+  std::size_t snapshot_sample_limit{4};
 };
 
 struct BenchmarkMetadata {
@@ -212,6 +213,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseNonNegativeArg(arg, "--dirty-page-low-watermark", argc, argv, &i, &options.dirty_page_low_watermark)) continue;
     if (TryParseNonNegativeArg(arg, "--queue-depth", argc, argv, &i, &options.queue_depth)) continue;
     if (TryParsePositiveArg(arg, "--telemetry-shm-capacity", argc, argv, &i, &options.telemetry_shm_capacity)) continue;
+    if (TryParseNonNegativeArg(arg, "--snapshot-sample-limit", argc, argv, &i, &options.snapshot_sample_limit)) continue;
     if (!TryParseNonNegativeArg(arg, "--max-open-files", argc, argv, &i, &options.max_open_files)) continue;
   }
   NormalizeBenchmarkOptions(&options);

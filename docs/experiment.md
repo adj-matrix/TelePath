@@ -30,6 +30,8 @@ The benchmark output reports the following paper-facing metrics:
 
 Operation latency measures a benchmark operation from `ReadBuffer()` through optional dirty marking and foreground flush completion.
 
+JSON benchmark output also includes a small `sampled_snapshots` array for Web and paper-demo use. These samples are captured while worker threads still hold pages or while runtime I/O state is observable, so they can show pinned, dirty, queued-flush, or in-flight-flush states that may disappear from the final end-of-run snapshot. The Web frame map exposes both the final snapshot and each captured runtime sample through an explicit selector, so a run can be inspected from more than one observation point.
+
 ## Observation Export
 
 Benchmark runs can export the same point-in-time buffer-pool snapshot through two paths:
@@ -38,6 +40,8 @@ Benchmark runs can export the same point-in-time buffer-pool snapshot through tw
 - `--telemetry-shm-name /telepath_name` publishes the latest compact JSON document into a POSIX shared-memory object.
 
 The shared-memory path is meant for observation-plane prototype validation. It proves that the telemetry snapshot format can cross a process boundary without changing the buffer manager hot path. It is not yet a live event stream or a final real-time monitoring protocol.
+
+The `snapshot` field in benchmark JSON is the final point-in-time state after the run. The `sampled_snapshots` field is a bounded sampling aid for presentation and diagnosis, not a full trace. The Web console keeps these views separate rather than replacing the final snapshot with a single automatically selected sample.
 
 Example:
 

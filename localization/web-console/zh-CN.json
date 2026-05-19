@@ -159,12 +159,18 @@
     "sweep_detail": "{sample_count} 个样本 · 最佳 {throughput} 次/秒"
   },
   "block_map": {
+    "controls": {
+      "snapshot": "快照",
+      "final_snapshot": "最终快照",
+      "sample_template": "采样 {index}：{reason} · T{thread} Op{operation}"
+    },
     "summary": {
       "mode": "采样方式",
       "blocks": "驻留页",
       "pool": "脏页数",
       "focus": "访问画像",
       "point_in_time": "真实快照",
+      "sampled_runtime": "运行中采样",
       "resident_template": "{resident} / {total}",
       "dirty_template": "{dirty} / {total}",
       "dirty_runtime_template": "{dirty} 脏 · {queued} 排队 · {inflight} 写回中"
@@ -201,6 +207,12 @@
       "flush_in_flight": "刷盘中",
       "io_in_flight": "读 I/O 进行中",
       "none": "无"
+    },
+    "reasons": {
+      "after_read": "读后",
+      "after_mark_dirty": "标脏后",
+      "runtime_io": "运行中 I/O",
+      "sampled_runtime": "运行中采样"
     },
     "profile": {
       "none": "无",
