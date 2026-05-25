@@ -71,6 +71,37 @@ def main() -> int:
     parsed_json = server.parse_json_output(json_payload)
     assert len(parsed_json["sampled_snapshots"]) == 1
     assert parsed_json["sampled_snapshots"][0]["reason"] == "after_mark_dirty"
+
+    sweep_request = server.parse_sweep_request(
+        {
+            "workload": "scan_pollution",
+            "replacer": "lru_k",
+            "disk_backend": "posix",
+            "thread_candidates": [1, 2],
+            "flush_all_after_run": True,
+        }
+    )
+    captured_flush_flags = []
+    original_run_benchmark_once = server.run_benchmark_once
+
+    def fake_run_benchmark_once(request, output_format="csv"):
+        assert output_format == "csv"
+        captured_flush_flags.append(request.flush_all_after_run)
+        return {
+            "threads": request.threads,
+            "throughput_ops_per_sec": float(request.threads),
+            "hit_rate": 0.5 + (request.threads * 0.01),
+        }
+
+    try:
+        server.run_benchmark_once = fake_run_benchmark_once
+        sweep_result = server.run_sweep(sweep_request)
+    finally:
+        server.run_benchmark_once = original_run_benchmark_once
+
+    assert captured_flush_flags == [True, True]
+    assert sweep_result["request"]["flush_all_after_run"] is True
+    assert len(sweep_result["samples"]) == 2
     return 0
 
 

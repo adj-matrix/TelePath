@@ -622,6 +622,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
             flush_workers=request.flush_workers,
             flush_submit_batch_size=request.flush_submit_batch_size,
             flush_foreground_burst_limit=request.flush_foreground_burst_limit,
+            flush_all_after_run=request.flush_all_after_run,
             queue_depth=request.queue_depth,
             max_open_files=request.max_open_files,
         )
