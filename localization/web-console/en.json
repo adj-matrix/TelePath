@@ -85,6 +85,7 @@
     "flush_workers": "Flush Workers",
     "flush_submit_batch_size": "Flush Batch Size",
     "flush_foreground_burst_limit": "Foreground Burst Limit",
+    "flush_all_after_run": "Flush All After Run",
     "queue_depth": "Queue Depth",
     "max_open_files": "Max Open Files",
     "thread_candidates": "Thread Candidates",
@@ -228,7 +229,8 @@
     "hotspot": "Hotspot",
     "uniform": "Uniform",
     "sequential_shared": "Sequential Shared",
-    "sequential_disjoint": "Sequential Disjoint"
+    "sequential_disjoint": "Sequential Disjoint",
+    "scan_pollution": "Scan Pollution"
   },
   "backends": {
     "auto": "Auto",

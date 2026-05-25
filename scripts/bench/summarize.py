@@ -119,9 +119,9 @@ def describe_row(row: dict[str, str] | None, value_text: str) -> str:
 def print_table(rows: list[dict[str, str]]) -> None:
     print(
         "| workload | replacer | backend | write % | threads | throughput ops/s | "
-        "hit rate | p95 us | p99 us | disk writes | flush tasks |"
+        "hit rate | p95 us | p99 us | disk writes | flush tasks | final flush us |"
     )
-    print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for row in sorted(rows, key=sort_key):
         print(
             "| "
@@ -135,7 +135,8 @@ def print_table(rows: list[dict[str, str]]) -> None:
             f"{format_latency_us(row, 'operation_latency_p95_ns')} | "
             f"{format_latency_us(row, 'operation_latency_p99_ns')} | "
             f"{format_number(parse_float(row, 'disk_writes'), 0)} | "
-            f"{format_number(parse_float(row, 'flush_tasks_scheduled'), 0)} |"
+            f"{format_number(parse_float(row, 'flush_tasks_scheduled'), 0)} | "
+            f"{format_latency_us(row, 'final_flush_all_latency_ns')} |"
         )
 
 

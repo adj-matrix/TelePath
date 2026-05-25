@@ -29,6 +29,7 @@ WORKLOADS = [
     "uniform",
     "sequential_shared",
     "sequential_disjoint",
+    "scan_pollution",
 ]
 
 REPLACERS = [
@@ -62,6 +63,7 @@ DEFAULTS = {
     "flush_workers": 0,
     "flush_submit_batch_size": 0,
     "flush_foreground_burst_limit": 0,
+    "flush_all_after_run": False,
     "queue_depth": 0,
     "max_open_files": 0,
 }
@@ -84,6 +86,7 @@ DEFAULT_SWEEP = {
     "flush_workers": 0,
     "flush_submit_batch_size": 0,
     "flush_foreground_burst_limit": 0,
+    "flush_all_after_run": False,
     "queue_depth": 0,
     "max_open_files": 0,
 }
@@ -119,6 +122,7 @@ class BenchmarkRequest:
     flush_workers: int
     flush_submit_batch_size: int
     flush_foreground_burst_limit: int
+    flush_all_after_run: bool
     queue_depth: int
     max_open_files: int
 
@@ -142,6 +146,7 @@ class SweepRequest:
     flush_workers: int
     flush_submit_batch_size: int
     flush_foreground_burst_limit: int
+    flush_all_after_run: bool
     queue_depth: int
     max_open_files: int
 
@@ -305,6 +310,9 @@ def parse_common_options(payload: dict[str, Any], defaults: dict[str, Any]) -> d
             "flush_foreground_burst_limit",
             defaults["flush_foreground_burst_limit"],
         ),
+        "flush_all_after_run": bool_from_payload(
+            payload, "flush_all_after_run", defaults["flush_all_after_run"]
+        ),
         "queue_depth": non_negative_int_from_payload(
             payload, "queue_depth", defaults["queue_depth"]
         ),
@@ -358,6 +366,7 @@ def parse_benchmark_request(payload: dict[str, Any]) -> BenchmarkRequest:
         flush_workers=options["flush_workers"],
         flush_submit_batch_size=options["flush_submit_batch_size"],
         flush_foreground_burst_limit=options["flush_foreground_burst_limit"],
+        flush_all_after_run=options["flush_all_after_run"],
         queue_depth=options["queue_depth"],
         max_open_files=options["max_open_files"],
     )
@@ -408,6 +417,7 @@ def parse_sweep_request(payload: dict[str, Any]) -> SweepRequest:
         flush_workers=options["flush_workers"],
         flush_submit_batch_size=options["flush_submit_batch_size"],
         flush_foreground_burst_limit=options["flush_foreground_burst_limit"],
+        flush_all_after_run=options["flush_all_after_run"],
         queue_depth=options["queue_depth"],
         max_open_files=options["max_open_files"],
     )
@@ -463,6 +473,7 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "eviction_failures",
         "writes_marked_dirty",
         "foreground_flushes_requested",
+        "final_flush_all_latency_ns",
         "operation_latency_min_ns",
         "operation_latency_p50_ns",
         "operation_latency_p95_ns",
@@ -548,6 +559,8 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         str(request.flush_submit_batch_size),
         "--flush-foreground-burst-limit",
         str(request.flush_foreground_burst_limit),
+        "--flush-all-after-run",
+        "true" if request.flush_all_after_run else "false",
         "--queue-depth",
         str(request.queue_depth),
         "--max-open-files",

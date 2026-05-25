@@ -6,11 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../lib/cmake.sh"
 
 TELEPATH_ROOT_DIR="$(telepath_root_dir)"
-BUILD_DIR="$(telepath_build_dir_for_preset debug)"
+BENCHMARK_PRESET="${BENCHMARK_PRESET:-debug}"
+BUILD_DIR="$(telepath_build_dir_for_preset "${BENCHMARK_PRESET}")"
 BENCH="${BUILD_DIR}/test/telepath_benchmark"
 
 THREADS="${THREADS:-1 2 4 8}"
-WORKLOADS="${WORKLOADS:-hotspot uniform sequential_shared sequential_disjoint}"
+WORKLOADS="${WORKLOADS:-hotspot uniform sequential_shared sequential_disjoint scan_pollution}"
 REPLACERS="${REPLACERS:-lru_k clock lru two_queue}"
 DISK_BACKENDS="${DISK_BACKENDS:-posix}"
 WRITE_PERCENTS="${WRITE_PERCENTS:-0 25}"
@@ -26,10 +27,11 @@ DIRTY_PAGE_LOW_WATERMARK="${DIRTY_PAGE_LOW_WATERMARK:-0}"
 FLUSH_WORKERS="${FLUSH_WORKERS:-0}"
 FLUSH_SUBMIT_BATCH_SIZE="${FLUSH_SUBMIT_BATCH_SIZE:-0}"
 FLUSH_FOREGROUND_BURST_LIMIT="${FLUSH_FOREGROUND_BURST_LIMIT:-0}"
+FLUSH_ALL_AFTER_RUN="${FLUSH_ALL_AFTER_RUN:-false}"
 QUEUE_DEPTH="${QUEUE_DEPTH:-0}"
 MAX_OPEN_FILES="${MAX_OPEN_FILES:-0}"
 
-telepath_configure_and_build debug >&2
+telepath_configure_and_build "${BENCHMARK_PRESET}" >&2
 
 first=1
 for workload in ${WORKLOADS}; do
@@ -56,6 +58,7 @@ for workload in ${WORKLOADS}; do
             --flush-workers "${FLUSH_WORKERS}" \
             --flush-submit-batch-size "${FLUSH_SUBMIT_BATCH_SIZE}" \
             --flush-foreground-burst-limit "${FLUSH_FOREGROUND_BURST_LIMIT}" \
+            --flush-all-after-run "${FLUSH_ALL_AFTER_RUN}" \
             --queue-depth "${QUEUE_DEPTH}" \
             --max-open-files "${MAX_OPEN_FILES}")"
 

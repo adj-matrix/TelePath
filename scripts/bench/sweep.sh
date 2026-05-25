@@ -22,6 +22,7 @@ DIRTY_PAGE_LOW_WATERMARK="${DIRTY_PAGE_LOW_WATERMARK:-0}"
 FLUSH_WORKERS="${FLUSH_WORKERS:-0}"
 FLUSH_SUBMIT_BATCH_SIZE="${FLUSH_SUBMIT_BATCH_SIZE:-0}"
 FLUSH_FOREGROUND_BURST_LIMIT="${FLUSH_FOREGROUND_BURST_LIMIT:-0}"
+FLUSH_ALL_AFTER_RUN="${FLUSH_ALL_AFTER_RUN:-false}"
 QUEUE_DEPTH="${QUEUE_DEPTH:-0}"
 MAX_OPEN_FILES="${MAX_OPEN_FILES:-0}"
 
@@ -46,6 +47,7 @@ for t in ${THREADS}; do
     --flush-workers "${FLUSH_WORKERS}" \
     --flush-submit-batch-size "${FLUSH_SUBMIT_BATCH_SIZE}" \
     --flush-foreground-burst-limit "${FLUSH_FOREGROUND_BURST_LIMIT}" \
+    --flush-all-after-run "${FLUSH_ALL_AFTER_RUN}" \
     --queue-depth "${QUEUE_DEPTH}" \
     --max-open-files "${MAX_OPEN_FILES}")"
 

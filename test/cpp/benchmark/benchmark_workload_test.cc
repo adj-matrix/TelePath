@@ -58,6 +58,25 @@ void ExpectHotspotUsesHotsetWhenConfiguredForOneHundredPercent() {
   }
 }
 
+void ExpectScanPollutionWarmsHotsetThenScansColdRange() {
+  telepath::benchmark_support::BenchmarkOptions options;
+  options.workload = "scan";
+  options.block_count = 16;
+  options.pool_size = 4;
+  options.hotset_size = 3;
+  options.thread_count = 2;
+  std::mt19937_64 rng(29);
+
+  assert(telepath::benchmark_support::NormalizeWorkloadName(options.workload) == "scan_pollution");
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 0, 0, options) == 0);
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 1, 0, options) == 1);
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 2, 0, options) == 2);
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 3, 0, options) == 0);
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 4, 0, options) == 1);
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 5, 0, options) == 2);
+  assert(telepath::benchmark_support::ChooseBlock(&rng, 6, 0, options) >= options.hotset_size);
+}
+
 void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
   const char *argv[] = {
     "telepath_benchmark",
@@ -67,6 +86,8 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
     "100",
     "--flush-every-ops",
     "8",
+    "--flush-all-after-run",
+    "true",
     "--background-cleaner",
     "true",
     "--replacer",
@@ -86,6 +107,7 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
   assert(options.workload == "hotspot");
   assert(options.write_percent == 100);
   assert(options.flush_every_ops == 8);
+  assert(options.flush_all_after_run);
   assert(options.enable_background_cleaner);
   assert(options.replacer == "two_queue");
   assert(options.disk_backend == "io_uring");
@@ -151,6 +173,7 @@ int main() {
   ExpectSequentialSharedUsesSameBlockAcrossThreads();
   ExpectSequentialDisjointUsesDistinctBlocks();
   ExpectHotspotUsesHotsetWhenConfiguredForOneHundredPercent();
+  ExpectScanPollutionWarmsHotsetThenScansColdRange();
   ExpectDirtyAliasNormalizesToHotspotWithWrites();
   ExpectInvalidExperimentKnobsFallBackToDefaults();
   ExpectWriteOperationHonorsZeroAndHundredPercent();

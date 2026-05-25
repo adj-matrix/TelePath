@@ -54,6 +54,9 @@ struct BenchmarkMetrics {
   uint64_t eviction_failures{0};
   uint64_t writes_marked_dirty{0};
   uint64_t foreground_flushes_requested{0};
+  bool final_flush_all_requested{false};
+  bool final_flush_all_ok{true};
+  uint64_t final_flush_all_latency_ns{0};
   LatencySummary operation_latency;
 };
 
@@ -347,6 +350,9 @@ auto BuildBenchmarkMetrics(
   double seconds,
   uint64_t writes_marked_dirty,
   uint64_t foreground_flushes_requested,
+  bool final_flush_all_requested,
+  bool final_flush_all_ok,
+  uint64_t final_flush_all_latency_ns,
   const LatencySummary &operation_latency
 ) -> BenchmarkMetrics {
   const std::size_t total_ops = options.thread_count * options.ops_per_thread;
@@ -374,6 +380,9 @@ auto BuildBenchmarkMetrics(
     after.eviction_failures - before.eviction_failures,
     writes_marked_dirty,
     foreground_flushes_requested,
+    final_flush_all_requested,
+    final_flush_all_ok,
+    final_flush_all_latency_ns,
     operation_latency,
   };
 }
@@ -426,6 +435,16 @@ auto RunBenchmark(
   if (runtime_sampler.joinable()) runtime_sampler.join();
   *snapshot_samples = snapshot_sampler.samples();
 
+  bool final_flush_all_ok = true;
+  uint64_t final_flush_all_latency_ns = 0;
+  if (options.flush_all_after_run) {
+    const auto flush_start = std::chrono::steady_clock::now();
+    final_flush_all_ok = manager->FlushAll().ok();
+    const auto flush_end = std::chrono::steady_clock::now();
+    final_flush_all_latency_ns = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(flush_end - flush_start).count());
+  }
+
   const auto end = std::chrono::steady_clock::now();
   const telepath::TelemetrySnapshot after = telemetry->Snapshot();
   const double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
@@ -442,6 +461,9 @@ auto RunBenchmark(
     seconds,
     writes_marked_dirty.load(std::memory_order_relaxed),
     foreground_flushes_requested.load(std::memory_order_relaxed),
+    options.flush_all_after_run,
+    final_flush_all_ok,
+    final_flush_all_latency_ns,
     SummarizeLatencySamples(std::move(latency_samples)));
 }
 
@@ -551,6 +573,7 @@ void PrintTextSummary(
   std::cout << "flush_workers=" << options.flush_worker_count << "\n";
   std::cout << "flush_submit_batch_size=" << options.flush_submit_batch_size << "\n";
   std::cout << "flush_foreground_burst_limit=" << options.flush_foreground_burst_limit << "\n";
+  std::cout << "flush_all_after_run=" << (options.flush_all_after_run ? "true" : "false") << "\n";
   std::cout << "background_cleaner=" << (options.enable_background_cleaner ? "true" : "false") << "\n";
   std::cout << "dirty_page_high_watermark=" << options.dirty_page_high_watermark << "\n";
   std::cout << "dirty_page_low_watermark=" << options.dirty_page_low_watermark << "\n";
@@ -587,6 +610,9 @@ void PrintTextSummary(
   std::cout << "eviction_failures=" << metrics.eviction_failures << "\n";
   std::cout << "writes_marked_dirty=" << metrics.writes_marked_dirty << "\n";
   std::cout << "foreground_flushes_requested=" << metrics.foreground_flushes_requested << "\n";
+  std::cout << "final_flush_all_requested=" << (metrics.final_flush_all_requested ? "true" : "false") << "\n";
+  std::cout << "final_flush_all_ok=" << (metrics.final_flush_all_ok ? "true" : "false") << "\n";
+  std::cout << "final_flush_all_latency_ns=" << metrics.final_flush_all_latency_ns << "\n";
 }
 
 void PrintCsvSummary(
@@ -599,7 +625,7 @@ void PrintCsvSummary(
       << "workload,disk_backend,commit_sha,runner_os,runner_arch,threads,pool_size,"
          "block_count,ops_per_thread,hotset_size,hot_access_percent,replacer,"
          "requested_disk_backend,write_percent,flush_every_ops,flush_workers,"
-         "flush_submit_batch_size,flush_foreground_burst_limit,background_cleaner,"
+         "flush_submit_batch_size,flush_foreground_burst_limit,flush_all_after_run,background_cleaner,"
          "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
          "telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
          "seconds,throughput_ops_per_sec,operation_latency_min_ns,"
@@ -608,7 +634,8 @@ void PrintCsvSummary(
          "disk_reads,disk_writes,evictions,dirty_flushes,flush_tasks_scheduled,"
          "flush_tasks_completed,flush_failures,cleaner_flushes_scheduled,"
          "cleaner_flushes_finished,cleaner_flushes_skipped,eviction_failures,"
-         "writes_marked_dirty,foreground_flushes_requested\n";
+         "writes_marked_dirty,foreground_flushes_requested,final_flush_all_requested,"
+         "final_flush_all_ok,final_flush_all_latency_ns\n";
   std::cout << NormalizeWorkloadName(options.workload) << "," << backend_kind
             << "," << metadata.commit_sha << "," << metadata.runner_os << ","
             << metadata.runner_arch << "," << options.thread_count << ","
@@ -619,6 +646,7 @@ void PrintCsvSummary(
             << options.flush_every_ops << "," << options.flush_worker_count << ","
             << options.flush_submit_batch_size << ","
             << options.flush_foreground_burst_limit << ","
+            << (options.flush_all_after_run ? "true" : "false") << ","
             << (options.enable_background_cleaner ? "true" : "false") << ","
             << options.dirty_page_high_watermark << ","
             << options.dirty_page_low_watermark << "," << options.queue_depth << ","
@@ -646,7 +674,10 @@ void PrintCsvSummary(
             << metrics.cleaner_flushes_skipped << ","
             << metrics.eviction_failures << ","
             << metrics.writes_marked_dirty << ","
-            << metrics.foreground_flushes_requested << "\n";
+            << metrics.foreground_flushes_requested << ","
+            << (metrics.final_flush_all_requested ? "true" : "false") << ","
+            << (metrics.final_flush_all_ok ? "true" : "false") << ","
+            << metrics.final_flush_all_latency_ns << "\n";
 }
 
 void PrintJsonMetrics(
@@ -674,6 +705,7 @@ void PrintJsonMetrics(
   std::cout << "    \"flush_workers\": " << options.flush_worker_count << ",\n";
   std::cout << "    \"flush_submit_batch_size\": " << options.flush_submit_batch_size << ",\n";
   std::cout << "    \"flush_foreground_burst_limit\": " << options.flush_foreground_burst_limit << ",\n";
+  std::cout << "    \"flush_all_after_run\": " << (options.flush_all_after_run ? "true" : "false") << ",\n";
   std::cout << "    \"background_cleaner\": " << (options.enable_background_cleaner ? "true" : "false") << ",\n";
   std::cout << "    \"dirty_page_high_watermark\": " << options.dirty_page_high_watermark << ",\n";
   std::cout << "    \"dirty_page_low_watermark\": " << options.dirty_page_low_watermark << ",\n";
@@ -708,7 +740,10 @@ void PrintJsonMetrics(
   std::cout << "    \"cleaner_flushes_skipped\": " << metrics.cleaner_flushes_skipped << ",\n";
   std::cout << "    \"eviction_failures\": " << metrics.eviction_failures << ",\n";
   std::cout << "    \"writes_marked_dirty\": " << metrics.writes_marked_dirty << ",\n";
-  std::cout << "    \"foreground_flushes_requested\": " << metrics.foreground_flushes_requested << "\n";
+  std::cout << "    \"foreground_flushes_requested\": " << metrics.foreground_flushes_requested << ",\n";
+  std::cout << "    \"final_flush_all_requested\": " << (metrics.final_flush_all_requested ? "true" : "false") << ",\n";
+  std::cout << "    \"final_flush_all_ok\": " << (metrics.final_flush_all_ok ? "true" : "false") << ",\n";
+  std::cout << "    \"final_flush_all_latency_ns\": " << metrics.final_flush_all_latency_ns << "\n";
   std::cout << "  },\n";
 }
 

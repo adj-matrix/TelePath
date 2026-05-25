@@ -32,6 +32,7 @@ auto BuildBenchmarkCommand(const std::filesystem::path &benchmark_bin) -> Benchm
                     " --hotset-size 8 --hot-access-percent 80"
                     " --replacer clock --disk-backend posix"
                     " --write-percent 25 --flush-every-ops 6"
+                    " --flush-all-after-run true"
                     " --background-cleaner true --dirty-page-high-watermark 12"
                     " --dirty-page-low-watermark 4 --flush-workers 2"
                     " --flush-submit-batch-size 2 --max-open-files 8"
@@ -123,8 +124,12 @@ int main(int /*argc*/, char **argv) {
   assert(output.find("\"replacer\": \"clock\"") != std::string::npos);
   assert(output.find("\"requested_disk_backend\": \"posix\"") != std::string::npos);
   assert(output.find("\"write_percent\": 25") != std::string::npos);
+  assert(output.find("\"flush_all_after_run\": true") != std::string::npos);
   assert(output.find("\"writes_marked_dirty\"") != std::string::npos);
   assert(output.find("\"foreground_flushes_requested\"") != std::string::npos);
+  assert(output.find("\"final_flush_all_requested\": true") != std::string::npos);
+  assert(output.find("\"final_flush_all_ok\": true") != std::string::npos);
+  assert(output.find("\"final_flush_all_latency_ns\"") != std::string::npos);
   assert(output.find("\"operation_latency_avg_ns\"") != std::string::npos);
   assert(output.find("\"telemetry_export_enabled\": true") != std::string::npos);
   assert(output.find("\"telemetry_shm_enabled\": true") != std::string::npos);

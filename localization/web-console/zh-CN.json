@@ -85,6 +85,7 @@
     "flush_workers": "刷盘 Worker 数",
     "flush_submit_batch_size": "刷盘批量大小",
     "flush_foreground_burst_limit": "前台突发上限",
+    "flush_all_after_run": "结束后全量刷盘",
     "queue_depth": "队列深度",
     "max_open_files": "最大打开文件数",
     "thread_candidates": "线程候选集",
@@ -228,7 +229,8 @@
     "hotspot": "热点负载",
     "uniform": "均匀负载",
     "sequential_shared": "顺序共享",
-    "sequential_disjoint": "顺序分离"
+    "sequential_disjoint": "顺序分离",
+    "scan_pollution": "扫描污染"
   },
   "backends": {
     "auto": "自动",

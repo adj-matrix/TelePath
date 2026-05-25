@@ -69,6 +69,8 @@
     }
     document.getElementById("background_cleaner").checked =
       config.defaults.background_cleaner;
+    document.getElementById("flush_all_after_run").checked =
+      config.defaults.flush_all_after_run;
 
     document.getElementById("thread_candidates").value =
       config.sweep_defaults.thread_candidates.join(",");
@@ -78,6 +80,8 @@
     }
     document.getElementById("sweep_background_cleaner").checked =
       config.sweep_defaults.background_cleaner;
+    document.getElementById("sweep_flush_all_after_run").checked =
+      config.sweep_defaults.flush_all_after_run;
   }
 
   function fillSingleFormFromRequest(request) {
@@ -89,6 +93,8 @@
     }
     document.getElementById("background_cleaner").checked =
       request.background_cleaner;
+    document.getElementById("flush_all_after_run").checked =
+      request.flush_all_after_run;
   }
 
   function fillSweepFormFromRequest(request) {
@@ -102,6 +108,8 @@
     }
     document.getElementById("sweep_background_cleaner").checked =
       request.background_cleaner;
+    document.getElementById("sweep_flush_all_after_run").checked =
+      request.flush_all_after_run;
   }
 
   function setHealth(status, ready) {

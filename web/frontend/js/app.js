@@ -40,6 +40,7 @@
       replacer: elements.replacerSelect.value,
       disk_backend: elements.diskBackendSelect.value,
       background_cleaner: document.getElementById("background_cleaner").checked,
+      flush_all_after_run: document.getElementById("flush_all_after_run").checked,
     };
     for (const field of singleFields) {
       payload[field] = Number(document.getElementById(field).value);
@@ -83,6 +84,7 @@
       disk_backend: elements.sweepDiskBackendSelect.value,
       thread_candidates: document.getElementById("thread_candidates").value,
       background_cleaner: document.getElementById("sweep_background_cleaner").checked,
+      flush_all_after_run: document.getElementById("sweep_flush_all_after_run").checked,
     };
     for (const field of sweepFields) {
       payload[field] = Number(document.getElementById(`sweep_${field}`).value);

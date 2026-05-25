@@ -19,6 +19,7 @@ namespace telepath::benchmark_support {
 inline auto NormalizeWorkloadName(const std::string &workload) -> std::string {
   if (workload == "sequential") return "sequential_disjoint";
   if (workload == "dirty") return "hotspot";
+  if (workload == "scan") return "scan_pollution";
   return workload;
 }
 
@@ -41,6 +42,7 @@ struct BenchmarkOptions {
   std::size_t flush_worker_count{0};
   std::size_t flush_submit_batch_size{0};
   std::size_t flush_foreground_burst_limit{0};
+  bool flush_all_after_run{false};
   bool enable_background_cleaner{false};
   std::size_t dirty_page_high_watermark{0};
   std::size_t dirty_page_low_watermark{0};
@@ -208,6 +210,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseNonNegativeArg(arg, "--flush-workers", argc, argv, &i, &options.flush_worker_count)) continue;
     if (TryParseNonNegativeArg(arg, "--flush-submit-batch-size", argc, argv, &i, &options.flush_submit_batch_size)) continue;
     if (TryParseNonNegativeArg(arg, "--flush-foreground-burst-limit", argc, argv, &i, &options.flush_foreground_burst_limit)) continue;
+    if (TryParseBoolArg(arg, "--flush-all-after-run", argc, argv, &i, &options.flush_all_after_run)) continue;
     if (TryParseBoolArg(arg, "--background-cleaner", argc, argv, &i, &options.enable_background_cleaner)) continue;
     if (TryParseNonNegativeArg(arg, "--dirty-page-high-watermark", argc, argv, &i, &options.dirty_page_high_watermark)) continue;
     if (TryParseNonNegativeArg(arg, "--dirty-page-low-watermark", argc, argv, &i, &options.dirty_page_low_watermark)) continue;
@@ -298,6 +301,28 @@ inline auto ChooseBlock(
   if (workload == "sequential_shared") return static_cast<BlockId>(op_index % options.block_count);
 
   if (workload == "sequential_disjoint") return static_cast<BlockId>(((op_index * options.thread_count) + thread_index) % options.block_count);
+
+  if (workload == "scan_pollution") {
+    const std::size_t hotset_size = std::max<std::size_t>(1, std::min(options.hotset_size, options.block_count));
+    const std::size_t cold_start = hotset_size;
+    const std::size_t cold_count = options.block_count > cold_start ? options.block_count - cold_start : 0;
+    if (cold_count == 0) return static_cast<BlockId>(op_index % hotset_size);
+
+    const std::size_t warm_hot_ops = hotset_size * 2;
+    const std::size_t scan_ops = std::max(cold_count, options.pool_size);
+    const std::size_t revisit_hot_ops = hotset_size;
+    const std::size_t cycle_length = warm_hot_ops + scan_ops + revisit_hot_ops;
+    const std::size_t phase = op_index % cycle_length;
+
+    if (phase < warm_hot_ops) return static_cast<BlockId>(phase % hotset_size);
+    if (phase >= warm_hot_ops + scan_ops) {
+      return static_cast<BlockId>((phase - warm_hot_ops - scan_ops) % hotset_size);
+    }
+
+    const std::size_t scan_phase = phase - warm_hot_ops;
+    const std::size_t thread_offset = thread_index * ((cold_count / std::max<std::size_t>(1, options.thread_count)) + 1);
+    return static_cast<BlockId>(cold_start + ((scan_phase + thread_offset) % cold_count));
+  }
 
   std::uniform_int_distribution<std::size_t> percent_dist(0, 99);
   const bool choose_hot = percent_dist(*rng) < options.hot_access_percent;

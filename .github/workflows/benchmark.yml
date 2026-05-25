@@ -21,8 +21,8 @@ jobs:
       - name: Install build dependencies
         run: sudo ./support/install_build_deps.sh
 
-      - name: Build debug benchmark target
-        run: ./scripts/build/debug.sh
+      - name: Build io_uring benchmark target
+        run: ./scripts/build/io_uring_debug.sh
 
       - name: Run benchmark sweeps
         shell: bash
@@ -30,15 +30,19 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/benchmarks
 
-          for workload in hotspot uniform sequential_shared sequential_disjoint; do
-            WORKLOAD="${workload}" \
-            THREADS="1 2 4" \
-            POOL_SIZE="256" \
-            BLOCK_COUNT="1024" \
-            OPS_PER_THREAD="10000" \
-            HOTSET_SIZE="64" \
-            HOT_ACCESS_PERCENT="80" \
-            ./scripts/bench/sweep.sh > "artifacts/benchmarks/${workload}.csv"
+          for backend in posix io_uring; do
+            for workload in hotspot uniform sequential_shared sequential_disjoint scan_pollution; do
+              BENCHMARK_PRESET="io_uring_debug" \
+              WORKLOAD="${workload}" \
+              DISK_BACKEND="${backend}" \
+              THREADS="1 2 4" \
+              POOL_SIZE="256" \
+              BLOCK_COUNT="1024" \
+              OPS_PER_THREAD="10000" \
+              HOTSET_SIZE="64" \
+              HOT_ACCESS_PERCENT="80" \
+              ./scripts/bench/sweep.sh > "artifacts/benchmarks/${backend}-${workload}.csv"
+            done
           done
 
       - name: Publish benchmark summary
