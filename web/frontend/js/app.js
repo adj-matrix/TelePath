@@ -41,6 +41,7 @@
       disk_backend: elements.diskBackendSelect.value,
       background_cleaner: document.getElementById("background_cleaner").checked,
       flush_all_after_run: document.getElementById("flush_all_after_run").checked,
+      sync_on_write: document.getElementById("sync_on_write").checked,
     };
     for (const field of singleFields) {
       payload[field] = Number(document.getElementById(field).value);
@@ -85,6 +86,7 @@
       thread_candidates: document.getElementById("thread_candidates").value,
       background_cleaner: document.getElementById("sweep_background_cleaner").checked,
       flush_all_after_run: document.getElementById("sweep_flush_all_after_run").checked,
+      sync_on_write: document.getElementById("sweep_sync_on_write").checked,
     };
     for (const field of sweepFields) {
       payload[field] = Number(document.getElementById(`sweep_${field}`).value);

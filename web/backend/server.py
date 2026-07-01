@@ -66,6 +66,7 @@ DEFAULTS = {
     "flush_all_after_run": False,
     "queue_depth": 0,
     "max_open_files": 0,
+    "sync_on_write": True,
 }
 
 DEFAULT_SWEEP = {
@@ -89,6 +90,7 @@ DEFAULT_SWEEP = {
     "flush_all_after_run": False,
     "queue_depth": 0,
     "max_open_files": 0,
+    "sync_on_write": True,
 }
 
 SUPPORTED_LANGUAGES = [
@@ -125,6 +127,7 @@ class BenchmarkRequest:
     flush_all_after_run: bool
     queue_depth: int
     max_open_files: int
+    sync_on_write: bool
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,7 @@ class SweepRequest:
     flush_all_after_run: bool
     queue_depth: int
     max_open_files: int
+    sync_on_write: bool
 
 
 def now_epoch_ms() -> int:
@@ -319,6 +323,9 @@ def parse_common_options(payload: dict[str, Any], defaults: dict[str, Any]) -> d
         "max_open_files": non_negative_int_from_payload(
             payload, "max_open_files", defaults["max_open_files"]
         ),
+        "sync_on_write": bool_from_payload(
+            payload, "sync_on_write", defaults["sync_on_write"]
+        ),
     }
 
 
@@ -369,6 +376,7 @@ def parse_benchmark_request(payload: dict[str, Any]) -> BenchmarkRequest:
         flush_all_after_run=options["flush_all_after_run"],
         queue_depth=options["queue_depth"],
         max_open_files=options["max_open_files"],
+        sync_on_write=options["sync_on_write"],
     )
 
 
@@ -420,6 +428,7 @@ def parse_sweep_request(payload: dict[str, Any]) -> SweepRequest:
         flush_all_after_run=options["flush_all_after_run"],
         queue_depth=options["queue_depth"],
         max_open_files=options["max_open_files"],
+        sync_on_write=options["sync_on_write"],
     )
 
 
@@ -563,6 +572,8 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         "true" if request.flush_all_after_run else "false",
         "--queue-depth",
         str(request.queue_depth),
+        "--sync-on-write",
+        "true" if request.sync_on_write else "false",
         "--max-open-files",
         str(request.max_open_files),
     ]
@@ -625,6 +636,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
             flush_all_after_run=request.flush_all_after_run,
             queue_depth=request.queue_depth,
             max_open_files=request.max_open_files,
+            sync_on_write=request.sync_on_write,
         )
         samples.append(run_benchmark_once(sample_request, "csv"))
 

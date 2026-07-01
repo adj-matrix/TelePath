@@ -231,6 +231,7 @@ auto BuildDiskBackendOptions(const BenchmarkOptions &options) -> telepath::DiskB
   disk_backend_options.allow_fallback = true;
   disk_backend_options.queue_depth = options.queue_depth;
   disk_backend_options.max_open_files = options.max_open_files;
+  disk_backend_options.sync_on_write = options.sync_on_write;
   return disk_backend_options;
 }
 
@@ -579,6 +580,7 @@ void PrintTextSummary(
   std::cout << "dirty_page_low_watermark=" << options.dirty_page_low_watermark << "\n";
   std::cout << "queue_depth=" << options.queue_depth << "\n";
   std::cout << "max_open_files=" << options.max_open_files << "\n";
+  std::cout << "sync_on_write=" << (options.sync_on_write ? "true" : "false") << "\n";
   std::cout << "snapshot_sample_limit=" << options.snapshot_sample_limit << "\n";
   if (!options.telemetry_export_path.empty()) std::cout << "telemetry_export_path=" << options.telemetry_export_path << "\n";
   if (!options.telemetry_shm_name.empty()) {
@@ -627,7 +629,7 @@ void PrintCsvSummary(
          "requested_disk_backend,write_percent,flush_every_ops,flush_workers,"
          "flush_submit_batch_size,flush_foreground_burst_limit,flush_all_after_run,background_cleaner,"
          "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
-         "telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
+         "sync_on_write,telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
          "seconds,throughput_ops_per_sec,operation_latency_min_ns,"
          "operation_latency_avg_ns,operation_latency_p50_ns,operation_latency_p95_ns,"
          "operation_latency_p99_ns,operation_latency_max_ns,buffer_hits,buffer_misses,hit_rate,"
@@ -651,6 +653,7 @@ void PrintCsvSummary(
             << options.dirty_page_high_watermark << ","
             << options.dirty_page_low_watermark << "," << options.queue_depth << ","
             << options.max_open_files << ","
+            << (options.sync_on_write ? "true" : "false") << ","
             << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ","
             << (options.telemetry_shm_name.empty() ? "false" : "true") << ","
             << options.telemetry_shm_name << ","
@@ -711,6 +714,7 @@ void PrintJsonMetrics(
   std::cout << "    \"dirty_page_low_watermark\": " << options.dirty_page_low_watermark << ",\n";
   std::cout << "    \"queue_depth\": " << options.queue_depth << ",\n";
   std::cout << "    \"max_open_files\": " << options.max_open_files << ",\n";
+  std::cout << "    \"sync_on_write\": " << (options.sync_on_write ? "true" : "false") << ",\n";
   std::cout << "    \"snapshot_sample_limit\": " << options.snapshot_sample_limit << ",\n";
   std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
   std::cout << "    \"telemetry_shm_enabled\": " << (options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";

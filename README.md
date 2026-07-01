@@ -7,10 +7,6 @@
 </p>
 
 <p align="center">
-  <strong>!!!🤖WIP Working in Progress🤖!!! In order to meet academic integrity requirements, I am sorry to not accept any Issue and Pull Request (PR) until July.</strong>
-</p>
-
-<p align="center">
   English | <a href="./localization/README.zh-CN.md">简体中文</a>
 </p>
 

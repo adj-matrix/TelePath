@@ -29,6 +29,7 @@ class BufferManagerMissCoordinator;
 class BufferManagerFlushScheduler;
 class BufferManagerCleanerController;
 class BufferManagerPageTable;
+class BufferManagerTestPeer;
 struct BufferManagerMissState;
 struct BufferManagerFlushTask;
 
@@ -102,6 +103,7 @@ class BufferManager {
 
  private:
   friend class BufferHandle;
+  friend class BufferManagerTestPeer;
 
   // buffer_manager_read.cc
   auto TryReadResidentHit(const BufferTag &tag) -> std::optional<BufferHandle>;

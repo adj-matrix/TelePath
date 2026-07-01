@@ -24,17 +24,37 @@ auto BufferManager::TryReadResidentHit(const BufferTag &tag) -> std::optional<Bu
 }
 
 auto BufferManager::AwaitJoinedMiss(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state) -> Result<BufferHandle> {
-  Result<FrameId> wait_result = miss_coordinator_->Wait(state);
-  if (!wait_result.ok()) return wait_result.status();
+  auto joined_state = state;
+  while (true) {
+    Result<FrameId> wait_result = miss_coordinator_->Wait(joined_state);
+    if (!wait_result.ok()) return wait_result.status();
 
-  FrameId frame_id = wait_result.value();
-  Status wait_status = WaitForFrameReady(frame_id);
-  if (!wait_status.ok()) return wait_status;
+    FrameId frame_id = wait_result.value();
+    Status wait_status = WaitForFrameReady(frame_id);
+    if (!wait_status.ok()) return wait_status;
 
-  auto handle = TryPinResidentFrame(frame_id, tag);
-  if (!handle.has_value()) return Status::NotFound("buffer not resident after load completion");
-  observer_->RecordJoinedMissHit(tag);
-  return std::move(handle.value());
+    auto handle = TryPinResidentFrame(frame_id, tag);
+    if (handle.has_value()) {
+      observer_->RecordJoinedMissHit(tag);
+      return std::move(handle.value());
+    }
+
+    auto resident_hit = TryReadResidentHit(tag);
+    if (resident_hit.has_value()) return std::move(resident_hit.value());
+
+    auto registration = miss_coordinator_->RegisterOrJoin(tag);
+    if (!registration.is_owner) {
+      joined_state = registration.state;
+      continue;
+    }
+
+    auto owner_hit = TryReadResidentHit(tag);
+    if (owner_hit.has_value()) {
+      miss_coordinator_->Complete(tag, registration.state, Status::Ok(), owner_hit->frame_id());
+      return std::move(owner_hit.value());
+    }
+    return LoadMissOwnerBuffer(tag, registration.state);
+  }
 }
 
 auto BufferManager::LoadMissOwnerBuffer(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state) -> Result<BufferHandle> {

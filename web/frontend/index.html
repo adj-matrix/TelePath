@@ -186,6 +186,10 @@
               <span data-i18n="form.max_open_files">Max Open Files</span>
               <input id="max_open_files" name="max_open_files" type="number" min="0" />
             </label>
+            <label class="checkbox-label">
+              <input id="sync_on_write" name="sync_on_write" type="checkbox" />
+              <span data-i18n="form.sync_on_write">Sync On Write</span>
+            </label>
 
             <button id="runButton" type="submit">Run Benchmark</button>
           </form>
@@ -441,6 +445,10 @@
                 type="number"
                 min="0"
               />
+            </label>
+            <label class="checkbox-label">
+              <input id="sweep_sync_on_write" name="sweep_sync_on_write" type="checkbox" />
+              <span data-i18n="form.sync_on_write">Sync On Write</span>
             </label>
             <button id="sweepButton" type="submit">Run Sweep</button>
           </form>

@@ -40,6 +40,7 @@ void AssertDefaultOptions() {
   assert(defaults.ResolvePageTableStripeCount() <= defaults.pool_size);
   assert(defaults.disk_backend.ResolveQueueDepth() == 32);
   assert(defaults.disk_backend.ResolveMaxOpenFiles() == 64);
+  assert(defaults.disk_backend.sync_on_write);
   assert(defaults.flush_worker_count == 0);
   assert(defaults.flush_submit_batch_size == 0);
   assert(defaults.flush_foreground_burst_limit == 0);
@@ -49,7 +50,7 @@ void AssertDefaultOptions() {
 }
 
 auto BuildCustomOptions() -> telepath::BufferManagerOptions {
-  telepath::BufferManagerOptions custom{32, 4096, 7, {telepath::DiskBackendKind::kPosix, true, 8, 3}};
+  telepath::BufferManagerOptions custom{32, 4096, 7, {telepath::DiskBackendKind::kPosix, true, 8, 3, false}};
   custom.flush_worker_count = 3;
   custom.flush_submit_batch_size = 2;
   custom.flush_foreground_burst_limit = 5;
@@ -63,6 +64,7 @@ void AssertCustomOptions(const telepath::BufferManagerOptions &custom) {
   assert(custom.ResolvePageTableStripeCount() == 7);
   assert(custom.disk_backend.ResolveQueueDepth() == 8);
   assert(custom.disk_backend.ResolveMaxOpenFiles() == 3);
+  assert(!custom.disk_backend.sync_on_write);
   assert(custom.flush_worker_count == 3);
   assert(custom.flush_submit_batch_size == 2);
   assert(custom.flush_foreground_burst_limit == 5);
@@ -83,6 +85,7 @@ void AssertManagerAppliesResolvedOptions(const std::filesystem::path &root, cons
   assert(manager.page_size() == 4096);
   assert(manager.options().disk_backend.ResolveQueueDepth() == 8);
   assert(manager.options().disk_backend.ResolveMaxOpenFiles() == 3);
+  assert(!manager.options().disk_backend.sync_on_write);
   assert(manager.options().flush_worker_count == 3);
   assert(manager.options().flush_submit_batch_size == 1);
   assert(manager.options().flush_foreground_burst_limit == 5);

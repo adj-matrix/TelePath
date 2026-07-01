@@ -71,6 +71,8 @@
       config.defaults.background_cleaner;
     document.getElementById("flush_all_after_run").checked =
       config.defaults.flush_all_after_run;
+    document.getElementById("sync_on_write").checked =
+      config.defaults.sync_on_write;
 
     document.getElementById("thread_candidates").value =
       config.sweep_defaults.thread_candidates.join(",");
@@ -82,6 +84,8 @@
       config.sweep_defaults.background_cleaner;
     document.getElementById("sweep_flush_all_after_run").checked =
       config.sweep_defaults.flush_all_after_run;
+    document.getElementById("sweep_sync_on_write").checked =
+      config.sweep_defaults.sync_on_write;
   }
 
   function fillSingleFormFromRequest(request) {
@@ -95,6 +99,8 @@
       request.background_cleaner;
     document.getElementById("flush_all_after_run").checked =
       request.flush_all_after_run;
+    document.getElementById("sync_on_write").checked =
+      request.sync_on_write;
   }
 
   function fillSweepFormFromRequest(request) {
@@ -110,6 +116,8 @@
       request.background_cleaner;
     document.getElementById("sweep_flush_all_after_run").checked =
       request.flush_all_after_run;
+    document.getElementById("sweep_sync_on_write").checked =
+      request.sync_on_write;
   }
 
   function setHealth(status, ready) {

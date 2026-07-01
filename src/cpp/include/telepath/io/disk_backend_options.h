@@ -18,6 +18,10 @@ struct DiskBackendOptions {
   // Maximum number of data-file descriptors a backend should keep open.
   // Set to zero to derive a conservative default.
   std::size_t max_open_files{0};
+  // When true, each completed page write is followed by a durability sync.
+  // Benchmark runs may disable this to measure buffer-pool behavior without
+  // forcing a device-cache flush for every 4 KiB write.
+  bool sync_on_write{true};
 
   auto ResolveQueueDepth() const -> std::size_t {
     if (queue_depth != 0) return queue_depth;

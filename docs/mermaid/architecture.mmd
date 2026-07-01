@@ -1,88 +1,125 @@
 flowchart TB
+    subgraph Client["Control and Access Layer"]
+        APP["Application / Test Driver"]
+        BENCH["Benchmark CLI and Scripts"]
+        WEB["Web Console"]
+    end
+
     subgraph API["Public API Surface"]
         OPTS["BufferManagerOptions"]
         BMAPI["BufferManager"]
         BH["BufferHandle"]
-        SNAP["BufferPoolSnapshot Export"]
+        SNAP["Frame Snapshot Export"]
     end
 
-    subgraph Engine["Core Cache Engine"]
+    subgraph Engine["Core Buffer Pool Engine"]
         FMP["FrameMemoryPool"]
-        PT["Striped Page Table"]
-        MISS["Miss Coordinator<br/>MissState shards"]
         BD["BufferDescriptor Array"]
+        PT["Striped Page Table"]
+        MISS["Miss Coordinator<br/>same-page miss ownership"]
         CL["Per-frame Content Latch"]
-        FLUSH["Async Flush Scheduler"]
-        FGQ["Foreground Flush Queue"]
-        BGQ["Background Flush Queue"]
-        FW["Flush Worker(s)"]
-        CLEAN["Background Cleaner"]
-        DISP["Completion Dispatcher"]
         RP["Replacer Interface"]
         CLOCK["ClockReplacer"]
         LRU["LruReplacer"]
         LRUK["LruKReplacer"]
+        TQ["TwoQueueReplacer"]
+    end
+
+    subgraph Writeback["Async Writeback Subsystem"]
+        FLUSH["Async Flush Scheduler"]
+        FGQ["Foreground Flush Queue"]
+        BGQ["Background Flush Queue"]
+        FW["Flush Worker(s)"]
+        CLEAN["Background Cleaner<br/>dirty watermarks"]
+        DGEN["Dirty Generation Check"]
+        DISP["Completion Dispatcher"]
     end
 
     subgraph Storage["Storage Backend Layer"]
+        FACTORY["DiskBackendFactory<br/>capability and fallback policy"]
         DB["DiskBackend"]
         POSIX["PosixDiskBackend<br/>fallback path"]
         URING["IoUringDiskBackend<br/>native Linux path"]
         MEDIA["Page Files / Storage Media"]
     end
 
-    subgraph Observe["In-process Observation"]
+    subgraph Observe["Observation and Experiment Plane"]
         TS["TelemetrySink"]
-        FAST["Fast-path Counters"]
+        FAST["Fast-path Atomic Counters"]
         CTS["CounterTelemetrySink"]
         NTS["NoOpTelemetrySink"]
-        FUTURE["Future: Shared Memory Telemetry Export"]
+        JSONL["JSONL Telemetry Export"]
+        SHM["POSIX Shared Memory Snapshot"]
+        JOUT["Benchmark JSON Output<br/>snapshot and sampled_snapshots"]
+        FMAP["Frame Map View"]
     end
+
+    APP --> BMAPI
+    BENCH --> BMAPI
+    WEB --> BENCH
+    WEB --> FMAP
 
     OPTS --> BMAPI
     BMAPI --> BH
     BMAPI --> SNAP
 
     BMAPI --> FMP
+    BMAPI --> BD
     BMAPI --> PT
     BMAPI --> MISS
-    BMAPI --> BD
+    BMAPI --> RP
     BMAPI --> FLUSH
     BMAPI --> CLEAN
     BMAPI --> DISP
-    BMAPI --> RP
-    BMAPI --> DB
+    BMAPI --> FACTORY
     BMAPI --> TS
 
     BH --> CL
     BD --> CL
     BD --> SNAP
+    BD --> DGEN
+
+    RP --> CLOCK
+    RP --> LRU
+    RP --> LRUK
+    RP --> TQ
 
     FLUSH --> FGQ
     FLUSH --> BGQ
     FGQ --> FW
     BGQ --> FW
     CLEAN --> BGQ
+    FW --> DGEN
     DISP --> MISS
     DISP --> FLUSH
 
-    RP --> CLOCK
-    RP --> LRU
-    RP --> LRUK
-
+    FACTORY --> DB
     DB --> POSIX
     DB --> URING
     POSIX --> MEDIA
     URING --> MEDIA
+    MISS --> DB
     FW --> DB
     DISP --> DB
-    MISS --> DB
 
     TS --> FAST
     TS --> CTS
     TS --> NTS
-    SNAP -.-> FUTURE
-    TS -.-> FUTURE
+    TS --> JSONL
+    TS --> SHM
+    SNAP --> JOUT
+    SNAP --> SHM
+    BENCH --> JOUT
+    JOUT --> FMAP
 
-    classDef future stroke-dasharray: 5 5;
-    class FUTURE future;
+    classDef core fill:#eef6ff,stroke:#3a6ea5,color:#1f2d3d;
+    classDef writeback fill:#fff6e8,stroke:#c27c22,color:#2d2418;
+    classDef storage fill:#eef8ef,stroke:#4f8f5b,color:#1f2d24;
+    classDef observe fill:#f5f0ff,stroke:#7a5fb3,color:#2b2438;
+    classDef access fill:#f7f7f7,stroke:#777,color:#222;
+
+    class APP,BENCH,WEB,OPTS,BMAPI,BH,SNAP access;
+    class FMP,BD,PT,MISS,CL,RP,CLOCK,LRU,LRUK,TQ core;
+    class FLUSH,FGQ,BGQ,FW,CLEAN,DGEN,DISP writeback;
+    class FACTORY,DB,POSIX,URING,MEDIA storage;
+    class TS,FAST,CTS,NTS,JSONL,SHM,JOUT,FMAP observe;

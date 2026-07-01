@@ -55,6 +55,30 @@ Example:
   --telemetry-shm-capacity 65536
 ```
 
+## Write Sync Policy
+
+Storage backends keep `--sync-on-write true` by default, which preserves the
+current conservative behavior of syncing each completed page write. This is
+useful for correctness-oriented runs, but it can dominate write-heavy benchmark
+latency because every dirty 4 KiB page write also forces a durability sync.
+
+For experiments that are meant to study buffer-pool behavior, writeback
+scheduling, replacement policy, or telemetry overhead rather than durable media
+flush cost, use:
+
+```bash
+./scripts/bench/run.sh \
+  --output-format json \
+  --write-percent 50 \
+  --flush-all-after-run true \
+  --sync-on-write false
+```
+
+With `--sync-on-write false`, TelePath still submits page writes through the
+selected backend, but it does not call `fsync()` / `fdatasync()` after every
+page write. Treat those runs as performance and behavior experiments, not crash
+durability evidence.
+
 ## Local Collection
 
 Single focused run:

@@ -50,11 +50,13 @@ IoUringDiskBackend::IoUringDiskBackend(
   std::string root_path,
   std::size_t page_size,
   std::size_t queue_depth,
-  std::size_t max_open_files)
+  std::size_t max_open_files,
+  bool sync_on_write)
   : root_path_(std::move(root_path)),
     page_size_(page_size),
     queue_depth_(queue_depth == 0 ? 64 : queue_depth),
     max_open_files_(max_open_files == 0 ? 64 : max_open_files),
+    sync_on_write_(sync_on_write),
     impl_(std::make_unique<Impl>()) {
   if (root_path_.empty()) {
     init_status_ = Status::InvalidArgument("io_uring backend root path must not be empty");
@@ -334,6 +336,7 @@ auto IoUringDiskBackend::FinalizeCompletion(RequestContext *context, int complet
     return Status::Ok();
   }
   if (context->operation != DiskOperation::kWrite) return Status::Ok();
+  if (!sync_on_write_) return Status::Ok();
   if (fdatasync(context->fd) != 0) return Status::IoError(BuildErrnoMessage("fdatasync failed", errno));
   return Status::Ok();
 }

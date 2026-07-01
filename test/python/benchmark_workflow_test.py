@@ -27,8 +27,11 @@ def main() -> int:
     assert_contains(bench_run, "BENCHMARK_PRESET")
     assert_contains(bench_sweep, "FLUSH_ALL_AFTER_RUN")
     assert_contains(bench_sweep, "--flush-all-after-run")
+    assert_contains(bench_sweep, "SYNC_ON_WRITE")
+    assert_contains(bench_sweep, "--sync-on-write")
     assert_contains(bench_matrix, "scan_pollution")
     assert_contains(bench_matrix, "FLUSH_ALL_AFTER_RUN")
+    assert_contains(bench_matrix, "SYNC_ON_WRITE")
     return 0
 
 

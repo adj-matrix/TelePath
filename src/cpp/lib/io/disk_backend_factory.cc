@@ -10,30 +10,65 @@ namespace telepath {
 
 namespace {
 
-auto MakePosixBackend(std::string root_path, std::size_t page_size, bool is_fallback, std::size_t max_open_files) -> Result<std::unique_ptr<DiskBackend>> {
-  std::unique_ptr<DiskBackend> backend = std::make_unique<PosixDiskBackend>(std::move(root_path), page_size, is_fallback, max_open_files);
+auto MakePosixBackend(
+  std::string root_path,
+  std::size_t page_size,
+  bool is_fallback,
+  std::size_t max_open_files,
+  bool sync_on_write
+) -> Result<std::unique_ptr<DiskBackend>> {
+  std::unique_ptr<DiskBackend> backend = std::make_unique<PosixDiskBackend>(
+    std::move(root_path),
+    page_size,
+    is_fallback,
+    max_open_files,
+    sync_on_write);
   return backend;
 }
 
-auto MakeIoUringBackend(std::string root_path, std::size_t page_size, std::size_t queue_depth, std::size_t max_open_files) -> Result<std::unique_ptr<DiskBackend>> {
+auto MakeIoUringBackend(
+  std::string root_path,
+  std::size_t page_size,
+  std::size_t queue_depth,
+  std::size_t max_open_files,
+  bool sync_on_write
+) -> Result<std::unique_ptr<DiskBackend>> {
   if (!IsIoUringBackendSupported()) return Status::Unavailable("io_uring backend is not available in this build");
-  std::unique_ptr<DiskBackend> backend = std::make_unique<IoUringDiskBackend>(std::move(root_path), page_size, queue_depth, max_open_files);
+  std::unique_ptr<DiskBackend> backend = std::make_unique<IoUringDiskBackend>(
+    std::move(root_path),
+    page_size,
+    queue_depth,
+    max_open_files,
+    sync_on_write);
   auto *io_uring_backend = static_cast<IoUringDiskBackend *>(backend.get());
   if (!io_uring_backend->initialization_status().ok()) return io_uring_backend->initialization_status();
   return backend;
 }
 
-auto CreateIoUringOrFallback(std::string root_path, std::size_t page_size, std::size_t queue_depth, bool allow_fallback, std::size_t max_open_files) -> Result<std::unique_ptr<DiskBackend>> {
-  auto io_uring_backend = MakeIoUringBackend(root_path, page_size, queue_depth, max_open_files);
+auto CreateIoUringOrFallback(
+  std::string root_path,
+  std::size_t page_size,
+  std::size_t queue_depth,
+  bool allow_fallback,
+  std::size_t max_open_files,
+  bool sync_on_write
+) -> Result<std::unique_ptr<DiskBackend>> {
+  auto io_uring_backend = MakeIoUringBackend(root_path, page_size, queue_depth, max_open_files, sync_on_write);
   if (io_uring_backend.ok()) return io_uring_backend;
   if (!allow_fallback) return io_uring_backend.status();
-  return MakePosixBackend(std::move(root_path), page_size, true, max_open_files);
+  return MakePosixBackend(std::move(root_path), page_size, true, max_open_files, sync_on_write);
 }
 
-auto CreateAutoBackend(std::string root_path, std::size_t page_size, std::size_t queue_depth, std::size_t max_open_files) -> Result<std::unique_ptr<DiskBackend>> {
-  auto io_uring_backend = MakeIoUringBackend(root_path, page_size, queue_depth, max_open_files);
+auto CreateAutoBackend(
+  std::string root_path,
+  std::size_t page_size,
+  std::size_t queue_depth,
+  std::size_t max_open_files,
+  bool sync_on_write
+) -> Result<std::unique_ptr<DiskBackend>> {
+  auto io_uring_backend = MakeIoUringBackend(root_path, page_size, queue_depth, max_open_files, sync_on_write);
   if (io_uring_backend.ok()) return io_uring_backend;
-  return MakePosixBackend(std::move(root_path), page_size, true, max_open_files);
+  return MakePosixBackend(std::move(root_path), page_size, true, max_open_files, sync_on_write);
 }
 
 }  // namespace
@@ -49,11 +84,22 @@ auto CreateDiskBackend(std::string root_path, std::size_t page_size, const DiskB
   const std::size_t max_open_files = options.ResolveMaxOpenFiles();
   switch (options.preferred_kind) {
   case DiskBackendKind::kPosix:
-    return MakePosixBackend(std::move(root_path), page_size, false, max_open_files);
+    return MakePosixBackend(std::move(root_path), page_size, false, max_open_files, options.sync_on_write);
   case DiskBackendKind::kIoUring:
-    return CreateIoUringOrFallback(std::move(root_path), page_size, queue_depth, options.allow_fallback, max_open_files);
+    return CreateIoUringOrFallback(
+      std::move(root_path),
+      page_size,
+      queue_depth,
+      options.allow_fallback,
+      max_open_files,
+      options.sync_on_write);
   case DiskBackendKind::kAuto:
-    return CreateAutoBackend(std::move(root_path), page_size, queue_depth, max_open_files);
+    return CreateAutoBackend(
+      std::move(root_path),
+      page_size,
+      queue_depth,
+      max_open_files,
+      options.sync_on_write);
   }
 
   return Status::InvalidArgument("unknown disk backend kind");

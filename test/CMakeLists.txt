@@ -239,6 +239,16 @@ target_link_libraries(telepath_same_page_miss_failure_recovery_test PRIVATE tele
 add_test(NAME telepath_same_page_miss_failure_recovery_test
          COMMAND telepath_same_page_miss_failure_recovery_test)
 
+add_executable(telepath_same_page_miss_retry_test
+  cpp/buffer/same_page_miss_retry_test.cc
+)
+
+target_include_directories(telepath_same_page_miss_retry_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_same_page_miss_retry_test PRIVATE telepath)
+
+add_test(NAME telepath_same_page_miss_retry_test
+         COMMAND telepath_same_page_miss_retry_test)
+
 add_executable(telepath_different_page_parallel_miss_test
   cpp/buffer/different_page_parallel_miss_test.cc
 )

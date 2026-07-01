@@ -88,6 +88,7 @@
     "flush_all_after_run": "Flush All After Run",
     "queue_depth": "Queue Depth",
     "max_open_files": "Max Open Files",
+    "sync_on_write": "Sync On Write",
     "thread_candidates": "Thread Candidates",
     "thread_candidates_placeholder": "1,2,4,8"
   },

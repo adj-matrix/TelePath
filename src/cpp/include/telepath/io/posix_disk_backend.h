@@ -19,7 +19,8 @@ class PosixDiskBackend : public DiskBackend {
     std::string root_path,
     std::size_t page_size,
     bool is_fallback_backend = false,
-    std::size_t max_open_files = 64
+    std::size_t max_open_files = 64,
+    bool sync_on_write = true
   );
   ~PosixDiskBackend() override;
 
@@ -94,6 +95,7 @@ class PosixDiskBackend : public DiskBackend {
   std::string root_path_;
   std::size_t page_size_{0};
   std::size_t max_open_files_{64};
+  bool sync_on_write_{true};
   uint64_t open_file_clock_{0};
   std::unordered_map<FileId, CachedFile> open_files_;
   std::thread worker_;

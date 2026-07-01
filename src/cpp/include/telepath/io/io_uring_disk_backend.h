@@ -24,7 +24,8 @@ class IoUringDiskBackend : public DiskBackend {
     std::string root_path,
     std::size_t page_size,
     std::size_t queue_depth,
-    std::size_t max_open_files = 64
+    std::size_t max_open_files = 64,
+    bool sync_on_write = true
   );
   ~IoUringDiskBackend() override;
 
@@ -111,6 +112,7 @@ class IoUringDiskBackend : public DiskBackend {
   std::size_t page_size_{0};
   std::size_t queue_depth_{0};
   std::size_t max_open_files_{64};
+  bool sync_on_write_{true};
   uint64_t next_request_id_{1};
   uint64_t open_file_clock_{0};
   Status init_status_{Status::Ok()};

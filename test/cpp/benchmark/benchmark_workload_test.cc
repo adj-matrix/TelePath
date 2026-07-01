@@ -88,6 +88,8 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
     "8",
     "--flush-all-after-run",
     "true",
+    "--sync-on-write",
+    "false",
     "--background-cleaner",
     "true",
     "--replacer",
@@ -108,6 +110,7 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
   assert(options.write_percent == 100);
   assert(options.flush_every_ops == 8);
   assert(options.flush_all_after_run);
+  assert(!options.sync_on_write);
   assert(options.enable_background_cleaner);
   assert(options.replacer == "two_queue");
   assert(options.disk_backend == "io_uring");

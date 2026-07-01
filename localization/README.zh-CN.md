@@ -7,10 +7,6 @@
 </p>
 
 <p align="center">
-  <strong>!!!🤖开发中🤖!!! 非常抱歉，为了满足学术诚信要求，七月前暂时不接受任何 Issue 和 Pull Request (PR)</strong>
-</p>
-
-<p align="center">
   <a href="../README.md">English</a> | 简体中文
 </p>
 

@@ -19,11 +19,17 @@ std::string BuildErrnoMessage(const std::string &prefix) {
 
 }  // namespace
 
-PosixDiskBackend::PosixDiskBackend(std::string root_path, std::size_t page_size, bool is_fallback_backend, std::size_t max_open_files)
+PosixDiskBackend::PosixDiskBackend(
+  std::string root_path,
+  std::size_t page_size,
+  bool is_fallback_backend,
+  std::size_t max_open_files,
+  bool sync_on_write)
   : is_fallback_backend_(is_fallback_backend),
     root_path_(std::move(root_path)),
     page_size_(page_size),
     max_open_files_(max_open_files == 0 ? 64 : max_open_files),
+    sync_on_write_(sync_on_write),
     worker_(&PosixDiskBackend::WorkerLoop, this) {}
 
 PosixDiskBackend::~PosixDiskBackend() {
@@ -155,6 +161,8 @@ auto PosixDiskBackend::ExecuteWrite(const BufferTag &tag, const std::byte *data,
     if (bytes_written < 0) return Status::IoError(BuildErrnoMessage("pwrite failed"));
     return Status::IoError("partial page write");
   }
+
+  if (!sync_on_write_) return Status::Ok();
 
   if (fsync(fd) != 0) {
     return Status::IoError(BuildErrnoMessage("fsync failed"));
