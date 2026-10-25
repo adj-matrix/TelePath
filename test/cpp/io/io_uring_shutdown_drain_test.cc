@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include "disk_io_helpers.h"
 #include "io_test_support.h"
 #include "telepath/io/io_uring_disk_backend.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -38,19 +39,17 @@ void AssertShutdownDrainsPendingWrite(
   assert(backend_result.has_value());
   telepath::IoUringDiskBackend &backend = *backend_result.value();
 
-  auto request = backend.SubmitWrite(tag, page.data(), page.size());
-  assert(request.has_value());
+  const uint64_t request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data()), request)).has_value());
 
   backend.Shutdown();
 
-  auto completion = backend.PollCompletion();
+  auto completion = telepath::test_support::ReapOne(backend);
   assert(completion.has_value());
-  assert(completion.value().request_id == request.value());
-  assert(completion.value().operation == telepath::DiskOperation::kWrite);
-  assert(completion.value().tag == tag);
+  assert(completion.value().token == request);
   assert(completion.value().status.has_value());
 
-  auto drained_completion = backend.PollCompletion();
+  auto drained_completion = telepath::test_support::ReapOne(backend);
   assert(!drained_completion.has_value());
   assert(drained_completion.error().code() == telepath::ErrorCode::kUnavailable);
 }
@@ -63,8 +62,8 @@ void AssertDestructorDrainsOutstandingWrite(
   assert(backend_result.has_value());
   telepath::IoUringDiskBackend &backend = *backend_result.value();
 
-  auto request = backend.SubmitWrite(tag, page.data(), page.size());
-  assert(request.has_value());
+  const uint64_t request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data()), request)).has_value());
 }
 
 void AssertPersistedWrites(
@@ -77,13 +76,13 @@ void AssertPersistedWrites(
   std::array<std::byte, 4096> verify_first{};
   std::array<std::byte, 4096> verify_second{};
 
-  auto verify_first_request = verifier.SubmitRead(first_tag, verify_first.data(), verify_first.size());
-  auto verify_second_request = verifier.SubmitRead(second_tag, verify_second.data(), verify_second.size());
-  assert(verify_first_request.has_value());
-  assert(verify_second_request.has_value());
+  const uint64_t verify_first_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(verifier, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, first_tag, const_cast<std::byte *>(verify_first.data()), verify_first_request)).has_value());
+  const uint64_t verify_second_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(verifier, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, second_tag, const_cast<std::byte *>(verify_second.data()), verify_second_request)).has_value());
 
-  auto verify_first_completion = verifier.PollCompletion();
-  auto verify_second_completion = verifier.PollCompletion();
+  auto verify_first_completion = telepath::test_support::ReapOne(verifier);
+  auto verify_second_completion = telepath::test_support::ReapOne(verifier);
   assert(verify_first_completion.has_value());
   assert(verify_second_completion.has_value());
   assert(verify_first_completion.value().status.has_value());

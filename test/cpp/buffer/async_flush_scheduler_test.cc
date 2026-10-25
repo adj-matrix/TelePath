@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "polling_disk_backend.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -21,9 +22,9 @@
 
 namespace {
 
-class CoordinatedWriteBackend : public telepath::DiskBackend {
+class CoordinatedWriteBackend : public telepath::test_support::PollingDiskBackend {
  public:
-  explicit CoordinatedWriteBackend(std::size_t page_size) : page_size_(page_size) {}
+  explicit CoordinatedWriteBackend(std::size_t page_size) : PollingDiskBackend(page_size, 4), page_size_(page_size) {}
 
   telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &tag, std::byte *out, std::size_t size) override {
     if (out == nullptr || size != page_size_) return telepath::InvalidArgument("invalid read request");
@@ -54,8 +55,8 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
     return request_id;
   }
 
-  telepath::Result<telepath::DiskCompletion> PollCompletion() override {
-    telepath::DiskRequest request;
+  telepath::Result<telepath::test_support::LegacyDiskCompletion> PollCompletion() override {
+    telepath::test_support::LegacyDiskRequest request;
     {
       std::unique_lock<std::mutex> lock(latch_);
       cv_.wait(lock, [&]() { return shutdown_ || !pending_.empty(); });
@@ -102,7 +103,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
         auto failure_it = write_failures_remaining_.find(request.tag);
         if (failure_it != write_failures_remaining_.end() && failure_it->second > 0) {
           --failure_it->second;
-          return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::IoError("forced write failure")};
+          return telepath::test_support::LegacyDiskCompletion{request.request_id, request.operation, request.tag, telepath::IoError("forced write failure")};
         }
       }
 
@@ -115,18 +116,15 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
       cv_.notify_all();
     }
 
-    return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Ok()};
+    return telepath::test_support::LegacyDiskCompletion{request.request_id, request.operation, request.tag, telepath::Ok()};
   }
 
-  void Shutdown() override {
+  void OnShutdown() override {
     std::lock_guard<std::mutex> guard(latch_);
     shutdown_ = true;
     cv_.notify_all();
   }
 
-  telepath::DiskBackendCapabilities GetCapabilities() const override {
-    return {telepath::DiskBackendKind::kPosix, true, true, 4, false};
-  }
 
   void BlockFirstWriteCompletion() {
     std::lock_guard<std::mutex> guard(latch_);
@@ -233,7 +231,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
   std::size_t page_size_{0};
   mutable std::mutex latch_;
   std::condition_variable cv_;
-  std::deque<telepath::DiskRequest> pending_;
+  std::deque<telepath::test_support::LegacyDiskRequest> pending_;
   std::unordered_map<telepath::BufferTag, std::vector<std::byte>, telepath::BufferTagHash> pages_;
   std::unordered_map<telepath::BufferTag, std::size_t, telepath::BufferTagHash> write_submit_failures_remaining_;
   std::unordered_map<telepath::BufferTag, std::size_t, telepath::BufferTagHash> write_failures_remaining_;

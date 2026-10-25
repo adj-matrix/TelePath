@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 
@@ -24,12 +25,8 @@ class GatedWriteBackend : public telepath::DiskBackend {
  public:
   explicit GatedWriteBackend(const std::string &root) : inner_(root, telepath::BlockGeometry::Of<4096>()) {}
 
-  auto SubmitRead(const telepath::BufferTag &tag, std::byte *out, std::size_t size) -> telepath::Result<uint64_t> override {
-    return inner_.SubmitRead(tag, out, size);
-  }
-
-  auto SubmitWrite(const telepath::BufferTag &tag, const std::byte *data, std::size_t size) -> telepath::Result<uint64_t> override {
-    {
+  auto Submit(std::span<const telepath::DiskRequest> requests, telepath::DiskSubmitMode mode) -> telepath::Result<std::size_t> override {
+    if (!requests.empty() && requests.front().operation == telepath::DiskOperation::kWrite) {
       std::unique_lock<std::mutex> lock(latch_);
       if (gate_closed_) {
         ++blocked_writes_;
@@ -38,10 +35,10 @@ class GatedWriteBackend : public telepath::DiskBackend {
       }
       if (fail_writes_) return telepath::IoError("injected write failure");
     }
-    return inner_.SubmitWrite(tag, data, size);
+    return inner_.Submit(requests, mode);
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override { return inner_.PollCompletion(); }
+  auto Reap(std::span<telepath::DiskCompletion> out, bool wait) -> telepath::Result<std::size_t> override { return inner_.Reap(out, wait); }
   void Shutdown() override { inner_.Shutdown(); }
   auto GetCapabilities() const -> telepath::DiskBackendCapabilities override { return inner_.GetCapabilities(); }
 

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <utility>
 
+#include "disk_io_helpers.h"
 #include "io_test_support.h"
 #include "telepath/io/disk_backend_factory.h"
 #include "telepath/io/io_uring_disk_backend.h"
@@ -65,20 +66,20 @@ void AssertRoundTrip(
     const std::array<std::byte, 4096> &write_buffer) {
   std::array<std::byte, 4096> read_buffer{};
 
-  auto write_request = backend->SubmitWrite(tag, write_buffer.data(), write_buffer.size());
-  assert(write_request.has_value());
+  const uint64_t write_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(write_buffer.data()), write_request)).has_value());
 
-  auto write_completion = backend->PollCompletion();
+  auto write_completion = telepath::test_support::ReapOne(*backend);
   assert(write_completion.has_value());
-  assert(write_completion.value().request_id == write_request.value());
+  assert(write_completion.value().token == write_request);
   assert(write_completion.value().status.has_value());
 
-  auto read_request = backend->SubmitRead(tag, read_buffer.data(), read_buffer.size());
-  assert(read_request.has_value());
+  const uint64_t read_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, tag, const_cast<std::byte *>(read_buffer.data()), read_request)).has_value());
 
-  auto read_completion = backend->PollCompletion();
+  auto read_completion = telepath::test_support::ReapOne(*backend);
   assert(read_completion.has_value());
-  assert(read_completion.value().request_id == read_request.value());
+  assert(read_completion.value().token == read_request);
   assert(read_completion.value().status.has_value());
   AssertPageMarkers(read_buffer, write_buffer[0], write_buffer[4095]);
 }
@@ -90,10 +91,10 @@ void AssertPersistedWriteVisibleToPosix(
   telepath::PosixDiskBackend verifier(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> persisted_page{};
 
-  auto persisted_request = verifier.SubmitRead(tag, persisted_page.data(), persisted_page.size());
-  assert(persisted_request.has_value());
+  const uint64_t persisted_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(verifier, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, tag, const_cast<std::byte *>(persisted_page.data()), persisted_request)).has_value());
 
-  auto persisted_completion = verifier.PollCompletion();
+  auto persisted_completion = telepath::test_support::ReapOne(verifier);
   assert(persisted_completion.has_value());
   assert(persisted_completion.value().status.has_value());
   AssertPageMarkers(persisted_page, expected_page[0], expected_page[4095]);
@@ -123,22 +124,22 @@ void AssertIoUringFactoryHonorsFdCacheLimit(const std::filesystem::path &root) {
   const telepath::BufferTag second_tag{22, 0};
   auto write_buffer = BuildMarkedPage(std::byte{0x51}, std::byte{0x52});
 
-  auto first_submit = io_backend->SubmitWrite(first_tag, write_buffer.data(), write_buffer.size());
-  assert(first_submit.has_value());
-  auto first_completion = io_backend->PollCompletion();
+  const uint64_t first_submit = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*io_backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, first_tag, const_cast<std::byte *>(write_buffer.data()), first_submit)).has_value());
+  auto first_completion = telepath::test_support::ReapOne(*io_backend);
   assert(first_completion.has_value());
-  assert(first_completion.value().request_id == first_submit.value());
+  assert(first_completion.value().token == first_submit);
   assert(first_completion.value().status.has_value());
 
 #if defined(__linux__)
   assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 1);
 #endif
 
-  auto second_submit = io_backend->SubmitWrite(second_tag, write_buffer.data(), write_buffer.size());
-  assert(second_submit.has_value());
-  auto second_completion = io_backend->PollCompletion();
+  const uint64_t second_submit = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*io_backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, second_tag, const_cast<std::byte *>(write_buffer.data()), second_submit)).has_value());
+  auto second_completion = telepath::test_support::ReapOne(*io_backend);
   assert(second_completion.has_value());
-  assert(second_completion.value().request_id == second_submit.value());
+  assert(second_completion.value().token == second_submit);
   assert(second_completion.value().status.has_value());
 
 #if defined(__linux__)
@@ -188,11 +189,11 @@ void AssertShutdownStopsNewRequests(
     const std::array<std::byte, 4096> &page) {
   backend->Shutdown();
 
-  auto post_shutdown_write = backend->SubmitWrite(tag, page.data(), page.size());
+  auto post_shutdown_write = telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data())));
   assert(!post_shutdown_write.has_value());
   assert(post_shutdown_write.error().code() == telepath::ErrorCode::kUnavailable);
 
-  auto post_shutdown_completion = backend->PollCompletion();
+  auto post_shutdown_completion = telepath::test_support::ReapOne(*backend);
   assert(!post_shutdown_completion.has_value());
   assert(post_shutdown_completion.error().code() == telepath::ErrorCode::kUnavailable);
 }

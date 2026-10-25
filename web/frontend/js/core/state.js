@@ -57,6 +57,7 @@
     "flush_foreground_burst_limit",
     "queue_depth",
     "max_open_files",
+    "prefetch_distance",
   ];
 
   const sweepFields = [
@@ -74,6 +75,7 @@
     "flush_foreground_burst_limit",
     "queue_depth",
     "max_open_files",
+    "prefetch_distance",
   ];
 
   const state = {

@@ -1,13 +1,14 @@
 #include "telepath/io/posix_disk_backend.h"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
-#include <cstring>
-#include <string>
+
+#include "disk_request_util.h"
+#include "file_descriptor_cache.h"
 
 namespace telepath {
 
@@ -16,47 +17,75 @@ PosixDiskBackend::PosixDiskBackend(
   BlockGeometry geometry,
   bool is_fallback_backend,
   std::size_t max_open_files,
-  bool sync_on_write)
-  : is_fallback_backend_(is_fallback_backend),
-    root_path_(std::move(root_path)),
+  bool sync_on_write,
+  std::size_t io_worker_count)
+  : root_path_(std::move(root_path)),
     geometry_(geometry),
-    max_open_files_(max_open_files == 0 ? 64 : max_open_files),
+    is_fallback_backend_(is_fallback_backend),
     sync_on_write_(sync_on_write),
-    worker_(&PosixDiskBackend::WorkerLoop, this) {}
+    files_(std::make_unique<FileDescriptorCache>(root_path_, max_open_files)) {
+  const std::size_t worker_count = std::max<std::size_t>(1, io_worker_count);
+  workers_.reserve(worker_count);
+  for (std::size_t i = 0; i < worker_count; ++i) workers_.emplace_back(&PosixDiskBackend::WorkerLoop, this);
+}
 
 PosixDiskBackend::~PosixDiskBackend() {
   PosixDiskBackend::Shutdown();
-  if (worker_.joinable()) worker_.join();
-  CloseCachedFiles();
+  for (auto &worker : workers_) {
+    if (worker.joinable()) worker.join();
+  }
 }
 
-auto PosixDiskBackend::SubmitRead(const BufferTag &tag, std::byte *out, std::size_t size) -> Result<uint64_t> {
-  Status validate_status = ValidateReadRequest(out, size);
-  if (!validate_status.has_value()) return PropagateError(validate_status);
-  return SubmitRequest(DiskOperation::kRead, tag, out, nullptr, size);
+auto PosixDiskBackend::Submit(std::span<const DiskRequest> requests, DiskSubmitMode mode) -> Result<std::size_t> {
+  std::size_t accepted = 0;
+  for (const DiskRequest &request : requests) {
+    Status valid = root_path_.empty() ? InvalidArgument("disk backend root path must not be empty") : ValidateDiskRequest(request, kMaxDiskRequestBlocks);
+    if (!valid.has_value()) {
+      if (accepted == 0) return PropagateError(valid);
+      return accepted;
+    }
+
+    {
+      std::lock_guard<std::mutex> guard(latch_);
+      if (shutdown_) {
+        if (accepted == 0) return Unavailable("disk backend is shutting down");
+        return accepted;
+      }
+      if (mode == DiskSubmitMode::kAsync) {
+        pending_.push_back(request);
+        request_cv_.notify_one();
+        ++accepted;
+        continue;
+      }
+      ++executing_;
+    }
+
+    Status status = Execute(request);
+    PushCompletion(DiskCompletion{request.token, status}, false);
+    ++accepted;
+  }
+  return accepted;
 }
 
-auto PosixDiskBackend::SubmitWrite(const BufferTag &tag, const std::byte *data, std::size_t size) -> Result<uint64_t> {
-  Status validate_status = ValidateWriteRequest(data, size);
-  if (!validate_status.has_value()) return PropagateError(validate_status);
-  return SubmitRequest(DiskOperation::kWrite, tag, nullptr, data, size);
-}
+auto PosixDiskBackend::Reap(std::span<DiskCompletion> out, bool wait) -> Result<std::size_t> {
+  std::unique_lock<std::mutex> lock(latch_);
+  if (wait) completion_cv_.wait(lock, [this]() { return !completed_.empty() || IsDrainedLocked(); });
+  if (completed_.empty()) {
+    if (wait) return Unavailable("disk backend is shutting down");
+    return std::size_t{0};
+  }
 
-auto PosixDiskBackend::PollCompletion() -> Result<DiskCompletion> {
-  std::unique_lock<std::mutex> lock(queue_latch_);
-  completion_cv_.wait(lock, [this]() {
-    return !completed_requests_.empty() || CanReturnUnavailableAfterShutdown();
-  });
-  if (completed_requests_.empty()) return Unavailable("disk backend is shutting down");
-
-  DiskCompletion completion = completed_requests_.front();
-  completed_requests_.pop_front();
-  return completion;
+  const std::size_t count = std::min(out.size(), completed_.size());
+  for (std::size_t i = 0; i < count; ++i) {
+    out[i] = std::move(completed_.front());
+    completed_.pop_front();
+  }
+  return count;
 }
 
 void PosixDiskBackend::Shutdown() {
   {
-    std::lock_guard<std::mutex> guard(queue_latch_);
+    std::lock_guard<std::mutex> guard(latch_);
     shutdown_ = true;
   }
   request_cv_.notify_all();
@@ -64,162 +93,97 @@ void PosixDiskBackend::Shutdown() {
 }
 
 auto PosixDiskBackend::GetCapabilities() const -> DiskBackendCapabilities {
-  return DiskBackendCapabilities{
-    DiskBackendKind::kPosix,
-    false,
-    false,
-    1,
-    is_fallback_backend_,
-    geometry_.block_size(),
-  };
+  return DiskBackendCapabilities{DiskBackendKind::kPosix, is_fallback_backend_, workers_.size(), kMaxDiskRequestBlocks, geometry_.block_size()};
 }
 
-auto PosixDiskBackend::SubmitRequest(DiskOperation operation, const BufferTag &tag, std::byte *mutable_buffer, const std::byte *const_buffer, std::size_t size) -> Result<uint64_t> {
-  std::lock_guard<std::mutex> guard(queue_latch_);
-  if (shutdown_) return Unavailable("disk backend is shutting down");
-
-  const uint64_t request_id = next_request_id_++;
-  pending_requests_.push_back(DiskRequest{request_id, operation, tag, mutable_buffer, const_buffer, size});
-  request_cv_.notify_one();
-  return request_id;
+auto PosixDiskBackend::Execute(const DiskRequest &request) -> Status {
+  Result<int> fd = files_->Acquire(request.tag.file_id);
+  if (!fd.has_value()) return PropagateError(fd);
+  Status status = request.operation == DiskOperation::kRead ? ExecuteRead(fd.value(), request) : ExecuteWrite(fd.value(), request);
+  files_->Release(request.tag.file_id);
+  return status;
 }
 
-auto PosixDiskBackend::ValidateReadRequest(std::byte *out, std::size_t size) const -> Status {
-  return ValidateRequest(out, size, DiskOperation::kRead);
-}
-
-auto PosixDiskBackend::ValidateWriteRequest(const std::byte *data, std::size_t size) const -> Status {
-  return ValidateRequest(data, size, DiskOperation::kWrite);
-}
-
-auto PosixDiskBackend::ValidateRequest(const void *buffer, std::size_t size, DiskOperation operation) const -> Status {
-  if (buffer == nullptr) {
-    if (operation == DiskOperation::kRead) return InvalidArgument("read buffer must not be null");
-    return InvalidArgument("write buffer must not be null");
+auto PosixDiskBackend::ExecuteRead(int fd, const DiskRequest &request) -> Status {
+  const std::size_t block_size = geometry_.block_size();
+  const std::size_t total = request.block_count * block_size;
+  const off_t base = static_cast<off_t>(geometry_.BlockOffset(request.tag.block_id));
+  std::size_t done = 0;
+  while (done < total) {
+    std::array<iovec, kMaxDiskRequestBlocks> iov{};
+    int iov_count = 0;
+    for (std::uint32_t i = static_cast<std::uint32_t>(done / block_size); i < request.block_count; ++i) {
+      const std::size_t skip = i == done / block_size ? done % block_size : 0;
+      iov[iov_count++] = iovec{request.buffers[i] + skip, block_size - skip};
+    }
+    const ssize_t n = preadv(fd, iov.data(), iov_count, base + static_cast<off_t>(done));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return IoError("preadv failed", errno);
+    }
+    if (n == 0) break;
+    done += static_cast<std::size_t>(n);
   }
-  if (size != geometry_.block_size()) {
-    if (operation == DiskOperation::kRead) return InvalidArgument("read size does not match page size");
-    return InvalidArgument("write size does not match page size");
-  }
-  if (root_path_.empty()) return InvalidArgument("disk backend root path must not be empty");
+  if (done < total) ZeroFillReadTail(request, block_size, done);
   return Ok();
 }
 
-bool PosixDiskBackend::CanReturnUnavailableAfterShutdown() const {
-  return shutdown_ && pending_requests_.empty() && !worker_active_;
+auto PosixDiskBackend::ExecuteWrite(int fd, const DiskRequest &request) -> Status {
+  const std::size_t block_size = geometry_.block_size();
+  const std::size_t total = request.block_count * block_size;
+  const off_t base = static_cast<off_t>(geometry_.BlockOffset(request.tag.block_id));
+  std::size_t done = 0;
+  while (done < total) {
+    std::array<iovec, kMaxDiskRequestBlocks> iov{};
+    int iov_count = 0;
+    for (std::uint32_t i = static_cast<std::uint32_t>(done / block_size); i < request.block_count; ++i) {
+      const std::size_t skip = i == done / block_size ? done % block_size : 0;
+      iov[iov_count++] = iovec{request.buffers[i] + skip, block_size - skip};
+    }
+    const ssize_t n = pwritev(fd, iov.data(), iov_count, base + static_cast<off_t>(done));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return IoError("pwritev failed", errno);
+    }
+    if (n == 0) return IoError("partial page write");
+    done += static_cast<std::size_t>(n);
+  }
+  if (sync_on_write_ && fdatasync(fd) != 0) return IoError("fdatasync failed", errno);
+  return Ok();
 }
 
-auto PosixDiskBackend::ExecuteRequest(const DiskRequest &request) -> Status {
-  if (request.operation == DiskOperation::kRead) return ExecuteRead(request.tag, request.mutable_buffer, request.size);
-  return ExecuteWrite(request.tag, request.const_buffer, request.size);
-}
-
-void PosixDiskBackend::CompleteRequest(const DiskRequest &request, const Status &status) {
+void PosixDiskBackend::PushCompletion(DiskCompletion completion, bool wake_reapers) {
+  bool drained = false;
   {
-    std::lock_guard<std::mutex> guard(queue_latch_);
-    worker_active_ = false;
-    completed_requests_.push_back(DiskCompletion{request.request_id, request.operation, request.tag, status});
+    std::lock_guard<std::mutex> guard(latch_);
+    completed_.push_back(std::move(completion));
+    --executing_;
+    drained = shutdown_ && pending_.empty() && executing_ == 0;
   }
-  completion_cv_.notify_one();
+  if (wake_reapers || drained) completion_cv_.notify_all();
 }
 
-auto PosixDiskBackend::ExecuteRead(const BufferTag &tag, std::byte *out, std::size_t size) -> Status {
-  if (size != geometry_.block_size()) return InvalidArgument("read size does not match page size");
-
-  Result<int> fd_result = OpenFile(tag.file_id, O_RDWR | O_CREAT);
-  if (!fd_result.has_value()) return PropagateError(fd_result);
-  const int fd = fd_result.value();
-
-  const off_t offset = static_cast<off_t>(geometry_.BlockOffset(tag.block_id));
-  const ssize_t bytes_read = pread(fd, out, size, offset);
-  if (bytes_read < 0) {
-    return IoError("pread failed", errno);
-  }
-  if (bytes_read < static_cast<ssize_t>(size)) std::memset(out + bytes_read, 0, size - bytes_read);
-
-  return Ok();
-}
-
-auto PosixDiskBackend::ExecuteWrite(const BufferTag &tag, const std::byte *data, std::size_t size) -> Status {
-  if (size != geometry_.block_size()) return InvalidArgument("write size does not match page size");
-
-  Result<int> fd_result = OpenFile(tag.file_id, O_RDWR | O_CREAT);
-  if (!fd_result.has_value()) return PropagateError(fd_result);
-  const int fd = fd_result.value();
-
-  const off_t offset = static_cast<off_t>(geometry_.BlockOffset(tag.block_id));
-  const ssize_t bytes_written = pwrite(fd, data, size, offset);
-  if (bytes_written != static_cast<ssize_t>(size)) {
-    if (bytes_written < 0) return IoError("pwrite failed", errno);
-    return IoError("partial page write");
-  }
-
-  if (!sync_on_write_) return Ok();
-
-  if (fsync(fd) != 0) {
-    return IoError("fsync failed", errno);
-  }
-
-  return Ok();
-}
-
-auto PosixDiskBackend::OpenFile(FileId file_id, int flags) -> Result<int> {
-  auto cached = open_files_.find(file_id);
-  if (cached != open_files_.end()) {
-    cached->second.last_used = ++open_file_clock_;
-    return cached->second.fd;
-  }
-
-  EvictLeastRecentlyUsedFileIfNeeded();
-  const std::string path = BuildPath(file_id);
-  const int fd = open(path.c_str(), flags, 0644);
-  if (fd < 0) return IoError("open failed", errno);
-  open_files_.emplace(file_id, CachedFile{fd, ++open_file_clock_});
-  return fd;
-}
-
-auto PosixDiskBackend::BuildPath(FileId file_id) const -> std::string {
-  return root_path_ + "/file_" + std::to_string(file_id) + ".tp";
-}
-
-void PosixDiskBackend::EvictLeastRecentlyUsedFileIfNeeded() {
-  if (open_files_.size() < max_open_files_) return;
-
-  auto victim = open_files_.begin();
-  for (auto it = open_files_.begin(); it != open_files_.end(); ++it) {
-    if (it->second.last_used < victim->second.last_used) victim = it;
-  }
-  if (victim->second.fd >= 0) close(victim->second.fd);
-  open_files_.erase(victim);
-}
-
-void PosixDiskBackend::CloseCachedFiles() {
-  for (const auto &[file_id, cached_file] : open_files_) {
-    (void)file_id;
-    if (cached_file.fd >= 0) close(cached_file.fd);
-  }
-  open_files_.clear();
+bool PosixDiskBackend::IsDrainedLocked() const {
+  return shutdown_ && pending_.empty() && executing_ == 0;
 }
 
 void PosixDiskBackend::WorkerLoop() {
   while (true) {
     DiskRequest request;
     {
-      std::unique_lock<std::mutex> lock(queue_latch_);
-      request_cv_.wait(lock, [this]() {
-        return shutdown_ || !pending_requests_.empty();
-      });
-      if (shutdown_ && pending_requests_.empty()) {
-        CloseCachedFiles();
+      std::unique_lock<std::mutex> lock(latch_);
+      request_cv_.wait(lock, [this]() { return shutdown_ || !pending_.empty(); });
+      if (pending_.empty()) {
+        lock.unlock();
+        files_->CloseIdle();
         return;
       }
-      request = pending_requests_.front();
-      pending_requests_.pop_front();
-      worker_active_ = true;
+      request = pending_.front();
+      pending_.pop_front();
+      ++executing_;
     }
-
-    Status status = ExecuteRequest(request);
-    CompleteRequest(request, status);
+    Status status = Execute(request);
+    PushCompletion(DiskCompletion{request.token, status}, true);
   }
 }
 

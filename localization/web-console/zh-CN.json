@@ -90,6 +90,7 @@
     "max_open_files": "最大打开文件数",
     "sync_on_write": "写后同步",
     "bulk_read_scans": "扫描使用批量读策略",
+    "prefetch_distance": "预读距离",
     "thread_candidates": "线程候选集",
     "thread_candidates_placeholder": "1,2,4,8"
   },

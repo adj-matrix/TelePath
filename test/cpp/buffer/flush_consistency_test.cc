@@ -6,6 +6,7 @@
 #include <memory>
 #include <thread>
 
+#include "disk_io_helpers.h"
 #include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -60,12 +61,7 @@ void ExpectPersistedPageContainsFlushedByte(
 ) {
   auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> page{};
-  auto request = verifier->SubmitRead(telepath::BufferTag{21, 0}, page.data(), page.size());
-  assert(request.has_value());
-
-  auto completion = verifier->PollCompletion();
-  assert(completion.has_value());
-  assert(completion.value().status.has_value());
+  assert(telepath::test_support::ReadBlock(*verifier, telepath::BufferTag{21, 0}, page).has_value());
   assert(page[0] == std::byte{0xA5});
 }
 

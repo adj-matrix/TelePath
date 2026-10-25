@@ -41,7 +41,6 @@ auto BufferManagerMissCoordinator::Wait(const std::shared_ptr<BufferManagerMissS
   std::unique_lock<std::mutex> lock(state->latch);
   state->cv.wait(lock, [&state]() { return state->completed; });
   if (!state->status.has_value()) return PropagateError(state->status);
-  if (state->frame_id == kInvalidFrameId) return Internal("completed miss is missing a frame id");
   return state->frame_id;
 }
 

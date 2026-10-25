@@ -116,7 +116,7 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 
 ## 6. Phases
 
-**Progress:** phases 0, 1a–1e, and 2 are implemented; see section 7.
+**Progress:** phases 0, 1a–1e, 2, and 3 are implemented; see section 7.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
@@ -192,3 +192,36 @@ The benchmark itself had a global mutex on every operation in JSON mode (`Benchm
 LRU-K still scales negatively: batching cuts lock acquisitions, but every batched access performs ordered-set updates and history-deque work under the single policy latch, so the policy saturates at roughly 0.9 M accesses/s regardless of thread count.
 
 Scan pollution (`scan_pollution`, 4 threads, pool 2048, dataset 16384, hot set 1024): `--bulk-read-scans true` raises the hit rate from 17.1% to 22.8% for LRU and clock-sweep (disk reads -7%); SIEVE and LRU-K, which already resist scans, go from 18.3% to 22.8%.
+
+### Phase 3
+
+- **Backend contract** (`telepath/io/disk_backend.h`): `Submit(std::span<const DiskRequest>, DiskSubmitMode)`, `Reap(std::span<DiskCompletion>, bool wait)`, `Shutdown()`, `GetCapabilities()`; all thread-safe. A `DiskRequest` covers up to `kMaxDiskRequestBlocks` (32) consecutive blocks with one buffer per block and carries an opaque `token` that comes back in its `DiskCompletion`. `kWait` means the submitter reaps right away, so a backend may complete the request on the calling thread; `kAsync` means nobody waits yet, so the backend must not block the caller and must wake a blocked reaper. `Submit()` accepts a prefix and fails only when it accepts nothing, the error describing the first request. `Reap(wait)` may return 0 after a spurious wakeup. `DiskBackendCapabilities` reports `queue_depth` and `max_request_blocks`; `recommended_queue_depth`, `supports_submit_batching`, and `supports_completion_batching` are gone.
+- **IoEngine** (`src/cpp/lib/buffer/io_engine.h`) replaces `BufferManagerCompletionDispatcher`. A token points to an `IoCompletion`: an `IoWaiter` (a countdown a thread can wait on) or an async load. A waiting thread first reaps ready completions itself and sleeps on its waiter's futex only when nothing is ready. The reaper thread waits on the backend only while asynchronous requests are outstanding or a waiter is asleep, so it does not race waiters for their own completions. The request-id map, the global mutex, and `notify_all` are gone. Tokens are process-local pointers by design: in cross-process mode each process owns its backend, and completion handlers touch shared metadata only through frame ids.
+- **POSIX backend**: `kWait` requests run `preadv`/`pwritev` on the calling thread; `kAsync` requests go to a worker pool (`DiskBackendOptions::io_worker_count`, default 4), which also sets `queue_depth`. The descriptor cache (`src/cpp/lib/io/file_descriptor_cache.h`) is shared with io_uring and pins descriptors while I/O uses them. Durable writes call `fdatasync` instead of `fsync`.
+- **io_uring backend**: one ring per group of submitting threads (default one per hardware thread, at most 16). A single shared ring collapses under concurrent submitters: on a 20-thread i9-12900H, raw 4 KiB page-cache reads reach 1.2 M/s on one thread, but 0.44 M/s at 4 threads and 0.29 M/s at 16 threads with one shared ring, against 4.2 M/s and 6.5 M/s with one ring per thread. All rings signal one eventfd for blocking reaps. Multi-block requests use `readv`/`writev`; a durable write carries a linked `IORING_OP_FSYNC` with `IORING_FSYNC_DATASYNC` instead of a blocking `fdatasync` in the reaping thread; short transfers are resubmitted for the remainder; a hard `io_uring_enter` failure takes back the requests the kernel never consumed and retires that ring.
+- **Asynchronous loads** (`telepath/buffer/read_buffers_operation.h`): `PrefetchBuffer(file, block, count)` starts reads without pinning; `StartReadBuffers()` / `WaitReadBuffers()` with a `ReadBuffersOperation`, modeled after PostgreSQL 17, pin a range and overlap its reads with the caller's work. Consecutive misses are combined into one request of up to `max_request_blocks`. The thread that reaps a completion publishes the frames and completes the miss for followers. A miss owner that gives up without loading (no frame for a prefetch) completes the miss with `Ok` and `kInvalidFrameId`, which tells followers to retry. Benchmark flag `--prefetch-distance` (`PREFETCH_DISTANCE`, Web console field).
+- **Fix to phase 2**: `ReserveFrameForTag()` retried only when an unpinned frame was latched or under writeback, so a frame that concurrent clock scans happened to miss produced a spurious `kResourceExhausted` (`completion_order_test`, 8 threads on an 8-frame pool, failed about 3% of runs on 2 CPUs). It now retries while any frame is unpinned, which matches the documented contract.
+- **Semantic changes**: `Submit()` rejection now fails only the rejected request; the POSIX backend honors `flush_submit_batch_size` and its default `queue_depth` of 4 gives it up to 4 flush workers (previously 1).
+
+Miss-path throughput (`uniform`, pool 1024, dataset 32768 blocks held in the OS page cache, clock-sweep, `--sync-on-write false`, release build, ops/s):
+
+| Backend | Threads | Phase 2 | Phase 3 | p50 phase 2 → 3 |
+| --- | --- | --- | --- | --- |
+| POSIX | 1 | 18 K | 442 K | 47 µs → 2.1 µs |
+| POSIX | 4 | 24 K | 766 K | 147 µs → 3.6 µs |
+| POSIX | 16 | 22 K | 759 K | 677 µs → 8.4 µs |
+| io_uring | 1 | 22 K | 383 K | 37 µs → 2.4 µs |
+| io_uring | 4 | 23 K | 835 K | 159 µs → 3.6 µs |
+| io_uring | 16 | 23 K | 990 K | 658 µs → 7.8 µs |
+
+Phase 2 spent most of each miss handing work between threads: submitter, the single POSIX worker, the dispatcher, and back, with `notify_all` waking every waiter on each completion. The 16-thread plateau around 0.8–1.0 M ops/s now comes from the miss coordinator stripes, the free-list mutex, and victim search, not from I/O.
+
+Prefetching a sequential scan (`sequential_disjoint`, 1 thread, same dataset; data in the page cache, so every read is cheap):
+
+| Backend | No prefetch | `--prefetch-distance 128` | `256` |
+| --- | --- | --- | --- |
+| POSIX | 460 K ops/s, p99 5.2 µs | 513 K ops/s, p99 34 µs | 511 K ops/s, p99 3.3 µs |
+| io_uring | 355 K ops/s, p99 7.0 µs | 449 K ops/s, p99 2.4 µs | 554 K ops/s, p99 2.2 µs |
+
+Distances of 16–64 blocks are slower than no prefetch here: the reader catches up with reads still in flight and waits for them. The prefetch window must cover the asynchronous hand-off latency; with real device latency the gain is larger.
+

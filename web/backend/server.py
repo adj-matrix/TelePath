@@ -70,6 +70,7 @@ DEFAULTS = {
     "max_open_files": 0,
     "sync_on_write": True,
     "bulk_read_scans": False,
+    "prefetch_distance": 0,
 }
 
 DEFAULT_SWEEP = {
@@ -95,6 +96,7 @@ DEFAULT_SWEEP = {
     "max_open_files": 0,
     "sync_on_write": True,
     "bulk_read_scans": False,
+    "prefetch_distance": 0,
 }
 
 SUPPORTED_LANGUAGES = [
@@ -133,6 +135,7 @@ class BenchmarkRequest:
     max_open_files: int
     sync_on_write: bool
     bulk_read_scans: bool
+    prefetch_distance: int
 
 
 @dataclass(frozen=True)
@@ -159,6 +162,7 @@ class SweepRequest:
     max_open_files: int
     sync_on_write: bool
     bulk_read_scans: bool
+    prefetch_distance: int
 
 
 def now_epoch_ms() -> int:
@@ -335,6 +339,9 @@ def parse_common_options(payload: dict[str, Any], defaults: dict[str, Any]) -> d
         "bulk_read_scans": bool_from_payload(
             payload, "bulk_read_scans", defaults["bulk_read_scans"]
         ),
+        "prefetch_distance": non_negative_int_from_payload(
+            payload, "prefetch_distance", defaults["prefetch_distance"]
+        ),
     }
 
 
@@ -387,6 +394,7 @@ def parse_benchmark_request(payload: dict[str, Any]) -> BenchmarkRequest:
         max_open_files=options["max_open_files"],
         sync_on_write=options["sync_on_write"],
         bulk_read_scans=options["bulk_read_scans"],
+        prefetch_distance=options["prefetch_distance"],
     )
 
 
@@ -440,6 +448,7 @@ def parse_sweep_request(payload: dict[str, Any]) -> SweepRequest:
         max_open_files=options["max_open_files"],
         sync_on_write=options["sync_on_write"],
         bulk_read_scans=options["bulk_read_scans"],
+        prefetch_distance=options["prefetch_distance"],
     )
 
 
@@ -483,6 +492,7 @@ def parse_csv_output(stdout: str) -> dict[str, Any]:
         "dirty_page_low_watermark",
         "queue_depth",
         "max_open_files",
+        "prefetch_distance",
         "telemetry_shm_capacity",
         "flush_tasks_scheduled",
         "flush_tasks_completed",
@@ -587,6 +597,8 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         "true" if request.sync_on_write else "false",
         "--bulk-read-scans",
         "true" if request.bulk_read_scans else "false",
+        "--prefetch-distance",
+        str(request.prefetch_distance),
         "--max-open-files",
         str(request.max_open_files),
     ]
@@ -651,6 +663,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
             max_open_files=request.max_open_files,
             sync_on_write=request.sync_on_write,
             bulk_read_scans=request.bulk_read_scans,
+            prefetch_distance=request.prefetch_distance,
         )
         samples.append(run_benchmark_once(sample_request, "csv"))
 

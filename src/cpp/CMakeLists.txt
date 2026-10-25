@@ -6,6 +6,7 @@ add_library(telepath
   lib/buffer/buffer_handle.cc
   lib/buffer/frame_control.cc
   lib/buffer/buffer_manager.cc
+  lib/buffer/buffer_manager_async_read.cc
   lib/buffer/buffer_manager_cleaner.cc
   lib/buffer/buffer_manager_eviction.cc
   lib/buffer/buffer_manager_flush.cc
@@ -15,10 +16,11 @@ add_library(telepath
   lib/buffer/buffer_manager_observer.cc
   lib/buffer/page_table.cc
   lib/buffer/cleaner_controller.cc
-  lib/buffer/completion_dispatcher.cc
   lib/buffer/flush_scheduler.cc
+  lib/buffer/io_engine.cc
   lib/buffer/miss_coordinator.cc
   lib/io/disk_backend_factory.cc
+  lib/io/file_descriptor_cache.cc
   lib/io/io_uring_disk_backend.cc
   lib/io/posix_disk_backend.cc
   lib/replacer/clock_replacer.cc

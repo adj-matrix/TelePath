@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 
+#include "disk_io_helpers.h"
 #include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -21,17 +22,9 @@ void SeedDiskPages(const std::filesystem::path &root) {
   seed_a[0] = std::byte{0xA1};
   seed_b[0] = std::byte{0xB2};
 
-  auto write_a = disk_backend->SubmitWrite(telepath::BufferTag{3, 0}, seed_a.data(), seed_a.size());
-  assert(write_a.has_value());
-  auto completion_a = disk_backend->PollCompletion();
-  assert(completion_a.has_value());
-  assert(completion_a.value().status.has_value());
+  assert(telepath::test_support::WriteBlock(*disk_backend, telepath::BufferTag{3, 0}, seed_a).has_value());
 
-  auto write_b = disk_backend->SubmitWrite(telepath::BufferTag{3, 1}, seed_b.data(), seed_b.size());
-  assert(write_b.has_value());
-  auto completion_b = disk_backend->PollCompletion();
-  assert(completion_b.has_value());
-  assert(completion_b.value().status.has_value());
+  assert(telepath::test_support::WriteBlock(*disk_backend, telepath::BufferTag{3, 1}, seed_b).has_value());
 }
 
 auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {

@@ -37,7 +37,8 @@ The current suite covers:
 - writeback failure handling at both submit time and completion time,
 - failure and resource exhaustion paths,
 - disk backend correctness,
-- completion dispatcher behavior,
+- io engine completion delivery,
+- asynchronous loads (prefetch, multi-block reads),
 - replacer correctness,
 - telemetry correctness,
 - telemetry JSONL and shared-memory snapshot export shape,
@@ -58,8 +59,9 @@ The current behavior-oriented coverage map is:
 | Eviction/writeback | `eviction_test`, `dirty_eviction_failure_recovery_test`, `failure_path_test`, `wait_evict_interleave_test` | Covers dirty victim persistence, failed victim writeback rollback, retry behavior, read/write failure propagation, and waiter/eviction interleaving. |
 | Flush correctness | `flush_consistency_test`, `read_lock_flush_test`, `flush_all_persistence_test` | Covers writer-held flush waiting, read-latch flush progress, and `FlushAll()` persistence. |
 | Async flush scheduler | `async_flush_scheduler_test` | Covers worker-owned flushes, batching, foreground/background interaction, cleaner ownership, retries, and in-flight `FlushAll()`. |
-| Completion dispatch | `completion_dispatcher_test`, `completion_dispatcher_idle_test`, `completion_order_test` | Covers request-id routing, out-of-order completion, early completion before registration, backend failure, idle shutdown, and reordered read completions. |
-| Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers POSIX fallback behavior, factory policy, zero-fill reads, and native/stub `io_uring` paths. |
+| Completion delivery | `io_engine_test`, `completion_order_test` | Covers token routing, out-of-order and counted completions, waiters reaping their own inline completions, rejected submissions, fatal reaper failure, an idle reaper that does not spin, and reordered read completions. |
+| Asynchronous loads | `async_read_test` | Covers `PrefetchBuffer()` (unpinned loads, skipping resident blocks, stopping when the pool is pinned), `StartReadBuffers()`/`WaitReadBuffers()` (handles in block order, combined multi-block requests, failure releasing every pin, abandoned operations, misuse), and prefetch racing ordinary readers. |
+| Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers malformed requests, inline `kWait` completion, multi-block reads and writes with zero fill past end-of-file, batched submission, shutdown draining, the descriptor cache, factory policy, and native/stub `io_uring` paths. |
 | Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test`, `clock_family_behavior_test`, `replacer_concurrency_test` | Covers probe-filtered nomination for all six policies (Clock, clock-sweep, SIEVE, LRU, LRU-K, 2Q), policy-specific ordering, and concurrent access/nomination/reload. |
 | Access strategies | `buffer_access_strategy_test` | Covers bulk-read scans keeping the hot set resident within the ring bound, and that plain LRU is polluted without a strategy. |
 | Telemetry/options/benchmark/Web | `telemetry_test`, `options_test`, `benchmark_*`, `web_*` | Covers counter snapshots, JSONL telemetry export, POSIX shared-memory telemetry snapshot export, malformed shared-memory headers/bounds, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, operation-latency summaries, final and sampled runtime snapshots, selectable Web snapshot views, snapshot aggregates, and JSON output shape. |
@@ -140,7 +142,7 @@ Avoid adding tests that only restate behavior already proven elsewhere.
 Recent high-value examples include:
 
 - a dirty victim whose first writeback fails, rolls the frame back without losing data, and then evicts cleanly on retry,
-- a batched flush where one page fails during `SubmitWrite()` and the other still persists correctly,
+- a batched flush where the backend rejects one page at submission and the other still persists correctly,
 - a cleaner-owned flush that fails, gets requeued, and succeeds on retry,
 - a `FlushAll()` caller waiting on cleaner-owned in-flight writeback without duplicate submission,
 - foreground/background flush interaction without brittle timing assumptions.

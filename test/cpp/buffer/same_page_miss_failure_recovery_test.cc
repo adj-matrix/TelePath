@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "polling_disk_backend.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -18,7 +19,7 @@ namespace {
 
 constexpr int kWorkerCount = 6;
 
-class CoordinatedReadBackend : public telepath::DiskBackend {
+class CoordinatedReadBackend : public telepath::test_support::PollingDiskBackend {
  public:
   explicit CoordinatedReadBackend(std::size_t page_size) : page_size_(page_size) {}
 
@@ -53,27 +54,18 @@ class CoordinatedReadBackend : public telepath::DiskBackend {
     return request_id;
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
+  auto PollCompletion() -> telepath::Result<telepath::test_support::LegacyDiskCompletion> override {
     auto request = WaitForPendingRequest();
     if (!request.has_value()) return std::unexpected(request.error());
     return CompleteRequest(request.value());
   }
 
-  void Shutdown() override {
+  void OnShutdown() override {
     std::lock_guard<std::mutex> guard(latch_);
     shutdown_ = true;
     cv_.notify_all();
   }
 
-  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
-    return {
-      telepath::DiskBackendKind::kPosix,
-      false,
-      false,
-      1,
-      false,
-    };
-  }
 
   void set_fail_reads(bool value) { fail_reads_.store(value); }
   int submitted_reads() const { return submitted_reads_.load(); }
@@ -115,7 +107,7 @@ class CoordinatedReadBackend : public telepath::DiskBackend {
     return telepath::Ok();
   }
 
-  auto WaitForPendingRequest() -> telepath::Result<telepath::DiskRequest> {
+  auto WaitForPendingRequest() -> telepath::Result<telepath::test_support::LegacyDiskRequest> {
     std::unique_lock<std::mutex> lock(latch_);
     cv_.wait(lock, [&]() { return shutdown_ || !pending_.empty(); });
     if (shutdown_ && pending_.empty()) return telepath::Unavailable("backend shutting down");
@@ -128,11 +120,11 @@ class CoordinatedReadBackend : public telepath::DiskBackend {
   }
 
   auto CompleteRequest(
-    const telepath::DiskRequest &request
-  ) -> telepath::Result<telepath::DiskCompletion> {
+    const telepath::test_support::LegacyDiskRequest &request
+  ) -> telepath::Result<telepath::test_support::LegacyDiskCompletion> {
     if (request.operation == telepath::DiskOperation::kRead) {
       if (fail_reads_.load()) {
-        return telepath::DiskCompletion{
+        return telepath::test_support::LegacyDiskCompletion{
           request.request_id,
           request.operation,
           request.tag,
@@ -145,7 +137,7 @@ class CoordinatedReadBackend : public telepath::DiskBackend {
       request.mutable_buffer[0] = std::byte{0x6D};
     }
 
-    return telepath::DiskCompletion{
+    return telepath::test_support::LegacyDiskCompletion{
       request.request_id,
       request.operation,
       request.tag,
@@ -156,7 +148,7 @@ class CoordinatedReadBackend : public telepath::DiskBackend {
   std::size_t page_size_{0};
   mutable std::mutex latch_;
   std::condition_variable cv_;
-  std::deque<telepath::DiskRequest> pending_;
+  std::deque<telepath::test_support::LegacyDiskRequest> pending_;
   uint64_t next_request_id_{1};
   std::atomic<bool> fail_reads_{true};
   std::atomic<int> submitted_reads_{0};

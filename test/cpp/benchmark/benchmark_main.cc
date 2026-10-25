@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <cstddef>
@@ -9,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "benchmark_support.h"
@@ -324,6 +326,16 @@ auto RunWriteOperation(
   return true;
 }
 
+// Every `prefetch_distance` blocks of a sequential pass, starts reading the
+// next window of `prefetch_distance` blocks.
+void MaybePrefetch(telepath::BufferManager *manager, telepath::BlockId block_id, std::size_t op, const BenchmarkOptions &options) {
+  const std::size_t distance = options.prefetch_distance;
+  if (distance == 0 || block_id % distance != 0 || !IsSequentialOperation(op, options)) return;
+  const telepath::BlockId first = block_id + distance;
+  if (first >= options.block_count) return;
+  std::ignore = manager->PrefetchBuffer(1, first, std::min<std::size_t>(distance, options.block_count - first));
+}
+
 void RunWorker(
   telepath::BufferManager *manager,
   const BenchmarkOptions &options,
@@ -341,6 +353,7 @@ void RunWorker(
     const auto operation_start = std::chrono::steady_clock::now();
     const telepath::BlockId block_id = ChooseBlock(&rng, op, thread_index, options);
     ++(*access_counts)[block_id];
+    MaybePrefetch(manager, block_id, op, options);
 
     const bool write = ShouldWriteOperation(&rng, op, options);
     const bool acquired = write
@@ -606,6 +619,7 @@ void PrintTextSummary(
   std::cout << "max_open_files=" << options.max_open_files << "\n";
   std::cout << "sync_on_write=" << (options.sync_on_write ? "true" : "false") << "\n";
   std::cout << "bulk_read_scans=" << (options.bulk_read_scans ? "true" : "false") << "\n";
+  std::cout << "prefetch_distance=" << options.prefetch_distance << "\n";
   std::cout << "snapshot_sample_limit=" << options.snapshot_sample_limit << "\n";
   if (!options.telemetry_export_path.empty()) std::cout << "telemetry_export_path=" << options.telemetry_export_path << "\n";
   if (!options.telemetry_shm_name.empty()) {
@@ -654,7 +668,7 @@ void PrintCsvSummary(
          "requested_disk_backend,write_percent,flush_every_ops,flush_workers,"
          "flush_submit_batch_size,flush_foreground_burst_limit,flush_all_after_run,background_cleaner,"
          "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
-         "sync_on_write,bulk_read_scans,telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
+         "sync_on_write,bulk_read_scans,prefetch_distance,telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
          "seconds,throughput_ops_per_sec,operation_latency_min_ns,"
          "operation_latency_avg_ns,operation_latency_p50_ns,operation_latency_p95_ns,"
          "operation_latency_p99_ns,operation_latency_max_ns,buffer_hits,buffer_misses,hit_rate,"
@@ -680,6 +694,7 @@ void PrintCsvSummary(
             << options.max_open_files << ","
             << (options.sync_on_write ? "true" : "false") << ","
             << (options.bulk_read_scans ? "true" : "false") << ","
+            << options.prefetch_distance << ","
             << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ","
             << (options.telemetry_shm_name.empty() ? "false" : "true") << ","
             << options.telemetry_shm_name << ","
@@ -742,6 +757,7 @@ void PrintJsonMetrics(
   std::cout << "    \"max_open_files\": " << options.max_open_files << ",\n";
   std::cout << "    \"sync_on_write\": " << (options.sync_on_write ? "true" : "false") << ",\n";
   std::cout << "    \"bulk_read_scans\": " << (options.bulk_read_scans ? "true" : "false") << ",\n";
+  std::cout << "    \"prefetch_distance\": " << options.prefetch_distance << ",\n";
   std::cout << "    \"snapshot_sample_limit\": " << options.snapshot_sample_limit << ",\n";
   std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
   std::cout << "    \"telemetry_shm_enabled\": " << (options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";

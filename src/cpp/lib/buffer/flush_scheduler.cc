@@ -2,8 +2,7 @@
 
 #include <utility>
 
-#include "completion_dispatcher.h"
-#include "telepath/io/disk_backend.h"
+#include "io_engine.h"
 
 namespace telepath {
 
@@ -23,15 +22,11 @@ void BufferManagerFlushTask::Complete(const Status &flush_status) {
 }
 
 BufferManagerFlushScheduler::BufferManagerFlushScheduler(
-  DiskBackend *disk_backend,
-  BufferManagerCompletionDispatcher *dispatcher,
-  std::size_t page_size,
+  IoEngine *io_engine,
   std::size_t worker_count,
   std::size_t submit_batch_size,
   std::size_t foreground_burst_limit
-) : disk_backend_(disk_backend),
-    dispatcher_(dispatcher),
-    page_size_(page_size),
+) : io_engine_(io_engine),
     worker_count_(worker_count),
     submit_batch_size_(submit_batch_size),
     foreground_burst_limit_(foreground_burst_limit) {}
@@ -153,24 +148,17 @@ void BufferManagerFlushScheduler::Run() {
       continue;
     }
 
-    std::vector<SubmittedTask> submitted_tasks;
-    submitted_tasks.reserve(batch.tasks.size());
-    for (const auto &task : batch.tasks) {
-      if (on_task_start_) on_task_start_(task);
-
-      Result<uint64_t> submit_result = disk_backend_->SubmitWrite(task->tag, task->snapshot.data(), page_size_);
-      if (!submit_result.has_value()) {
-        CompleteTask(task, PropagateError(submit_result));
-        continue;
-      }
-
-      dispatcher_->Register(submit_result.value());
-      submitted_tasks.push_back({task, submit_result.value()});
+    std::vector<IoWaiter> waiters(batch.tasks.size());
+    std::vector<DiskRequest> requests(batch.tasks.size());
+    for (std::size_t i = 0; i < batch.tasks.size(); ++i) {
+      if (on_task_start_) on_task_start_(batch.tasks[i]);
+      requests[i].token = reinterpret_cast<uint64_t>(static_cast<IoCompletion *>(&waiters[i]));
+      requests[i].operation = DiskOperation::kWrite;
+      requests[i].tag = batch.tasks[i]->tag;
+      requests[i].buffers[0] = batch.tasks[i]->snapshot.data();
     }
-
-    for (const auto &submitted_task : submitted_tasks) {
-      CompleteTask(submitted_task.task, dispatcher_->Wait(submitted_task.request_id));
-    }
+    io_engine_->Submit(requests, DiskSubmitMode::kWait);
+    for (std::size_t i = 0; i < batch.tasks.size(); ++i) CompleteTask(batch.tasks[i], io_engine_->Wait(waiters[i]));
   }
 }
 

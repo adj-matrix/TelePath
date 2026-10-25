@@ -9,6 +9,7 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "polling_disk_backend.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -16,7 +17,7 @@
 
 namespace {
 
-class DirtyEvictionBackend : public telepath::DiskBackend {
+class DirtyEvictionBackend : public telepath::test_support::PollingDiskBackend {
  public:
   explicit DirtyEvictionBackend(std::size_t page_size) : page_size_(page_size) {}
 
@@ -50,8 +51,8 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
     return request_id;
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
-    telepath::DiskRequest request;
+  auto PollCompletion() -> telepath::Result<telepath::test_support::LegacyDiskCompletion> override {
+    telepath::test_support::LegacyDiskRequest request;
     {
       std::unique_lock<std::mutex> lock(latch_);
       cv_.wait(lock, [&]() { return shutdown_ || !pending_.empty(); });
@@ -62,22 +63,19 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
 
     if (request.operation == telepath::DiskOperation::kRead) {
       CompleteRead(request);
-      return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Ok()};
+      return telepath::test_support::LegacyDiskCompletion{request.request_id, request.operation, request.tag, telepath::Ok()};
     }
 
     telepath::Status write_status = CompleteWrite(request);
-    return telepath::DiskCompletion{request.request_id, request.operation, request.tag, write_status};
+    return telepath::test_support::LegacyDiskCompletion{request.request_id, request.operation, request.tag, write_status};
   }
 
-  void Shutdown() override {
+  void OnShutdown() override {
     std::lock_guard<std::mutex> guard(latch_);
     shutdown_ = true;
     cv_.notify_all();
   }
 
-  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
-    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
-  }
 
   void FailNextWriteFor(const telepath::BufferTag &tag) {
     std::lock_guard<std::mutex> guard(latch_);
@@ -103,7 +101,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
   }
 
  private:
-  void CompleteRead(const telepath::DiskRequest &request) {
+  void CompleteRead(const telepath::test_support::LegacyDiskRequest &request) {
     std::array<std::byte, 4096> page{};
     {
       std::lock_guard<std::mutex> guard(latch_);
@@ -113,7 +111,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
     std::memcpy(request.mutable_buffer, page.data(), page_size_);
   }
 
-  auto CompleteWrite(const telepath::DiskRequest &request) -> telepath::Status {
+  auto CompleteWrite(const telepath::test_support::LegacyDiskRequest &request) -> telepath::Status {
     {
       std::lock_guard<std::mutex> guard(latch_);
       auto failure_it = write_failures_remaining_.find(request.tag);
@@ -136,7 +134,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
   std::size_t page_size_{0};
   mutable std::mutex latch_;
   std::condition_variable cv_;
-  std::deque<telepath::DiskRequest> pending_;
+  std::deque<telepath::test_support::LegacyDiskRequest> pending_;
   std::unordered_map<telepath::BufferTag, std::array<std::byte, 4096>, telepath::BufferTagHash> pages_;
   std::unordered_map<telepath::BufferTag, std::size_t, telepath::BufferTagHash> write_failures_remaining_;
   uint64_t next_request_id_{1};

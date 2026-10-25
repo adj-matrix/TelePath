@@ -27,7 +27,9 @@ struct BufferManagerMissRegistration {
 };
 
 // Coordinates same-page misses so only one thread performs the load work for a
-// given BufferTag while followers wait for the owner's outcome.
+// given BufferTag while followers wait for the owner's outcome. An owner that
+// gives up without loading completes with Ok and kInvalidFrameId, which tells
+// followers to retry.
 class BufferManagerMissCoordinator {
  public:
   explicit BufferManagerMissCoordinator(std::size_t stripe_count);

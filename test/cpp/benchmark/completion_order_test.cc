@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "polling_disk_backend.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -22,7 +23,7 @@ constexpr int kWorkerCount = 8;
 constexpr int kRoundCount = 4;
 constexpr std::size_t kPageSize = 4096;
 
-class ReorderingDiskBackend : public telepath::DiskBackend {
+class ReorderingDiskBackend : public telepath::test_support::PollingDiskBackend {
  public:
   explicit ReorderingDiskBackend(std::size_t page_size)
     : page_size_(page_size),
@@ -53,19 +54,19 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     return CompleteWriteRequest(tag, size);
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
+  auto PollCompletion() -> telepath::Result<telepath::test_support::LegacyDiskCompletion> override {
     std::unique_lock<std::mutex> lock(latch_);
     completion_cv_.wait(lock, [this]() {
       return !completed_.empty() || CanReturnUnavailableAfterShutdown();
     });
     if (completed_.empty()) return telepath::Unavailable("backend is shutting down");
 
-    telepath::DiskCompletion completion = completed_.front();
+    telepath::test_support::LegacyDiskCompletion completion = completed_.front();
     completed_.pop_front();
     return completion;
   }
 
-  void Shutdown() override {
+  void OnShutdown() override {
     {
       std::lock_guard<std::mutex> guard(latch_);
       shutdown_ = true;
@@ -74,15 +75,6 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     completion_cv_.notify_all();
   }
 
-  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
-    return {
-      telepath::DiskBackendKind::kPosix,
-      false,
-      false,
-      1,
-      false,
-    };
-  }
 
  private:
   auto ValidateReadRequest(
@@ -146,13 +138,13 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     return request_id;
   }
 
-  auto TakePendingRequestLocked() -> telepath::DiskRequest {
-    telepath::DiskRequest request = pending_.front();
+  auto TakePendingRequestLocked() -> telepath::test_support::LegacyDiskRequest {
+    telepath::test_support::LegacyDiskRequest request = pending_.front();
     pending_.pop_front();
     return request;
   }
 
-  auto WaitForFirstPendingRequest() -> std::optional<telepath::DiskRequest> {
+  auto WaitForFirstPendingRequest() -> std::optional<telepath::test_support::LegacyDiskRequest> {
     std::unique_lock<std::mutex> lock(latch_);
     request_cv_.wait(lock, [this]() {
       return shutdown_ || !pending_.empty();
@@ -163,7 +155,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     return TakePendingRequestLocked();
   }
 
-  auto WaitForSecondPendingRequest() -> std::optional<telepath::DiskRequest> {
+  auto WaitForSecondPendingRequest() -> std::optional<telepath::test_support::LegacyDiskRequest> {
     std::unique_lock<std::mutex> lock(latch_);
     if (pending_.empty() && !shutdown_) {
       request_cv_.wait_for(lock, std::chrono::milliseconds(1), [this]() {
@@ -174,14 +166,14 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     return TakePendingRequestLocked();
   }
 
-  void FillReadBuffer(const telepath::DiskRequest &request) const {
+  void FillReadBuffer(const telepath::test_support::LegacyDiskRequest &request) const {
     for (std::size_t i = 0; i < request.size; ++i) {
       request.mutable_buffer[i] = std::byte{0};
     }
     request.mutable_buffer[0] = static_cast<std::byte>((request.tag.block_id % 251) + 1);
   }
 
-  void PublishCompletion(const telepath::DiskRequest &request) {
+  void PublishCompletion(const telepath::test_support::LegacyDiskRequest &request) {
     completed_.push_back({
       request.request_id,
       request.operation,
@@ -191,8 +183,8 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
   }
 
   void PublishReadBatch(
-    const telepath::DiskRequest &first,
-    const std::optional<telepath::DiskRequest> &second
+    const telepath::test_support::LegacyDiskRequest &first,
+    const std::optional<telepath::test_support::LegacyDiskRequest> &second
   ) {
     FillReadBuffer(first);
     if (second.has_value()) FillReadBuffer(*second);
@@ -224,8 +216,8 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
   std::mutex latch_;
   std::condition_variable request_cv_;
   std::condition_variable completion_cv_;
-  std::deque<telepath::DiskRequest> pending_;
-  std::deque<telepath::DiskCompletion> completed_;
+  std::deque<telepath::test_support::LegacyDiskRequest> pending_;
+  std::deque<telepath::test_support::LegacyDiskCompletion> completed_;
   uint64_t next_request_id_{1};
   bool shutdown_{false};
   bool worker_active_{false};

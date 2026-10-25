@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 
+#include "polling_disk_backend.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/replacer/replacer.h"
 #include "telepath/telemetry/telemetry_sink.h"
@@ -12,7 +13,7 @@ namespace {
 
 // Accepts submissions, then reports a broken completion channel on the first
 // PollCompletion() call.
-class BrokenCompletionBackend : public telepath::DiskBackend {
+class BrokenCompletionBackend : public telepath::test_support::PollingDiskBackend {
  public:
   auto SubmitRead(const telepath::BufferTag &, std::byte *, std::size_t) -> telepath::Result<uint64_t> override {
     return Submit();
@@ -22,22 +23,19 @@ class BrokenCompletionBackend : public telepath::DiskBackend {
     return Submit();
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
+  auto PollCompletion() -> telepath::Result<telepath::test_support::LegacyDiskCompletion> override {
     std::unique_lock<std::mutex> lock(latch_);
     cv_.wait(lock, [&]() { return submitted_ || shutdown_; });
     if (shutdown_ && !submitted_) return telepath::Unavailable("backend shutting down");
     return telepath::IoError("completion channel broken", 5);
   }
 
-  void Shutdown() override {
+  void OnShutdown() override {
     std::lock_guard<std::mutex> guard(latch_);
     shutdown_ = true;
     cv_.notify_all();
   }
 
-  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
-    return {telepath::DiskBackendKind::kPosix, false, false, 1, false};
-  }
 
  private:
   auto Submit() -> telepath::Result<uint64_t> {

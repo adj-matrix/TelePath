@@ -58,11 +58,9 @@ auto BufferManager::AcquireReservationFrame() -> Result<FrameId> {
   return ResourceExhausted("no evictable frame available");
 }
 
-bool BufferManager::HasTransientlyBusyFrame() const {
+bool BufferManager::HasUnpinnedFrame() const {
   for (const BufferDescriptor &descriptor : descriptors_) {
-    const std::uint32_t word = descriptor.control.load(std::memory_order_acquire);
-    if (!frame_control::IsResident(word) || frame_control::Pins(word) != 0) continue;
-    if ((word & (frame_control::kLatchMask | frame_control::kWritebackMask)) != 0) return true;
+    if (frame_control::Pins(descriptor.control.load(std::memory_order_acquire)) == 0) return true;
   }
   return false;
 }

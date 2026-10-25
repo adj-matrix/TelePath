@@ -6,6 +6,7 @@
 #include <mutex>
 #include <utility>
 
+#include "disk_io_helpers.h"
 #include "buffer_test_support.h"
 #include "miss_coordinator.h"
 #include "telepath/buffer/buffer_manager.h"
@@ -29,11 +30,7 @@ void ReadBufferExclusive(
 ) {
   telepath::PosixDiskBackend backend(root.string(), telepath::BlockGeometry::Of<4096>());
   auto page = BuildPage(marker);
-  auto submit = backend.SubmitWrite(tag, page.data(), page.size());
-  assert(submit.has_value());
-  auto completion = backend.PollCompletion();
-  assert(completion.has_value());
-  assert(completion.value().status.has_value());
+  assert(telepath::test_support::WriteBlock(backend, tag, page).has_value());
 }
 
 auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {

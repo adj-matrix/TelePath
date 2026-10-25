@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 
+#include "polling_disk_backend.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -12,7 +13,7 @@
 
 namespace {
 
-class FailingDiskBackend : public telepath::DiskBackend {
+class FailingDiskBackend : public telepath::test_support::PollingDiskBackend {
  public:
   explicit FailingDiskBackend(std::size_t page_size) : page_size_(page_size) {}
 
@@ -44,23 +45,14 @@ class FailingDiskBackend : public telepath::DiskBackend {
     return request_id;
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
+  auto PollCompletion() -> telepath::Result<telepath::test_support::LegacyDiskCompletion> override {
     auto request = TakePendingRequest();
     if (!request.has_value()) return std::unexpected(request.error());
     return CompleteRequest(request.value());
   }
 
-  void Shutdown() override {}
+  void OnShutdown() override {}
 
-  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
-    return {
-      telepath::DiskBackendKind::kPosix,
-      false,
-      false,
-      1,
-      false,
-    };
-  }
 
   void set_fail_reads(bool value) { fail_reads_ = value; }
   void set_fail_writes(bool value) { fail_writes_ = value; }
@@ -84,7 +76,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
     return telepath::Ok();
   }
 
-  auto TakePendingRequest() -> telepath::Result<telepath::DiskRequest> {
+  auto TakePendingRequest() -> telepath::Result<telepath::test_support::LegacyDiskRequest> {
     std::lock_guard<std::mutex> guard(latch_);
     if (pending_.empty()) return telepath::Unavailable("no pending request");
 
@@ -94,10 +86,10 @@ class FailingDiskBackend : public telepath::DiskBackend {
   }
 
   auto CompleteRequest(
-    const telepath::DiskRequest &request
-  ) -> telepath::Result<telepath::DiskCompletion> {
+    const telepath::test_support::LegacyDiskRequest &request
+  ) -> telepath::Result<telepath::test_support::LegacyDiskCompletion> {
     if (request.operation == telepath::DiskOperation::kRead && fail_reads_) {
-      return telepath::DiskCompletion{
+      return telepath::test_support::LegacyDiskCompletion{
         request.request_id,
         request.operation,
         request.tag,
@@ -105,7 +97,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
       };
     }
     if (request.operation == telepath::DiskOperation::kWrite && fail_writes_) {
-      return telepath::DiskCompletion{
+      return telepath::test_support::LegacyDiskCompletion{
         request.request_id,
         request.operation,
         request.tag,
@@ -118,7 +110,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
         request.mutable_buffer[i] = std::byte{0};
       }
     }
-    return telepath::DiskCompletion{
+    return telepath::test_support::LegacyDiskCompletion{
       request.request_id,
       request.operation,
       request.tag,
@@ -128,7 +120,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
 
   std::size_t page_size_{0};
   std::mutex latch_;
-  std::deque<telepath::DiskRequest> pending_;
+  std::deque<telepath::test_support::LegacyDiskRequest> pending_;
   uint64_t next_request_id_{1};
   bool fail_reads_{false};
   bool fail_writes_{false};

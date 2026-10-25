@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <thread>
 
+#include "disk_io_helpers.h"
 #include "io_test_support.h"
 #include "telepath/io/io_uring_disk_backend.h"
 
@@ -23,7 +24,7 @@ void WaitForCompletionExit(
     telepath::IoUringDiskBackend *backend,
     std::atomic<bool> *completed,
     telepath::Status *poll_status) {
-  auto result = backend->PollCompletion();
+  auto result = telepath::test_support::ReapOne(*backend);
   assert(!result.has_value());
   *poll_status = std::unexpected(result.error());
   completed->store(true);

@@ -12,7 +12,7 @@ concurrency:
 jobs:
   benchmark:
     name: Benchmark Sweep
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout

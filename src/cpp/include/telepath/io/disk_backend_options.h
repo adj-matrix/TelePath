@@ -22,6 +22,9 @@ struct DiskBackendOptions {
   // Benchmark runs may disable this to measure buffer-pool behavior without
   // forcing a device-cache flush for every 4 KiB write.
   bool sync_on_write{true};
+  // Threads the POSIX backend uses for asynchronous requests (prefetch and
+  // background writeback). Set to zero to derive a default.
+  std::size_t io_worker_count{0};
 
   auto ResolveQueueDepth() const -> std::size_t {
     if (queue_depth != 0) return queue_depth;
@@ -41,6 +44,11 @@ struct DiskBackendOptions {
   auto ResolveMaxOpenFiles() const -> std::size_t {
     if (max_open_files != 0) return max_open_files;
     return 64;
+  }
+
+  auto ResolveIoWorkerCount() const -> std::size_t {
+    if (io_worker_count != 0) return io_worker_count;
+    return 4;
   }
 };
 

@@ -1,6 +1,7 @@
 #include <cassert>
 #include <memory>
 
+#include "polling_disk_backend.h"
 #include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -9,7 +10,7 @@
 
 namespace {
 
-class NoOpDiskBackend : public telepath::DiskBackend {
+class NoOpDiskBackend : public telepath::test_support::PollingDiskBackend {
  public:
   auto SubmitRead(
     const telepath::BufferTag &,
@@ -27,21 +28,12 @@ class NoOpDiskBackend : public telepath::DiskBackend {
     return telepath::Unavailable("not expected");
   }
 
-  auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
+  auto PollCompletion() -> telepath::Result<telepath::test_support::LegacyDiskCompletion> override {
     return telepath::Unavailable("not expected");
   }
 
-  void Shutdown() override {}
+  void OnShutdown() override {}
 
-  auto GetCapabilities() const -> telepath::DiskBackendCapabilities override {
-    return {
-      telepath::DiskBackendKind::kPosix,
-      false,
-      false,
-      1,
-      false,
-    };
-  }
 };
 
 auto CreateManager(std::size_t pool_size) -> telepath::Result<std::unique_ptr<telepath::BufferManager>> {

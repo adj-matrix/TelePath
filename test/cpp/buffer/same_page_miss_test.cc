@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 
+#include "disk_io_helpers.h"
 #include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -18,11 +19,7 @@ void SeedDiskPage(const std::filesystem::path &root) {
   auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> seed{};
   seed[0] = std::byte{0x55};
-  auto request = disk_backend->SubmitWrite(telepath::BufferTag{11, 3}, seed.data(), seed.size());
-  assert(request.has_value());
-  auto completion = disk_backend->PollCompletion();
-  assert(completion.has_value());
-  assert(completion.value().status.has_value());
+  assert(telepath::test_support::WriteBlock(*disk_backend, telepath::BufferTag{11, 3}, seed).has_value());
 }
 
 struct SamePageMissContext {

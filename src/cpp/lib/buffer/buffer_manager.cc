@@ -4,10 +4,10 @@
 
 #include "buffer_manager_observer.h"
 #include "cleaner_controller.h"
-#include "completion_dispatcher.h"
 #include "frame_memory_pool.h"
 #include "flush_scheduler.h"
 #include "frame_control.h"
+#include "io_engine.h"
 #include "miss_coordinator.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
@@ -56,7 +56,7 @@ BufferManager::BufferManager(
     observer_(std::make_unique<BufferManagerObserver>(std::move(telemetry_sink))),
     frame_pool_(std::make_unique<FrameMemoryPool>(options.pool_size, geometry)),
     miss_coordinator_(std::make_unique<BufferManagerMissCoordinator>(options.ResolvePageTableStripeCount())),
-    completion_dispatcher_(std::make_unique<BufferManagerCompletionDispatcher>(disk_backend_.get())),
+    io_engine_(std::make_unique<IoEngine>(disk_backend_.get())),
     page_table_(std::make_unique<BufferManagerPageTable>(options.pool_size, options.ResolvePageTableStripeCount())),
     descriptors_(options.pool_size) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
@@ -66,7 +66,7 @@ BufferManager::~BufferManager() {
   if (cleaner_controller_ != nullptr) cleaner_controller_->Shutdown();
   if (flush_scheduler_ != nullptr) flush_scheduler_->Shutdown();
 
-  if (completion_dispatcher_ != nullptr) completion_dispatcher_->Shutdown(Unavailable("buffer manager is shutting down"));
+  if (io_engine_ != nullptr) io_engine_->Shutdown(Unavailable("buffer manager is shutting down"));
 
   // Destroy the backend while frame memory is still alive so any backend-owned
   // worker thread drains and joins before frame_pool_ and descriptors_ are

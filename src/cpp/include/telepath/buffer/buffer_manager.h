@@ -13,6 +13,7 @@
 #include "telepath/buffer/buffer_access_strategy.h"
 #include "telepath/buffer/buffer_descriptor.h"
 #include "telepath/buffer/buffer_handle.h"
+#include "telepath/buffer/read_buffers_operation.h"
 #include "telepath/common/block_geometry.h"
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
@@ -26,7 +27,7 @@ class FrameMemoryPool;
 class Replacer;
 class TelemetrySink;
 class BufferManagerObserver;
-class BufferManagerCompletionDispatcher;
+class IoEngine;
 class BufferManagerMissCoordinator;
 class BufferManagerFlushScheduler;
 class BufferManagerCleanerController;
@@ -34,6 +35,7 @@ class BufferManagerPageTable;
 class BufferManagerTestPeer;
 struct BufferManagerMissState;
 struct BufferManagerFlushTask;
+struct ReadBuffersState;
 
 // A reserved frame never carries a dirty victim: dirty victims are written back
 // while still mapped under their old tag, before the frame can be reserved.
@@ -107,6 +109,26 @@ class BufferManager {
   // Pins the requested page with exclusive access, loading it from the backing
   // store on a miss. Blocks while any other handle on the page exists.
   auto ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy = nullptr) -> Result<ExclusiveBufferHandle>;
+  // Starts asynchronous reads of the blocks in [block_id, block_id +
+  // block_count) that are not resident or already being read, and returns
+  // without waiting for them; consecutive missing blocks are combined into one
+  // request. Pages loaded this way are not pinned and stay evictable. Stops
+  // early without error when no frame can be reserved.
+  auto PrefetchBuffer(FileId file_id, BlockId block_id, std::size_t block_count = 1) -> Status;
+  // Pins the blocks in [block_id, block_id + block_count) and starts reading
+  // the missing ones, combining consecutive misses into multi-block requests,
+  // without waiting for the reads. WaitReadBuffers() finishes the operation.
+  // Returns kInvalidArgument when `operation` is still in progress.
+  auto StartReadBuffers(
+    ReadBuffersOperation &operation,
+    FileId file_id,
+    BlockId block_id,
+    std::size_t block_count,
+    BufferAccessStrategy *strategy = nullptr) -> Status;
+  // Waits for the reads started by StartReadBuffers() and fills
+  // operation.handles() with shared handles on the blocks. On error no handle
+  // is returned and every pin taken by the operation is dropped.
+  auto WaitReadBuffers(ReadBuffersOperation &operation) -> Status;
   // Explicitly releases a handle before it goes out of scope. Returns
   // kInvalidArgument for an empty handle or one owned by another manager.
   auto ReleaseBuffer(SharedBufferHandle &&handle) -> Status;
@@ -140,7 +162,10 @@ class BufferManager {
  private:
   friend class SharedBufferHandle;
   friend class ExclusiveBufferHandle;
+  friend class ReadBuffersOperation;
   friend class BufferManagerTestPeer;
+
+  struct AsyncLoad;
 
   BufferManager(
     const BufferManagerOptions &options,
@@ -169,8 +194,21 @@ class BufferManager {
     const BufferTag &tag,
     const FrameReservation &reservation
   ) -> Result<FrameId>;
-  void CompleteLoadedFrame(FrameId frame_id);
+  void PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation);
   auto ReadReservedPage(FrameId frame_id, const BufferTag &tag) -> Status;
+  bool IsResidentTag(const BufferTag &tag) const;
+
+  // buffer_manager_async_read.cc
+  void AppendAsyncLoad(
+    std::vector<std::unique_ptr<AsyncLoad>> *loads,
+    ReadBuffersState *operation,
+    const BufferTag &tag,
+    const FrameReservation &reservation,
+    std::shared_ptr<BufferManagerMissState> miss_state,
+    std::size_t slot);
+  void SubmitAsyncLoads(std::vector<std::unique_ptr<AsyncLoad>> *loads);
+  void FinishAsyncLoad(AsyncLoad &load, const Status &status);
+  void FinishReadBuffers(ReadBuffersOperation &operation, bool make_handles, Status *status);
   auto LoadTag(const BufferDescriptor &descriptor) const -> BufferTag;
   void StoreTag(BufferDescriptor *descriptor, const BufferTag &tag);
 
@@ -238,7 +276,7 @@ class BufferManager {
     bool allow_victim_flush,
     FrameReservation *reservation
   ) -> FrameReservationOutcome;
-  bool HasTransientlyBusyFrame() const;
+  bool HasUnpinnedFrame() const;
   auto FlushVictimBeforeReuse(FrameId frame_id) -> Status;
 
   // buffer_manager_handle.cc
@@ -265,7 +303,7 @@ class BufferManager {
   auto ResolveFlushForegroundBurstLimit() const -> std::size_t;
   auto StartFlushScheduler() -> Status;
   void StopFlushPipeline(const Status &reason);
-  auto StartCompletionDispatcher() -> Status;
+  auto StartIoEngine() -> Status;
 
   std::size_t pool_size_{0};
   BlockGeometry geometry_;
@@ -279,7 +317,7 @@ class BufferManager {
 
   std::unique_ptr<FrameMemoryPool> frame_pool_;
   std::unique_ptr<BufferManagerMissCoordinator> miss_coordinator_;
-  std::unique_ptr<BufferManagerCompletionDispatcher> completion_dispatcher_;
+  std::unique_ptr<IoEngine> io_engine_;
   std::unique_ptr<BufferManagerFlushScheduler> flush_scheduler_;
   std::unique_ptr<BufferManagerCleanerController> cleaner_controller_;
   std::unique_ptr<BufferManagerPageTable> page_table_;

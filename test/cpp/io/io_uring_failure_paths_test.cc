@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include "disk_io_helpers.h"
 #include "io_test_support.h"
 #include "telepath/io/io_uring_disk_backend.h"
 #include "telepath/io/io_uring_disk_backend_test_peer.h"
@@ -32,7 +33,7 @@ void AssertSubmitFailureDoesNotLeaveInFlightRequest(
     const telepath::BufferTag &tag,
     const std::array<std::byte, 4096> &page) {
   telepath::IoUringDiskBackendTestPeer::ForceNextSubmitResult(*backend, 0);
-  auto submit_failure = backend->SubmitWrite(tag, page.data(), page.size());
+  auto submit_failure = telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data())));
   assert(!submit_failure.has_value());
   assert(submit_failure.error().code() == telepath::ErrorCode::kIoError);
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 0);
@@ -42,16 +43,14 @@ void AssertCompletionFailureReportsIoError(telepath::IoUringDiskBackend *backend
   std::array<std::byte, 4096> buffer{};
   buffer.fill(std::byte{0xFF});
 
-  auto completion_request = backend->SubmitRead(tag, buffer.data(), buffer.size());
-  assert(completion_request.has_value());
+  const uint64_t completion_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, tag, const_cast<std::byte *>(buffer.data()), completion_request)).has_value());
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 1);
 
   telepath::IoUringDiskBackendTestPeer::ForceNextCompletionResult(*backend, -EIO);
-  auto completion_failure = backend->PollCompletion();
+  auto completion_failure = telepath::test_support::ReapOne(*backend);
   assert(completion_failure.has_value());
-  assert(completion_failure.value().request_id == completion_request.value());
-  assert(completion_failure.value().operation == telepath::DiskOperation::kRead);
-  assert(completion_failure.value().tag == tag);
+  assert(completion_failure.value().token == completion_request);
   assert(!completion_failure.value().status.has_value());
   assert(completion_failure.value().status.error().code() == telepath::ErrorCode::kIoError);
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 0);
@@ -61,12 +60,12 @@ void AssertBackendRecoversAfterFailure(
     telepath::IoUringDiskBackend *backend,
     const telepath::BufferTag &tag,
     const std::array<std::byte, 4096> &page) {
-  auto recovery_write = backend->SubmitWrite(tag, page.data(), page.size());
-  assert(recovery_write.has_value());
+  const uint64_t recovery_write = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data()), recovery_write)).has_value());
 
-  auto recovery_completion = backend->PollCompletion();
+  auto recovery_completion = telepath::test_support::ReapOne(*backend);
   assert(recovery_completion.has_value());
-  assert(recovery_completion.value().request_id == recovery_write.value());
+  assert(recovery_completion.value().token == recovery_write);
   assert(recovery_completion.value().status.has_value());
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 0);
 }

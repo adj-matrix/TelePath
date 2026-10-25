@@ -1,5 +1,6 @@
 # Tests rely on assert() side effects; keep them active in every build type.
 add_compile_options(-UNDEBUG)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/cpp/support)
 
 add_executable(telepath_smoke_test
   cpp/buffer/smoke_test.cc
@@ -76,14 +77,14 @@ target_link_libraries(telepath_frame_control_test PRIVATE telepath)
 
 add_test(NAME telepath_frame_control_test COMMAND telepath_frame_control_test)
 
-add_executable(telepath_completion_dispatcher_test
-  cpp/buffer/completion_dispatcher_test.cc
+add_executable(telepath_io_engine_test
+  cpp/buffer/io_engine_test.cc
 )
 
-target_include_directories(telepath_completion_dispatcher_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
-target_link_libraries(telepath_completion_dispatcher_test PRIVATE telepath)
+target_include_directories(telepath_io_engine_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_io_engine_test PRIVATE telepath)
 
-add_test(NAME telepath_completion_dispatcher_test COMMAND telepath_completion_dispatcher_test)
+add_test(NAME telepath_io_engine_test COMMAND telepath_io_engine_test)
 
 add_executable(telepath_telemetry_test
   cpp/telemetry/telemetry_test.cc
@@ -240,15 +241,6 @@ target_link_libraries(telepath_read_zero_fill_test PRIVATE telepath)
 
 add_test(NAME telepath_read_zero_fill_test COMMAND telepath_read_zero_fill_test)
 
-add_executable(telepath_completion_dispatcher_idle_test
-  cpp/io/completion_dispatcher_idle_test.cc
-)
-
-target_link_libraries(telepath_completion_dispatcher_idle_test PRIVATE telepath)
-
-add_test(NAME telepath_completion_dispatcher_idle_test
-         COMMAND telepath_completion_dispatcher_idle_test)
-
 add_executable(telepath_same_page_miss_test
   cpp/buffer/same_page_miss_test.cc
 )
@@ -359,6 +351,15 @@ add_executable(telepath_buffer_access_strategy_test
 target_link_libraries(telepath_buffer_access_strategy_test PRIVATE telepath)
 
 add_test(NAME telepath_buffer_access_strategy_test COMMAND telepath_buffer_access_strategy_test)
+
+add_executable(telepath_async_read_test
+  cpp/buffer/async_read_test.cc
+)
+
+target_link_libraries(telepath_async_read_test PRIVATE telepath)
+
+add_test(NAME telepath_async_read_test COMMAND telepath_async_read_test)
+set_tests_properties(telepath_async_read_test PROPERTIES TIMEOUT 120)
 
 add_executable(telepath_eviction_race_test
   cpp/buffer/eviction_race_test.cc

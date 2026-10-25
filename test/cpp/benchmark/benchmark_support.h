@@ -50,6 +50,7 @@ struct BenchmarkOptions {
   std::size_t max_open_files{0};
   bool sync_on_write{true};
   bool bulk_read_scans{false};
+  std::size_t prefetch_distance{0};
   std::size_t telemetry_shm_capacity{telepath::kDefaultTelemetrySharedMemoryPayloadCapacity};
   std::size_t snapshot_sample_limit{4};
 };
@@ -222,6 +223,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseNonNegativeArg(arg, "--queue-depth", argc, argv, &i, &options.queue_depth)) continue;
     if (TryParseBoolArg(arg, "--sync-on-write", argc, argv, &i, &options.sync_on_write)) continue;
     if (TryParseBoolArg(arg, "--bulk-read-scans", argc, argv, &i, &options.bulk_read_scans)) continue;
+    if (TryParseNonNegativeArg(arg, "--prefetch-distance", argc, argv, &i, &options.prefetch_distance)) continue;
     if (TryParsePositiveArg(arg, "--telemetry-shm-capacity", argc, argv, &i, &options.telemetry_shm_capacity)) continue;
     if (TryParseNonNegativeArg(arg, "--snapshot-sample-limit", argc, argv, &i, &options.snapshot_sample_limit)) continue;
     if (!TryParseNonNegativeArg(arg, "--max-open-files", argc, argv, &i, &options.max_open_files)) continue;
@@ -302,6 +304,14 @@ inline bool IsScanOperation(std::size_t op_index, const BenchmarkOptions &option
   const std::size_t scan_ops = std::max(cold_count, options.pool_size);
   const std::size_t phase = op_index % (warm_hot_ops + scan_ops + hotset_size);
   return phase >= warm_hot_ops && phase < warm_hot_ops + scan_ops;
+}
+
+// Operations that read blocks in ascending order and can benefit from
+// prefetching.
+inline bool IsSequentialOperation(std::size_t op_index, const BenchmarkOptions &options) {
+  const std::string workload = NormalizeWorkloadName(options.workload);
+  if (workload == "sequential_shared" || workload == "sequential_disjoint") return true;
+  return IsScanOperation(op_index, options);
 }
 
 inline auto ChooseBlock(

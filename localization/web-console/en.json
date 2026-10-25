@@ -90,6 +90,7 @@
     "max_open_files": "Max Open Files",
     "sync_on_write": "Sync On Write",
     "bulk_read_scans": "Bulk-Read Scans",
+    "prefetch_distance": "Prefetch Distance",
     "thread_candidates": "Thread Candidates",
     "thread_candidates_placeholder": "1,2,4,8"
   },

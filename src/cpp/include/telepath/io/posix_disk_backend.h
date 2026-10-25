@@ -1,19 +1,26 @@
 #ifndef TELEPATH_IO_POSIX_DISK_BACKEND_H_
 #define TELEPATH_IO_POSIX_DISK_BACKEND_H_
 
-#include <cstdint>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_map>
+#include <vector>
 
 #include "telepath/common/block_geometry.h"
 #include "telepath/io/disk_backend.h"
 
 namespace telepath {
 
+class FileDescriptorCache;
+
+// Backend built on preadv/pwritev. Requests submitted with
+// DiskSubmitMode::kWait run on the submitting thread; kAsync requests run on a
+// pool of `io_worker_count` threads. Each block of a file lives at offset
+// block_id * block_size of "<root_path>/file_<file_id>.tp".
 class PosixDiskBackend : public DiskBackend {
  public:
   explicit PosixDiskBackend(
@@ -21,85 +28,37 @@ class PosixDiskBackend : public DiskBackend {
     BlockGeometry geometry,
     bool is_fallback_backend = false,
     std::size_t max_open_files = 64,
-    bool sync_on_write = true
+    bool sync_on_write = true,
+    std::size_t io_worker_count = 4
   );
   ~PosixDiskBackend() override;
 
-  auto SubmitRead(
-    const BufferTag &tag,
-    std::byte *out,
-    std::size_t size
-  ) -> Result<uint64_t> override;
-  auto SubmitWrite(
-    const BufferTag &tag,
-    const std::byte *data,
-    std::size_t size
-  ) -> Result<uint64_t> override;
-  auto PollCompletion() -> Result<DiskCompletion> override;
+  auto Submit(std::span<const DiskRequest> requests, DiskSubmitMode mode) -> Result<std::size_t> override;
+  auto Reap(std::span<DiskCompletion> out, bool wait) -> Result<std::size_t> override;
   void Shutdown() override;
   auto GetCapabilities() const -> DiskBackendCapabilities override;
 
  private:
-  struct CachedFile {
-    int fd{-1};
-    uint64_t last_used{0};
-  };
-
-  auto SubmitRequest(
-    DiskOperation operation,
-    const BufferTag &tag,
-    std::byte *mutable_buffer,
-    const std::byte *const_buffer,
-    std::size_t size
-  ) -> Result<uint64_t>;
-  auto ValidateReadRequest(
-    std::byte *out,
-    std::size_t size
-  ) const -> Status;
-  auto ValidateWriteRequest(
-    const std::byte *data,
-    std::size_t size
-  ) const -> Status;
-  auto ValidateRequest(
-    const void *buffer,
-    std::size_t size,
-    DiskOperation operation
-  ) const -> Status;
-  bool CanReturnUnavailableAfterShutdown() const;
-  auto ExecuteRequest(const DiskRequest &request) -> Status;
-  void CompleteRequest(const DiskRequest &request, const Status &status);
-  auto ExecuteRead(
-    const BufferTag &tag,
-    std::byte *out,
-    std::size_t size
-  ) -> Status;
-  auto ExecuteWrite(
-    const BufferTag &tag,
-    const std::byte *data,
-    std::size_t size
-  ) -> Status;
-  auto OpenFile(FileId file_id, int flags) -> Result<int>;
-  auto BuildPath(FileId file_id) const -> std::string;
-  void EvictLeastRecentlyUsedFileIfNeeded();
-  void CloseCachedFiles();
+  auto Execute(const DiskRequest &request) -> Status;
+  auto ExecuteRead(int fd, const DiskRequest &request) -> Status;
+  auto ExecuteWrite(int fd, const DiskRequest &request) -> Status;
+  void PushCompletion(DiskCompletion completion, bool wake_reapers);
+  bool IsDrainedLocked() const;
   void WorkerLoop();
 
-  std::mutex queue_latch_;
-  std::condition_variable request_cv_;
-  std::condition_variable completion_cv_;
-  std::deque<DiskRequest> pending_requests_;
-  std::deque<DiskCompletion> completed_requests_;
-  uint64_t next_request_id_{1};
-  bool shutdown_{false};
-  bool worker_active_{false};
-  bool is_fallback_backend_{false};
   std::string root_path_;
   BlockGeometry geometry_;
-  std::size_t max_open_files_{64};
+  bool is_fallback_backend_{false};
   bool sync_on_write_{true};
-  uint64_t open_file_clock_{0};
-  std::unordered_map<FileId, CachedFile> open_files_;
-  std::thread worker_;
+  std::unique_ptr<FileDescriptorCache> files_;
+  std::mutex latch_;
+  std::condition_variable request_cv_;
+  std::condition_variable completion_cv_;
+  std::deque<DiskRequest> pending_;
+  std::deque<DiskCompletion> completed_;
+  std::size_t executing_{0};
+  bool shutdown_{false};
+  std::vector<std::thread> workers_;
 };
 
 }  // namespace telepath

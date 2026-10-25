@@ -1,8 +1,10 @@
 #ifndef TELEPATH_IO_DISK_BACKEND_H_
 #define TELEPATH_IO_DISK_BACKEND_H_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
@@ -15,57 +17,79 @@ enum class DiskOperation {
   kWrite,
 };
 
+// How the submitter consumes the completions of one Submit() call.
+enum class DiskSubmitMode {
+  // The submitting thread reaps these completions itself right after Submit()
+  // returns. A backend may perform the requests on the calling thread, and
+  // need not wake threads blocked in Reap() for them.
+  kWait = 0,
+  // Nobody waits on these completions right away (prefetch, background
+  // writeback). The backend should return without performing the I/O on the
+  // calling thread, and must wake a blocked Reap() caller when they complete.
+  kAsync,
+};
+
+// Upper bound on DiskRequest::block_count for every backend.
+inline constexpr std::size_t kMaxDiskRequestBlocks = 32;
+
+// One read or write of `block_count` consecutive blocks starting at `tag`.
+// Block i is transferred to or from `buffers[i]`, each exactly one block long;
+// a write only reads its buffers. The buffers must stay valid until the
+// request's completion has been reaped. A read past the end of the backing
+// file completes successfully with the missing bytes zero-filled.
 struct DiskRequest {
-  uint64_t request_id{0};
+  // Opaque value returned unchanged in the request's DiskCompletion.
+  uint64_t token{0};
   DiskOperation operation{DiskOperation::kRead};
   BufferTag tag{};
-  std::byte *mutable_buffer{nullptr};
-  const std::byte *const_buffer{nullptr};
-  std::size_t size{0};
+  std::uint32_t block_count{1};
+  std::array<std::byte *, kMaxDiskRequestBlocks> buffers{};
 };
 
 struct DiskCompletion {
-  uint64_t request_id{0};
-  DiskOperation operation{DiskOperation::kRead};
-  BufferTag tag{};
+  uint64_t token{0};
   Status status{};
 };
 
 struct DiskBackendCapabilities {
   DiskBackendKind kind{DiskBackendKind::kPosix};
-  bool supports_submit_batching{false};
-  bool supports_completion_batching{false};
-  std::size_t recommended_queue_depth{1};
   bool is_fallback_backend{false};
+  // Number of requests the backend can usefully keep in flight at once.
+  std::size_t queue_depth{1};
+  // Largest DiskRequest::block_count the backend accepts, at most
+  // kMaxDiskRequestBlocks.
+  std::size_t max_request_blocks{1};
   // Block size the backend was configured with, or 0 when the backend accepts
   // any request size. BufferManager::Create rejects a backend whose block size
   // differs from the manager's.
   std::size_t block_size{0};
 };
 
+// Asynchronous block storage. Every accepted request produces exactly one
+// DiskCompletion, carrying the request's token, from Reap(). All methods are
+// thread-safe.
 class DiskBackend {
  public:
   virtual ~DiskBackend() = default;
 
-  // Enqueues an asynchronous page read into `out`. The returned request id must
-  // later be matched with PollCompletion().
-  virtual auto SubmitRead(
-    const BufferTag &tag,
-    std::byte *out,
-    std::size_t size
-  ) -> Result<uint64_t> = 0;
-  // Enqueues an asynchronous page write from `data`. The caller must keep the
-  // source buffer stable until the corresponding completion is observed.
-  virtual auto SubmitWrite(
-    const BufferTag &tag,
-    const std::byte *data,
-    std::size_t size
-  ) -> Result<uint64_t> = 0;
-  // Waits for and returns the next completed disk request.
-  virtual auto PollCompletion() -> Result<DiskCompletion> = 0;
-  // Stops the backend and unblocks any thread waiting in PollCompletion().
+  // Starts `requests` in order and returns how many were accepted. Requests
+  // after the accepted prefix were not started and may be submitted again.
+  // Returns an error only when no request was accepted; kInvalidArgument
+  // reports a malformed first request and kUnavailable a backend that was shut
+  // down.
+  virtual auto Submit(std::span<const DiskRequest> requests, DiskSubmitMode mode) -> Result<std::size_t> = 0;
+  // Moves up to `out.size()` completions into `out` and returns their number.
+  // Without `wait` it never blocks and may return 0, for instance when the
+  // ready completions belong to requests submitted by other threads. With
+  // `wait` it blocks until a completion is available, but may return 0 after a
+  // spurious wakeup; it returns kUnavailable once Shutdown() was called and no
+  // accepted request is outstanding. Concurrent callers receive disjoint
+  // completions.
+  virtual auto Reap(std::span<DiskCompletion> out, bool wait) -> Result<std::size_t> = 0;
+  // Rejects further submissions. Outstanding requests still complete, after
+  // which blocked Reap() callers return kUnavailable.
   virtual void Shutdown() = 0;
-  // Describes the backend implementation and key async capabilities.
+  // Describes the backend implementation and its limits.
   virtual auto GetCapabilities() const -> DiskBackendCapabilities = 0;
 };
 

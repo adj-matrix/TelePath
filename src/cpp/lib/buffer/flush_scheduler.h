@@ -16,8 +16,7 @@
 
 namespace telepath {
 
-class DiskBackend;
-class BufferManagerCompletionDispatcher;
+class IoEngine;
 
 struct BufferManagerFlushTask {
   FrameId frame_id{kInvalidFrameId};
@@ -43,9 +42,7 @@ class BufferManagerFlushScheduler {
   using TaskCompleteCallback = std::function<void(const TaskPtr &, const Status &)>;
 
   BufferManagerFlushScheduler(
-    DiskBackend *disk_backend,
-    BufferManagerCompletionDispatcher *dispatcher,
-    std::size_t page_size,
+    IoEngine *io_engine,
     std::size_t worker_count,
     std::size_t submit_batch_size,
     std::size_t foreground_burst_limit);
@@ -66,19 +63,12 @@ class BufferManagerFlushScheduler {
     bool should_stop{false};
   };
 
-  struct SubmittedTask {
-    TaskPtr task;
-    uint64_t request_id{0};
-  };
-
   auto TakeNextBatch() -> Batch;
   bool ShouldServeBackground(std::size_t consecutive_foreground_flushes) const;
   void CompleteTask(const TaskPtr &task, const Status &status);
   void Run();
 
-  DiskBackend *disk_backend_{nullptr};
-  BufferManagerCompletionDispatcher *dispatcher_{nullptr};
-  std::size_t page_size_{0};
+  IoEngine *io_engine_{nullptr};
   std::size_t worker_count_{0};
   std::size_t submit_batch_size_{0};
   std::size_t foreground_burst_limit_{0};

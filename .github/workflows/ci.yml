@@ -15,7 +15,7 @@ concurrency:
 jobs:
   gcc-debug:
     name: GCC Debug
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -32,7 +32,7 @@ jobs:
 
   gcc-asan:
     name: GCC ASAN
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -49,7 +49,7 @@ jobs:
 
   gcc-release:
     name: GCC Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -66,7 +66,7 @@ jobs:
 
   clang-debug:
     name: Clang Debug
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: clang-19
       CXX: clang++-19
@@ -86,7 +86,7 @@ jobs:
 
   clang-tsan:
     name: Clang TSAN
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout

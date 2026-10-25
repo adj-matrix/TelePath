@@ -27,6 +27,7 @@ QUEUE_DEPTH="${QUEUE_DEPTH:-0}"
 MAX_OPEN_FILES="${MAX_OPEN_FILES:-0}"
 SYNC_ON_WRITE="${SYNC_ON_WRITE:-true}"
 BULK_READ_SCANS="${BULK_READ_SCANS:-false}"
+PREFETCH_DISTANCE="${PREFETCH_DISTANCE:-0}"
 
 first=1
 for t in ${THREADS}; do
@@ -53,6 +54,7 @@ for t in ${THREADS}; do
     --queue-depth "${QUEUE_DEPTH}" \
     --sync-on-write "${SYNC_ON_WRITE}" \
     --bulk-read-scans "${BULK_READ_SCANS}" \
+    --prefetch-distance "${PREFETCH_DISTANCE}" \
     --max-open-files "${MAX_OPEN_FILES}")"
 
   if [[ ${first} -eq 1 ]]; then

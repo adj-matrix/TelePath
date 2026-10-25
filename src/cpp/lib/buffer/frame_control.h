@@ -2,6 +2,7 @@
 #define TELEPATH_LIB_BUFFER_FRAME_CONTROL_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <thread>
@@ -41,6 +42,7 @@ constexpr bool IsDirty(std::uint32_t word) { return (word & kDirty) != 0; }
 constexpr bool HasWriteback(std::uint32_t word) { return (word & kWritebackMask) != 0; }
 
 void FutexWait(std::atomic<std::uint32_t> &control, std::uint32_t expected);
+void FutexWaitFor(std::atomic<std::uint32_t> &control, std::uint32_t expected, std::chrono::nanoseconds timeout);
 void FutexWakeAll(std::atomic<std::uint32_t> &control);
 
 // Sleeps until `blocked(word)` is false and returns the observed word.

@@ -85,6 +85,10 @@ Six policies are available through `--replacer` (Web console and `REPLACER`/`REP
 
 `--bulk-read-scans true` (`BULK_READ_SCANS=true`, or the Web console checkbox) makes the scan phase of `scan_pollution` read through a bulk-read `BufferAccessStrategy`: scanned pages recycle a small ring of frames and do not raise replacement priority. Compare runs with and without it to measure scan pollution.
 
+## Prefetching
+
+`--prefetch-distance N` (`PREFETCH_DISTANCE=N`, or the Web console field; 0 disables it) makes sequential reads (`sequential_shared`, `sequential_disjoint`, and the scan phase of `scan_pollution`) call `PrefetchBuffer()` for the next `N` blocks whenever a thread reaches a block that is a multiple of `N`. The window has to cover the asynchronous hand-off latency: with data in the OS page cache, distances of 128–256 blocks beat synchronous reads while 16–64 are slower, because the reader catches up with reads still in flight. To measure the miss path itself, use `uniform` with a dataset much larger than the pool and `--sync-on-write false`.
+
 ## Local Collection
 
 Single focused run:

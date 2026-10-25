@@ -2,6 +2,7 @@
 #include <cassert>
 #include <memory>
 
+#include "disk_io_helpers.h"
 #include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -33,12 +34,7 @@ void ExpectPersistedPageMatches(
   telepath::BlockId block_id
 ) {
   std::array<std::byte, 4096> page{};
-  auto request = backend->SubmitRead(telepath::BufferTag{8, block_id}, page.data(), page.size());
-  assert(request.has_value());
-
-  auto completion = backend->PollCompletion();
-  assert(completion.has_value());
-  assert(completion.value().status.has_value());
+  assert(telepath::test_support::ReadBlock(*backend, telepath::BufferTag{8, block_id}, page).has_value());
   assert(page[0] == static_cast<std::byte>(0x40 + block_id));
   assert(page[1] == static_cast<std::byte>(0x50 + block_id));
 }

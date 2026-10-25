@@ -4,9 +4,9 @@
 #include <utility>
 
 #include "buffer_manager_observer.h"
-#include "completion_dispatcher.h"
 #include "frame_control.h"
 #include "frame_memory_pool.h"
+#include "io_engine.h"
 #include "miss_coordinator.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
@@ -46,7 +46,7 @@ auto BufferManager::AwaitJoinedMiss(const BufferTag &tag, const std::shared_ptr<
     Result<FrameId> wait_result = miss_coordinator_->Wait(joined_state);
     if (!wait_result.has_value()) return PropagateError(wait_result);
 
-    if (TryPinResidentFrame(wait_result.value(), tag, record_access)) {
+    if (wait_result.value() != kInvalidFrameId && TryPinResidentFrame(wait_result.value(), tag, record_access)) {
       observer_->RecordJoinedMissHit(tag);
       return wait_result.value();
     }
@@ -99,7 +99,7 @@ auto BufferManager::ReserveFrameForTag(const BufferTag &tag, BufferAccessStrateg
   while (true) {
     Result<FrameId> frame_result = AcquireReservationFrame();
     if (!frame_result.has_value()) {
-      if (frame_result.error().code() != ErrorCode::kResourceExhausted || !HasTransientlyBusyFrame()) return PropagateError(frame_result);
+      if (frame_result.error().code() != ErrorCode::kResourceExhausted || !HasUnpinnedFrame()) return PropagateError(frame_result);
       std::this_thread::yield();
       continue;
     }
@@ -133,26 +133,34 @@ auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReserva
   Status read_status = ReadReservedPage(frame_id, tag);
   if (!read_status.has_value()) return PropagateError(AbortLoadReservation(frame_id, tag, read_status));
 
-  CompleteLoadedFrame(frame_id);
-  replacer_->RecordLoad(frame_id);
-  if (!reservation.had_evicted_page) {
-    observer_->RecordLoadCompletion(tag);
-    return frame_id;
-  }
-  observer_->RecordLoadCompletion(tag, reservation.evicted_tag);
+  PublishLoadedFrame(tag, reservation);
   return frame_id;
 }
 
-void BufferManager::CompleteLoadedFrame(FrameId frame_id) {
-  ResetCleanerCandidate(frame_id);
-  frame_control::PublishResident(descriptors_[frame_id].control);
+void BufferManager::PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation) {
+  ResetCleanerCandidate(reservation.frame_id);
+  frame_control::PublishResident(descriptors_[reservation.frame_id].control);
+  replacer_->RecordLoad(reservation.frame_id);
+  if (reservation.had_evicted_page) observer_->RecordLoadCompletion(tag, reservation.evicted_tag);
+  else observer_->RecordLoadCompletion(tag);
 }
 
 auto BufferManager::ReadReservedPage(FrameId frame_id, const BufferTag &tag) -> Status {
-  Result<uint64_t> read_submit = disk_backend_->SubmitRead(tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
-  if (!read_submit.has_value()) return PropagateError(read_submit);
-  completion_dispatcher_->Register(read_submit.value());
-  return completion_dispatcher_->Wait(read_submit.value());
+  IoWaiter waiter;
+  DiskRequest request;
+  request.token = reinterpret_cast<uint64_t>(static_cast<IoCompletion *>(&waiter));
+  request.operation = DiskOperation::kRead;
+  request.tag = tag;
+  request.buffers[0] = frame_pool_->GetFrameData(frame_id);
+  io_engine_->Submit(std::span<const DiskRequest>(&request, 1), DiskSubmitMode::kWait);
+  return io_engine_->Wait(waiter);
+}
+
+bool BufferManager::IsResidentTag(const BufferTag &tag) const {
+  std::optional<FrameId> frame_id = page_table_->LookupFrameId(tag);
+  if (!frame_id.has_value()) return false;
+  const BufferDescriptor &descriptor = descriptors_[frame_id.value()];
+  return frame_control::State(descriptor.control.load(std::memory_order_acquire)) != BufferFrameState::kFree && LoadTag(descriptor) == tag;
 }
 
 auto BufferManager::LoadTag(const BufferDescriptor &descriptor) const -> BufferTag {

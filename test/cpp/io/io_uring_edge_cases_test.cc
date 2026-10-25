@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include "disk_io_helpers.h"
 #include "io_test_support.h"
 #include "telepath/io/io_uring_disk_backend.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -34,14 +35,12 @@ void AssertMissingReadZeroFillsPage(telepath::IoUringDiskBackend *backend, const
   std::array<std::byte, 4096> page{};
   page.fill(std::byte{0xFF});
 
-  auto request = backend->SubmitRead(tag, page.data(), page.size());
-  assert(request.has_value());
+  const uint64_t request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, tag, const_cast<std::byte *>(page.data()), request)).has_value());
 
-  auto completion = backend->PollCompletion();
+  auto completion = telepath::test_support::ReapOne(*backend);
   assert(completion.has_value());
-  assert(completion.value().request_id == request.value());
-  assert(completion.value().operation == telepath::DiskOperation::kRead);
-  assert(completion.value().tag == tag);
+  assert(completion.value().token == request);
   assert(completion.value().status.has_value());
 
   for (const std::byte value : page) assert(value == std::byte{0});
@@ -51,27 +50,27 @@ void AssertInvalidArgumentsRejected(
     telepath::IoUringDiskBackend *backend,
     const telepath::BufferTag &tag,
     const std::array<std::byte, 4096> &page) {
-  auto null_read = backend->SubmitRead(tag, nullptr, page.size());
+  auto null_read = telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, tag, nullptr));
   assert(!null_read.has_value());
   assert(null_read.error().code() == telepath::ErrorCode::kInvalidArgument);
 
-  auto wrong_size_write = backend->SubmitWrite(tag, page.data(), 1024);
-  assert(!wrong_size_write.has_value());
-  assert(wrong_size_write.error().code() == telepath::ErrorCode::kInvalidArgument);
+  auto oversized_write = telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data()));
+  oversized_write.block_count = telepath::kMaxDiskRequestBlocks + 1;
+  auto rejected = telepath::test_support::SubmitOne(*backend, oversized_write);
+  assert(!rejected.has_value());
+  assert(rejected.error().code() == telepath::ErrorCode::kInvalidArgument);
 }
 
 void AssertWriteCompletes(
     telepath::IoUringDiskBackend *backend,
     const telepath::BufferTag &tag,
     const std::array<std::byte, 4096> &page) {
-  auto request = backend->SubmitWrite(tag, page.data(), page.size());
-  assert(request.has_value());
+  const uint64_t request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(*backend, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kWrite, tag, const_cast<std::byte *>(page.data()), request)).has_value());
 
-  auto completion = backend->PollCompletion();
+  auto completion = telepath::test_support::ReapOne(*backend);
   assert(completion.has_value());
-  assert(completion.value().request_id == request.value());
-  assert(completion.value().operation == telepath::DiskOperation::kWrite);
-  assert(completion.value().tag == tag);
+  assert(completion.value().token == request);
   assert(completion.value().status.has_value());
 }
 
@@ -85,13 +84,13 @@ void AssertPersistedWrites(
   std::array<std::byte, 4096> verify_first{};
   std::array<std::byte, 4096> verify_second{};
 
-  auto verify_first_request = verifier.SubmitRead(first_tag, verify_first.data(), verify_first.size());
-  auto verify_second_request = verifier.SubmitRead(second_tag, verify_second.data(), verify_second.size());
-  assert(verify_first_request.has_value());
-  assert(verify_second_request.has_value());
+  const uint64_t verify_first_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(verifier, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, first_tag, const_cast<std::byte *>(verify_first.data()), verify_first_request)).has_value());
+  const uint64_t verify_second_request = telepath::test_support::NextToken();
+  assert(telepath::test_support::SubmitOne(verifier, telepath::test_support::MakeBlockRequest(telepath::DiskOperation::kRead, second_tag, const_cast<std::byte *>(verify_second.data()), verify_second_request)).has_value());
 
-  auto verify_first_completion = verifier.PollCompletion();
-  auto verify_second_completion = verifier.PollCompletion();
+  auto verify_first_completion = telepath::test_support::ReapOne(verifier);
+  auto verify_second_completion = telepath::test_support::ReapOne(verifier);
   assert(verify_first_completion.has_value());
   assert(verify_second_completion.has_value());
   assert(verify_first_completion.value().status.has_value());

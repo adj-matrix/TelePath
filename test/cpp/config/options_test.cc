@@ -89,7 +89,7 @@ void AssertManagerAppliesResolvedOptions(const std::filesystem::path &root, cons
   assert(manager.options().disk_backend.ResolveMaxOpenFiles() == 3);
   assert(!manager.options().disk_backend.sync_on_write);
   assert(manager.options().flush_worker_count == 3);
-  assert(manager.options().flush_submit_batch_size == 1);
+  assert(manager.options().flush_submit_batch_size == 2);
   assert(manager.options().flush_foreground_burst_limit == 5);
   assert(manager.options().enable_background_cleaner);
   assert(manager.options().dirty_page_high_watermark == 10);

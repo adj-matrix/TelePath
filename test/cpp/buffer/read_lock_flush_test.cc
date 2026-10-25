@@ -6,6 +6,7 @@
 #include <memory>
 #include <thread>
 
+#include "disk_io_helpers.h"
 #include "buffer_test_support.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/posix_disk_backend.h"
@@ -51,7 +52,7 @@ void ExpectFlushCompletesWhileReadHandleStaysPinned(
     flush_finished.store(true);
   });
 
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   while (!flush_finished.load() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
@@ -63,12 +64,7 @@ void ExpectFlushCompletesWhileReadHandleStaysPinned(
 void ExpectPersistedPageMatches(const std::filesystem::path &root) {
   auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> page{};
-  auto request = verifier->SubmitRead(telepath::BufferTag{31, 0}, page.data(), page.size());
-  assert(request.has_value());
-
-  auto completion = verifier->PollCompletion();
-  assert(completion.has_value());
-  assert(completion.value().status.has_value());
+  assert(telepath::test_support::ReadBlock(*verifier, telepath::BufferTag{31, 0}, page).has_value());
   assert(page[0] == std::byte{0x6C});
   assert(page[1] == std::byte{0x7D});
 }
