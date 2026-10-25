@@ -50,8 +50,10 @@ The current behavior-oriented coverage map is:
 
 | Area | Primary Tests | Notes |
 | --- | --- | --- |
-| Basic buffer lifecycle | `smoke_test`, `init_failure_test`, `resource_exhaustion_test` | Covers construction failure surfacing, basic read, release, and no-victim handling. |
-| Handle semantics | `handle_test`, `memory_layout_test`, `frame_snapshot_test` | Covers RAII release, invalid handles, contiguous frame layout, and exported metadata. |
+| Basic buffer lifecycle | `smoke_test`, `init_failure_test`, `resource_exhaustion_test`, `fatal_state_test` | Covers `Create()` failures (invalid page size, backend block-size mismatch, missing dependencies), basic read, release, no-victim handling, and the Failed state. |
+| Handle semantics | `handle_test`, `memory_layout_test`, `frame_snapshot_test` | Covers handle release (`ReleaseBuffer`, `Reset`) and moves, contiguous frame layout, and exported metadata. |
+| Frame control word | `frame_control_test`, `block_geometry_test` | Covers pin/reserve CAS rules, latch exclusion, dirty clearing with `redirtied`, futex wake-ups, and block-size validation. |
+| Concurrency stress | `stress_integrity_test`, `eviction_race_test`, `page_table_test` | Covers torn-page and lost-update detection under sustained mixed load, eviction/writeback interleavings, the replacer contract, and newest-mapping-first page table lookups. |
 | Read miss coordination | `same_page_miss_test`, `same_page_miss_failure_recovery_test`, `different_page_parallel_miss_test` | Covers joined same-page misses, failure recovery, and independent parallel misses. |
 | Eviction/writeback | `eviction_test`, `dirty_eviction_failure_recovery_test`, `failure_path_test`, `wait_evict_interleave_test` | Covers dirty victim persistence, failed victim writeback rollback, retry behavior, read/write failure propagation, and waiter/eviction interleaving. |
 | Flush correctness | `flush_consistency_test`, `read_lock_flush_test`, `flush_all_persistence_test` | Covers writer-held flush waiting, read-latch flush progress, and `FlushAll()` persistence. |
@@ -72,6 +74,20 @@ The remaining intentional gaps are larger-scale rather than unit-test-sized:
 In addition to the baseline suite, native Linux CI runs a separate `io_uring`-only test group so that kernel-sensitive validation does not get mixed into the normal fallback path.
 
 ## How To Run
+
+TSAN validation (Clang 19; the script disables ASLR, which TSAN needs on recent kernels):
+
+```bash
+./scripts/build/tsan.sh
+./scripts/test/tsan.sh
+```
+
+Release validation (assertions stay active in tests):
+
+```bash
+./scripts/build/release.sh
+ctest --preset release
+```
 
 Debug validation:
 

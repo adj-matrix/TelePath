@@ -27,12 +27,12 @@ void AssertCompletionWakesWaiterAndResetsEntry() {
   assert(owner.is_owner);
   assert(!follower.is_owner);
 
-  telepath::Result<telepath::FrameId> wait_result = telepath::Status::Unavailable("not set");
+  telepath::Result<telepath::FrameId> wait_result = telepath::Unavailable("not set");
   std::thread waiter([&]() { wait_result = coordinator.Wait(follower.state); });
 
-  coordinator.Complete(tag, owner.state, telepath::Status::Ok(), 42);
+  coordinator.Complete(tag, owner.state, telepath::Ok(), 42);
   waiter.join();
-  assert(wait_result.ok());
+  assert(wait_result.has_value());
   assert(wait_result.value() == 42);
 
   auto next_owner = coordinator.RegisterOrJoin(tag);
@@ -43,17 +43,17 @@ void AssertCompletionWakesWaiterAndResetsEntry() {
 void AssertWaitRejectsNullAndPropagatesFailure() {
   telepath::BufferManagerMissCoordinator coordinator(4);
   auto null_result = coordinator.Wait(nullptr);
-  assert(!null_result.ok());
-  assert(null_result.status().code() == telepath::StatusCode::kInvalidArgument);
+  assert(!null_result.has_value());
+  assert(null_result.error().code() == telepath::ErrorCode::kInvalidArgument);
 
   const telepath::BufferTag tag{7, 23};
   auto owner = coordinator.RegisterOrJoin(tag);
   auto follower = coordinator.RegisterOrJoin(tag);
 
-  coordinator.Complete(tag, owner.state, telepath::Status::IoError("forced read failure"), telepath::kInvalidFrameId);
+  coordinator.Complete(tag, owner.state, telepath::IoError("forced read failure"), telepath::kInvalidFrameId);
   auto wait_result = coordinator.Wait(follower.state);
-  assert(!wait_result.ok());
-  assert(wait_result.status().code() == telepath::StatusCode::kIoError);
+  assert(!wait_result.has_value());
+  assert(wait_result.error().code() == telepath::ErrorCode::kIoError);
 }
 
 }  // namespace

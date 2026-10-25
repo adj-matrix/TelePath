@@ -27,7 +27,7 @@ class ParallelMissBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
     auto validate_status = ValidateReadRequest(out, size);
-    if (!validate_status.ok()) return validate_status;
+    if (!validate_status.has_value()) return std::unexpected(validate_status.error());
 
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
@@ -43,7 +43,7 @@ class ParallelMissBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
     auto validate_status = ValidateWriteRequest(data, size);
-    if (!validate_status.ok()) return validate_status;
+    if (!validate_status.has_value()) return std::unexpected(validate_status.error());
 
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
@@ -54,10 +54,10 @@ class ParallelMissBackend : public telepath::DiskBackend {
 
   auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
     auto request = WaitForPendingRequest();
-    if (!request.ok()) return request.status();
+    if (!request.has_value()) return std::unexpected(request.error());
 
     auto completion = CompleteRequest(request.value());
-    if (!completion.ok()) return completion.status();
+    if (!completion.has_value()) return std::unexpected(completion.error());
     return completion.value();
   }
 
@@ -105,29 +105,29 @@ class ParallelMissBackend : public telepath::DiskBackend {
     std::byte *out,
     std::size_t size
   ) const -> telepath::Status {
-    if (out == nullptr) return telepath::Status::InvalidArgument("invalid read request");
-    if (size != page_size_) return telepath::Status::InvalidArgument("invalid read request");
-    return telepath::Status::Ok();
+    if (out == nullptr) return telepath::InvalidArgument("invalid read request");
+    if (size != page_size_) return telepath::InvalidArgument("invalid read request");
+    return telepath::Ok();
   }
 
   auto ValidateWriteRequest(
     const std::byte *data,
     std::size_t size
   ) const -> telepath::Status {
-    if (data == nullptr) return telepath::Status::InvalidArgument("invalid write request");
-    if (size != page_size_) return telepath::Status::InvalidArgument("invalid write request");
-    return telepath::Status::Ok();
+    if (data == nullptr) return telepath::InvalidArgument("invalid write request");
+    if (size != page_size_) return telepath::InvalidArgument("invalid write request");
+    return telepath::Ok();
   }
 
   auto WaitForPendingRequest() -> telepath::Result<telepath::DiskRequest> {
     std::unique_lock<std::mutex> lock(latch_);
     cv_.wait(lock, [&]() { return shutdown_ || !pending_.empty(); });
-    if (shutdown_ && pending_.empty()) return telepath::Status::Unavailable("backend shutting down");
+    if (shutdown_ && pending_.empty()) return telepath::Unavailable("backend shutting down");
 
     auto request = pending_.front();
     pending_.pop_front();
     cv_.wait(lock, [&]() { return shutdown_ || completions_allowed_; });
-    if (shutdown_) return telepath::Status::Unavailable("backend shutting down");
+    if (shutdown_) return telepath::Unavailable("backend shutting down");
     return request;
   }
 
@@ -142,7 +142,7 @@ class ParallelMissBackend : public telepath::DiskBackend {
       request.request_id,
       request.operation,
       request.tag,
-      telepath::Status::Ok(),
+      telepath::Ok(),
     };
   }
 
@@ -174,7 +174,7 @@ void RunWorker(
   lock.unlock();
 
   auto result = manager->ReadBuffer(51, static_cast<telepath::BlockId>(worker));
-  assert(result.ok());
+  assert(result.has_value());
 
   auto handle = std::move(result.value());
   run->observed[static_cast<std::size_t>(worker)] = handle.data()[0];
@@ -209,7 +209,9 @@ int main() {
   auto *backend_ptr = backend.get();
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  telepath::BufferManager manager(4, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(4, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   std::mutex start_latch;
   std::condition_variable start_cv;

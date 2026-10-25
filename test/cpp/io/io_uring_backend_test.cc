@@ -30,8 +30,8 @@ void AssertStrictIoUringCreationFails(const std::filesystem::path &root) {
   strict_options.allow_fallback = false;
 
   auto strict_backend_result = telepath::CreateDiskBackend(root.string(), 4096, strict_options);
-  assert(!strict_backend_result.ok());
-  assert(strict_backend_result.status().code() == telepath::StatusCode::kUnavailable);
+  assert(!strict_backend_result.has_value());
+  assert(strict_backend_result.error().code() == telepath::ErrorCode::kUnavailable);
 }
 
 void AssertIoUringCreationFallsBackToPosix(const std::filesystem::path &root) {
@@ -40,7 +40,7 @@ void AssertIoUringCreationFallsBackToPosix(const std::filesystem::path &root) {
   fallback_options.allow_fallback = true;
 
   auto fallback_backend_result = telepath::CreateDiskBackend(root.string(), 4096, fallback_options);
-  assert(fallback_backend_result.ok());
+  assert(fallback_backend_result.has_value());
 
   const auto capabilities = fallback_backend_result.value()->GetCapabilities();
   assert(capabilities.kind == telepath::DiskBackendKind::kPosix);
@@ -49,11 +49,11 @@ void AssertIoUringCreationFallsBackToPosix(const std::filesystem::path &root) {
 }
 
 bool HandleUnavailableIoUringBackend(
-    const std::filesystem::path &root, const telepath::IoUringDiskBackend &backend) {
-  if (backend.initialization_status().ok()) return false;
+    const std::filesystem::path &root, const telepath::Result<std::unique_ptr<telepath::IoUringDiskBackend>> &backend_result) {
+  if (backend_result.has_value()) return false;
 
   assert(!telepath::io_test_support::RequireIoUringSuccess());
-  assert(backend.initialization_status().code() == telepath::StatusCode::kUnavailable);
+  assert(backend_result.error().code() == telepath::ErrorCode::kUnavailable);
   AssertStrictIoUringCreationFails(root);
   AssertIoUringCreationFallsBackToPosix(root);
   return true;
@@ -66,20 +66,20 @@ void AssertRoundTrip(
   std::array<std::byte, 4096> read_buffer{};
 
   auto write_request = backend->SubmitWrite(tag, write_buffer.data(), write_buffer.size());
-  assert(write_request.ok());
+  assert(write_request.has_value());
 
   auto write_completion = backend->PollCompletion();
-  assert(write_completion.ok());
+  assert(write_completion.has_value());
   assert(write_completion.value().request_id == write_request.value());
-  assert(write_completion.value().status.ok());
+  assert(write_completion.value().status.has_value());
 
   auto read_request = backend->SubmitRead(tag, read_buffer.data(), read_buffer.size());
-  assert(read_request.ok());
+  assert(read_request.has_value());
 
   auto read_completion = backend->PollCompletion();
-  assert(read_completion.ok());
+  assert(read_completion.has_value());
   assert(read_completion.value().request_id == read_request.value());
-  assert(read_completion.value().status.ok());
+  assert(read_completion.value().status.has_value());
   AssertPageMarkers(read_buffer, write_buffer[0], write_buffer[4095]);
 }
 
@@ -87,15 +87,15 @@ void AssertPersistedWriteVisibleToPosix(
     const std::filesystem::path &root,
     const telepath::BufferTag &tag,
     const std::array<std::byte, 4096> &expected_page) {
-  telepath::PosixDiskBackend verifier(root.string(), 4096);
+  telepath::PosixDiskBackend verifier(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> persisted_page{};
 
   auto persisted_request = verifier.SubmitRead(tag, persisted_page.data(), persisted_page.size());
-  assert(persisted_request.ok());
+  assert(persisted_request.has_value());
 
   auto persisted_completion = verifier.PollCompletion();
-  assert(persisted_completion.ok());
-  assert(persisted_completion.value().status.ok());
+  assert(persisted_completion.has_value());
+  assert(persisted_completion.value().status.has_value());
   AssertPageMarkers(persisted_page, expected_page[0], expected_page[4095]);
 }
 
@@ -106,7 +106,7 @@ void AssertIoUringFactoryHonorsFdCacheLimit(const std::filesystem::path &root) {
   options.max_open_files = 1;
 
   auto backend_result = telepath::CreateDiskBackend(root.string(), 4096, options);
-  if (!backend_result.ok()) {
+  if (!backend_result.has_value()) {
     assert(!telepath::io_test_support::RequireIoUringSuccess());
     return;
   }
@@ -116,11 +116,6 @@ void AssertIoUringFactoryHonorsFdCacheLimit(const std::filesystem::path &root) {
   assert(capabilities.kind == telepath::DiskBackendKind::kIoUring);
   assert(!capabilities.is_fallback_backend);
   auto *io_backend = static_cast<telepath::IoUringDiskBackend *>(backend.get());
-  assert(io_backend != nullptr);
-  if (!io_backend->initialization_status().ok()) {
-    assert(!telepath::io_test_support::RequireIoUringSuccess());
-    return;
-  }
 
   const auto first_file_path = root / "file_21.tp";
   const auto second_file_path = root / "file_22.tp";
@@ -129,22 +124,22 @@ void AssertIoUringFactoryHonorsFdCacheLimit(const std::filesystem::path &root) {
   auto write_buffer = BuildMarkedPage(std::byte{0x51}, std::byte{0x52});
 
   auto first_submit = io_backend->SubmitWrite(first_tag, write_buffer.data(), write_buffer.size());
-  assert(first_submit.ok());
+  assert(first_submit.has_value());
   auto first_completion = io_backend->PollCompletion();
-  assert(first_completion.ok());
+  assert(first_completion.has_value());
   assert(first_completion.value().request_id == first_submit.value());
-  assert(first_completion.value().status.ok());
+  assert(first_completion.value().status.has_value());
 
 #if defined(__linux__)
   assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 1);
 #endif
 
   auto second_submit = io_backend->SubmitWrite(second_tag, write_buffer.data(), write_buffer.size());
-  assert(second_submit.ok());
+  assert(second_submit.has_value());
   auto second_completion = io_backend->PollCompletion();
-  assert(second_completion.ok());
+  assert(second_completion.has_value());
   assert(second_completion.value().request_id == second_submit.value());
-  assert(second_completion.value().status.ok());
+  assert(second_completion.value().status.has_value());
 
 #if defined(__linux__)
   assert(telepath::io_test_support::CountOpenDescriptorsForPath(first_file_path) == 0);
@@ -166,7 +161,7 @@ void AssertExplicitIoUringFactorySelection(const std::filesystem::path &root) {
   options.allow_fallback = false;
 
   auto backend_result = telepath::CreateDiskBackend(root.string(), 4096, options);
-  assert(backend_result.ok());
+  assert(backend_result.has_value());
 
   const auto capabilities = backend_result.value()->GetCapabilities();
   assert(capabilities.kind == telepath::DiskBackendKind::kIoUring);
@@ -179,7 +174,7 @@ void AssertAutoFactorySelectionPrefersIoUring(const std::filesystem::path &root)
   options.preferred_kind = telepath::DiskBackendKind::kAuto;
 
   auto backend_result = telepath::CreateDiskBackend(root.string(), 4096, options);
-  assert(backend_result.ok());
+  assert(backend_result.has_value());
 
   const auto capabilities = backend_result.value()->GetCapabilities();
   assert(capabilities.kind == telepath::DiskBackendKind::kIoUring);
@@ -194,20 +189,21 @@ void AssertShutdownStopsNewRequests(
   backend->Shutdown();
 
   auto post_shutdown_write = backend->SubmitWrite(tag, page.data(), page.size());
-  assert(!post_shutdown_write.ok());
-  assert(post_shutdown_write.status().code() == telepath::StatusCode::kUnavailable);
+  assert(!post_shutdown_write.has_value());
+  assert(post_shutdown_write.error().code() == telepath::ErrorCode::kUnavailable);
 
   auto post_shutdown_completion = backend->PollCompletion();
-  assert(!post_shutdown_completion.ok());
-  assert(post_shutdown_completion.status().code() == telepath::StatusCode::kUnavailable);
+  assert(!post_shutdown_completion.has_value());
+  assert(post_shutdown_completion.error().code() == telepath::ErrorCode::kUnavailable);
 }
 
 }  // namespace
 
 int main() {
   telepath::io_test_support::TestRootGuard root_guard("telepath_io_uring_backend_test");
-  telepath::IoUringDiskBackend backend(root_guard.path().string(), 4096, 32);
-  if (HandleUnavailableIoUringBackend(root_guard.path(), backend)) return 0;
+  auto backend_result = telepath::IoUringDiskBackend::Create(root_guard.path().string(), telepath::BlockGeometry::Of<4096>(), 32);
+  if (HandleUnavailableIoUringBackend(root_guard.path(), backend_result)) return 0;
+  telepath::IoUringDiskBackend &backend = *backend_result.value();
 
   auto write_buffer = BuildMarkedPage(std::byte{0x12}, std::byte{0x34});
   const telepath::BufferTag tag{7, 3};

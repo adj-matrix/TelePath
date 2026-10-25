@@ -55,7 +55,7 @@ TelePath does **not** currently aim to include:
 
 The current implementation has moved beyond the original State 1/2 skeleton and now includes a State 4 prototype built on a usable writeback core:
 
-- `BufferManager`, `BufferHandle`, and `BufferDescriptor`
+- `BufferManager`, `SharedBufferHandle`/`ExclusiveBufferHandle`, and `BufferDescriptor`
 - contiguous frame memory allocation
 - `DiskBackend`, `PosixDiskBackend`, `IoUringDiskBackend`, and `DiskBackendFactory`
 - miss coordination for concurrent same-page faults
@@ -88,6 +88,8 @@ TelePath keeps environment bootstrap scripts under `support/` and day-to-day pro
 
 ### Minimal Build Dependencies
 
+TelePath is written in C++23 and requires GCC 14 or Clang 19. The script installs both (adding the toolchain PPA and apt.llvm.org on Ubuntu 22.04):
+
 ```bash
 sudo ./support/install_build_deps.sh
 ```
@@ -113,6 +115,15 @@ This installs tools such as `clang`, `clang-format`, `clang-tidy`, `lldb`, and `
 ./scripts/build/asan.sh
 ./scripts/test/asan.sh
 ```
+
+### TSAN and Release Builds
+
+```bash
+./scripts/build/tsan.sh && ./scripts/test/tsan.sh
+./scripts/build/release.sh && ctest --preset release
+```
+
+Benchmarks and the Web console use the release build.
 
 ### Native `io_uring` Validation
 

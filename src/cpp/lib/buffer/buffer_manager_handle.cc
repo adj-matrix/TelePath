@@ -1,71 +1,47 @@
 #include "telepath/buffer/buffer_manager.h"
 
-#include "buffer_descriptor_state.h"
+#include "frame_control.h"
+#include "frame_memory_pool.h"
 #include "telepath/replacer/replacer.h"
 
 namespace telepath {
 
-auto BufferManager::ValidateOwnedHandle(const BufferHandle &handle) const -> Status {
-  if (!init_status_.ok()) return init_status_;
-  if (!handle.valid()) return Status::InvalidArgument("buffer handle is not valid");
-  if (handle.manager_ != this) return Status::InvalidArgument("buffer handle belongs to another manager");
-  if (!ValidateHandle(handle)) return Status::InvalidArgument("invalid buffer handle");
-  return Status::Ok();
+auto BufferManager::MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> SharedBufferHandle {
+  frame_control::AcquireShared(descriptors_[frame_id].control);
+  return SharedBufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
 }
 
-auto BufferManager::ReleaseFrame(FrameId frame_id) -> Status {
-  if (frame_id >= pool_size_) return Status::InvalidArgument("invalid frame id");
-
-  Result<bool> unpin_result = UnpinFrame(frame_id);
-  if (!unpin_result.ok()) return unpin_result.status();
-  if (unpin_result.value()) {
-    MaybeEnqueueCleanerCandidate(frame_id);
-    NotifyCleaner();
-  }
-  return Status::Ok();
+auto BufferManager::MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag) -> ExclusiveBufferHandle {
+  frame_control::AcquireExclusive(descriptors_[frame_id].control);
+  return ExclusiveBufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
 }
 
-auto BufferManager::UnpinFrame(FrameId frame_id) -> Result<bool> {
+void BufferManager::ReleaseSharedHandle(FrameId frame_id) noexcept {
+  frame_control::ReleaseShared(descriptors_[frame_id].control);
+  ReleaseFrame(frame_id);
+}
+
+void BufferManager::ReleaseExclusiveHandle(FrameId frame_id) noexcept {
   BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-  if (descriptor.pin_count == 0) return Status::Internal("pin count underflow");
-  if (descriptor.state != BufferFrameState::kResident || !descriptor.is_valid || descriptor.io_in_flight) return Status::Internal("attempted to release a non-resident frame");
+  frame_control::ReleaseExclusive(descriptor.control, descriptor.version);
+  ReleaseFrame(frame_id);
+}
 
-  --descriptor.pin_count;
-  if (descriptor.pin_count != 0) return false;
+void BufferManager::MarkHandleDirty(FrameId frame_id) noexcept {
+  const std::optional<bool> became_dirty = frame_control::MarkDirty(descriptors_[frame_id].control);
+  if (!became_dirty.value_or(false)) return;
+  dirty_page_count_.fetch_add(1, std::memory_order_acq_rel);
+  NotifyCleaner();
+}
+
+void BufferManager::ReleaseFrame(FrameId frame_id) noexcept {
+  const std::optional<std::uint32_t> previous = frame_control::Unpin(descriptors_[frame_id].control);
+  if (!previous.has_value() || frame_control::Pins(*previous) != 1) return;
 
   replacer_->SetEvictable(frame_id, true);
-  return descriptor.is_dirty;
-}
-
-bool BufferManager::ValidateHandle(const BufferHandle &handle) const {
-  if (!handle.valid() || handle.manager_ != this || handle.frame_id() >= pool_size_) return false;
-  const BufferDescriptor &descriptor = descriptors_[handle.frame_id()];
-  std::lock_guard<std::mutex> guard(descriptor.latch);
-  return buffer_descriptor_state::IsResidentFrameMatch(descriptor, handle.tag());
-}
-
-auto BufferManager::AcquireReadPointer(BufferHandle *handle) const -> const std::byte *{
-  if (handle == nullptr || !ValidateHandle(*handle)) return nullptr;
-  AcquireReadLatch(handle);
-  return handle->data_;
-}
-
-auto BufferManager::AcquireWritePointer(BufferHandle *handle) -> std::byte *{
-  if (handle == nullptr || !ValidateHandle(*handle)) return nullptr;
-  AcquireWriteLatch(handle);
-  return handle->data_;
-}
-
-void BufferManager::AcquireReadLatch(BufferHandle *handle) const {
-  if (handle->write_lock_.owns_lock() || handle->read_lock_.owns_lock()) return;
-  handle->read_lock_ = std::shared_lock<std::shared_mutex>(descriptors_[handle->frame_id_].content_latch);
-}
-
-void BufferManager::AcquireWriteLatch(BufferHandle *handle) {
-  if (handle->write_lock_.owns_lock()) return;
-  if (handle->read_lock_.owns_lock()) handle->read_lock_.unlock();
-  handle->write_lock_ = std::unique_lock<std::shared_mutex>(descriptors_[handle->frame_id_].content_latch);
+  if (!frame_control::IsDirty(*previous)) return;
+  MaybeEnqueueCleanerCandidate(frame_id);
+  NotifyCleaner();
 }
 
 }  // namespace telepath

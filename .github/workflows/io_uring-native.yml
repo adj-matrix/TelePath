@@ -31,3 +31,6 @@ jobs:
 
       - name: Run native io_uring tests
         run: ./scripts/test/io_uring_native.sh
+
+      - name: Run full suite in the io_uring build
+        run: ./scripts/test/io_uring_debug.sh

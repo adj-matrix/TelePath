@@ -1,5 +1,7 @@
 #include "completion_dispatcher.h"
 
+#include <utility>
+
 #include "telepath/io/disk_backend.h"
 
 namespace telepath {
@@ -7,16 +9,17 @@ namespace telepath {
 BufferManagerCompletionDispatcher::BufferManagerCompletionDispatcher(DiskBackend *disk_backend) : disk_backend_(disk_backend) {}
 
 BufferManagerCompletionDispatcher::~BufferManagerCompletionDispatcher() {
-  Shutdown(Status::Unavailable("completion dispatcher destroyed"));
+  Shutdown(Unavailable("completion dispatcher destroyed"));
 }
 
-auto BufferManagerCompletionDispatcher::Start() -> Status {
+auto BufferManagerCompletionDispatcher::Start(FatalCallback on_fatal) -> Status {
+  on_fatal_ = std::move(on_fatal);
   try {
     thread_ = std::thread(&BufferManagerCompletionDispatcher::Run, this);
   } catch (...) {
-    return Status::Unavailable("failed to start completion dispatcher");
+    return Unavailable("failed to start completion dispatcher");
   }
-  return Status::Ok();
+  return Ok();
 }
 
 void BufferManagerCompletionDispatcher::Shutdown(const Status &status) {
@@ -41,7 +44,7 @@ void BufferManagerCompletionDispatcher::Register(uint64_t request_id) {
 
 auto BufferManagerCompletionDispatcher::Wait(uint64_t request_id) -> Status {
   std::unique_lock<std::mutex> lock(latch_);
-  if (request_states_.find(request_id) == request_states_.end()) return Status::InvalidArgument("disk request was not registered");
+  if (request_states_.find(request_id) == request_states_.end()) return InvalidArgument("disk request was not registered");
 
   cv_.wait(lock, [&]() {
     auto state_it = request_states_.find(request_id);
@@ -49,7 +52,7 @@ auto BufferManagerCompletionDispatcher::Wait(uint64_t request_id) -> Status {
   });
 
   auto state_it = request_states_.find(request_id);
-  if (state_it == request_states_.end()) return Status::Internal("registered disk request disappeared");
+  if (state_it == request_states_.end()) return Internal("registered disk request disappeared");
 
   if (!state_it->second.completed) {
     request_states_.erase(state_it);
@@ -71,9 +74,10 @@ void BufferManagerCompletionDispatcher::Run() {
 
     Result<DiskCompletion> completion_result = disk_backend_->PollCompletion();
     std::lock_guard<std::mutex> guard(latch_);
-    if (!completion_result.ok()) {
+    if (!completion_result.has_value()) {
+      if (!stopped_ && on_fatal_) on_fatal_(completion_result.error());
       shutdown_ = true;
-      shutdown_status_ = completion_result.status();
+      shutdown_status_ = PropagateError(completion_result);
       cv_.notify_all();
       return;
     }

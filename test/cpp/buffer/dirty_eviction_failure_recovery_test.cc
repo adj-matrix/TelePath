@@ -1,5 +1,6 @@
 #include <array>
 #include <cassert>
+#include <memory>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +25,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
     std::byte *out,
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
-    if (out == nullptr || size != page_size_) return telepath::Status::InvalidArgument("invalid read request");
+    if (out == nullptr || size != page_size_) return telepath::InvalidArgument("invalid read request");
 
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
@@ -39,7 +40,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
     const std::byte *data,
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
-    if (data == nullptr || size != page_size_) return telepath::Status::InvalidArgument("invalid write request");
+    if (data == nullptr || size != page_size_) return telepath::InvalidArgument("invalid write request");
 
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
@@ -54,14 +55,14 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
     {
       std::unique_lock<std::mutex> lock(latch_);
       cv_.wait(lock, [&]() { return shutdown_ || !pending_.empty(); });
-      if (shutdown_ && pending_.empty()) return telepath::Status::Unavailable("backend shutting down");
+      if (shutdown_ && pending_.empty()) return telepath::Unavailable("backend shutting down");
       request = pending_.front();
       pending_.pop_front();
     }
 
     if (request.operation == telepath::DiskOperation::kRead) {
       CompleteRead(request);
-      return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Status::Ok()};
+      return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Ok()};
     }
 
     telepath::Status write_status = CompleteWrite(request);
@@ -118,7 +119,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
       auto failure_it = write_failures_remaining_.find(request.tag);
       if (failure_it != write_failures_remaining_.end() && failure_it->second > 0) {
         --failure_it->second;
-        return telepath::Status::IoError("forced dirty victim write failure");
+        return telepath::IoError("forced dirty victim write failure");
       }
     }
 
@@ -129,7 +130,7 @@ class DirtyEvictionBackend : public telepath::DiskBackend {
       pages_[request.tag] = page;
     }
     cv_.notify_all();
-    return telepath::Status::Ok();
+    return telepath::Ok();
   }
 
   std::size_t page_size_{0};
@@ -157,19 +158,20 @@ void ExpectDirtyVictimRollbackAndRetry() {
   auto *backend_ptr = backend.get();
   auto replacer = telepath::MakeClockReplacer(1);
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  telepath::BufferManager manager(1, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(1, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto old_result = manager.ReadBuffer(old_tag.file_id, old_tag.block_id);
-  assert(old_result.ok());
+  auto old_result = manager.ReadBufferExclusive(old_tag.file_id, old_tag.block_id);
+  assert(old_result.has_value());
   auto old_handle = std::move(old_result.value());
   old_handle.mutable_data()[0] = std::byte{0xA0};
-  assert(manager.MarkBufferDirty(old_handle).ok());
   old_handle.Reset();
 
   backend_ptr->FailNextWriteFor(old_tag);
   auto failed_new_result = manager.ReadBuffer(new_tag.file_id, new_tag.block_id);
-  assert(!failed_new_result.ok());
-  assert(failed_new_result.status().code() == telepath::StatusCode::kIoError);
+  assert(!failed_new_result.has_value());
+  assert(failed_new_result.error().code() == telepath::ErrorCode::kIoError);
   assert(backend_ptr->ReadPersistedPage(old_tag)[0] == std::byte{0});
 
   auto rolled_back = FindOnlyFrame(manager.ExportSnapshot());
@@ -183,14 +185,14 @@ void ExpectDirtyVictimRollbackAndRetry() {
 
   const std::size_t reads_after_failure = backend_ptr->submitted_reads();
   auto warm_old_result = manager.ReadBuffer(old_tag.file_id, old_tag.block_id);
-  assert(warm_old_result.ok());
+  assert(warm_old_result.has_value());
   auto warm_old_handle = std::move(warm_old_result.value());
   assert(warm_old_handle.data()[0] == std::byte{0xA0});
   assert(backend_ptr->submitted_reads() == reads_after_failure);
   warm_old_handle.Reset();
 
   auto retry_new_result = manager.ReadBuffer(new_tag.file_id, new_tag.block_id);
-  assert(retry_new_result.ok());
+  assert(retry_new_result.has_value());
   auto retry_new_handle = std::move(retry_new_result.value());
   assert(retry_new_handle.data()[0] == std::byte{0});
   retry_new_handle.Reset();

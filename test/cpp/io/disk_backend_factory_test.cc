@@ -32,7 +32,7 @@ void AssertBackend(
   telepath::DiskBackendKind expected_kind,
   bool expected_fallback
 ) {
-  assert(backend_result.ok());
+  assert(backend_result.has_value());
 
   const auto capabilities = backend_result.value()->GetCapabilities();
   assert(capabilities.kind == expected_kind);
@@ -44,8 +44,8 @@ void AssertBackend(
 // Unavailable, depending on whether this build and kernel can set up a ring.
 auto ProbeStrictIoUringSelection(const std::filesystem::path &root) -> bool {
   auto backend_result = CreateBackend(root, telepath::DiskBackendKind::kIoUring, false);
-  if (!backend_result.ok()) {
-    assert(backend_result.status().code() == telepath::StatusCode::kUnavailable);
+  if (!backend_result.has_value()) {
+    assert(backend_result.error().code() == telepath::ErrorCode::kUnavailable);
     assert(!telepath::io_test_support::RequireIoUringSuccess());
     return false;
   }
@@ -86,8 +86,8 @@ void AssertRingSetupFailureFallsBackToPosix(const std::filesystem::path &root) {
     telepath::DiskBackendKind::kPosix, true);
 
   auto strict_result = CreateBackend(root, telepath::DiskBackendKind::kIoUring, false, kUnsupportedQueueDepth);
-  assert(!strict_result.ok());
-  assert(strict_result.status().code() == telepath::StatusCode::kUnavailable);
+  assert(!strict_result.has_value());
+  assert(strict_result.error().code() == telepath::ErrorCode::kUnavailable);
 }
 
 }  // namespace

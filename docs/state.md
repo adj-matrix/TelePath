@@ -38,7 +38,7 @@ Compared with State 2, the current implementation now includes:
 The current State 4 codebase includes:
 
 - `BufferManager`
-- `BufferHandle`
+- `SharedBufferHandle` / `ExclusiveBufferHandle`
 - `BufferDescriptor`
 - contiguous `FrameMemoryPool`
 - `DiskBackend`
@@ -126,7 +126,7 @@ The benchmark entry point can now vary workload, replacer, requested disk backen
 
 `scripts/bench/sweep.sh` runs thread sweeps with the same replacer, backend, write pressure, and writeback knobs accepted by the benchmark binary. `scripts/bench/matrix.sh` builds once and emits a clean CSV matrix across workload, thread count, replacement policy, backend, and write pressure dimensions. `scripts/bench/summarize.py` turns CSV artifacts into Markdown tables that call out best throughput, best hit rate, and lowest p95 latency. The Web console also forwards the same experiment knobs to the benchmark binary so ad hoc browser runs and scripted runs use the same parameter surface.
 
-Benchmark output now includes operation-level latency summaries: min, average, p50, p95, p99, and max. These values measure each logical benchmark operation from `ReadBuffer()` through optional dirty marking and foreground flush completion. This gives the experiment plane enough signal to compare throughput, hit rate, writeback pressure, and tail latency together.
+Benchmark output now includes operation-level latency summaries: min, average, p50, p95, p99, and max. These values measure each logical benchmark operation from `ReadBuffer()`/`ReadBufferExclusive()` through optional dirty marking and foreground flush completion. This gives the experiment plane enough signal to compare throughput, hit rate, writeback pressure, and tail latency together.
 
 JSON benchmark output also carries a bounded `sampled_snapshots` array. These samples are captured during the run around page reads, dirty marks, and observable runtime I/O states. The Web frame map exposes the final snapshot and the sampled runtime snapshots as selectable views, so pinned, dirty, queued, or in-flight states can be inspected without losing the end-of-run state.
 

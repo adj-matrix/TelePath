@@ -19,11 +19,11 @@ auto BuildMarkedPage() -> std::array<std::byte, 4096> {
   return page;
 }
 
-bool HandleUnavailableIoUringBackend(const telepath::IoUringDiskBackend &backend) {
-  if (backend.initialization_status().ok()) return false;
+bool HandleUnavailableIoUringBackend(const telepath::Result<std::unique_ptr<telepath::IoUringDiskBackend>> &backend_result) {
+  if (backend_result.has_value()) return false;
 
   assert(!telepath::io_test_support::RequireIoUringSuccess());
-  assert(backend.initialization_status().code() == telepath::StatusCode::kUnavailable);
+  assert(backend_result.error().code() == telepath::ErrorCode::kUnavailable);
   return true;
 }
 
@@ -33,8 +33,8 @@ void AssertSubmitFailureDoesNotLeaveInFlightRequest(
     const std::array<std::byte, 4096> &page) {
   telepath::IoUringDiskBackendTestPeer::ForceNextSubmitResult(*backend, 0);
   auto submit_failure = backend->SubmitWrite(tag, page.data(), page.size());
-  assert(!submit_failure.ok());
-  assert(submit_failure.status().code() == telepath::StatusCode::kIoError);
+  assert(!submit_failure.has_value());
+  assert(submit_failure.error().code() == telepath::ErrorCode::kIoError);
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 0);
 }
 
@@ -43,17 +43,17 @@ void AssertCompletionFailureReportsIoError(telepath::IoUringDiskBackend *backend
   buffer.fill(std::byte{0xFF});
 
   auto completion_request = backend->SubmitRead(tag, buffer.data(), buffer.size());
-  assert(completion_request.ok());
+  assert(completion_request.has_value());
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 1);
 
   telepath::IoUringDiskBackendTestPeer::ForceNextCompletionResult(*backend, -EIO);
   auto completion_failure = backend->PollCompletion();
-  assert(completion_failure.ok());
+  assert(completion_failure.has_value());
   assert(completion_failure.value().request_id == completion_request.value());
   assert(completion_failure.value().operation == telepath::DiskOperation::kRead);
   assert(completion_failure.value().tag == tag);
-  assert(!completion_failure.value().status.ok());
-  assert(completion_failure.value().status.code() == telepath::StatusCode::kIoError);
+  assert(!completion_failure.value().status.has_value());
+  assert(completion_failure.value().status.error().code() == telepath::ErrorCode::kIoError);
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 0);
 }
 
@@ -62,12 +62,12 @@ void AssertBackendRecoversAfterFailure(
     const telepath::BufferTag &tag,
     const std::array<std::byte, 4096> &page) {
   auto recovery_write = backend->SubmitWrite(tag, page.data(), page.size());
-  assert(recovery_write.ok());
+  assert(recovery_write.has_value());
 
   auto recovery_completion = backend->PollCompletion();
-  assert(recovery_completion.ok());
+  assert(recovery_completion.has_value());
   assert(recovery_completion.value().request_id == recovery_write.value());
-  assert(recovery_completion.value().status.ok());
+  assert(recovery_completion.value().status.has_value());
   assert(telepath::IoUringDiskBackendTestPeer::InFlightRequestCount(*backend) == 0);
 }
 
@@ -75,8 +75,9 @@ void AssertBackendRecoversAfterFailure(
 
 int main() {
   telepath::io_test_support::TestRootGuard root_guard("telepath_io_uring_failure_paths_test");
-  telepath::IoUringDiskBackend backend(root_guard.path().string(), 4096, 8);
-  if (HandleUnavailableIoUringBackend(backend)) return 0;
+  auto backend_result = telepath::IoUringDiskBackend::Create(root_guard.path().string(), telepath::BlockGeometry::Of<4096>(), 8);
+  if (HandleUnavailableIoUringBackend(backend_result)) return 0;
+  telepath::IoUringDiskBackend &backend = *backend_result.value();
 
   const telepath::BufferTag submit_fail_tag{37, 0};
   const telepath::BufferTag completion_fail_tag{37, 1};

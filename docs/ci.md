@@ -24,8 +24,12 @@ The first CI iteration intentionally stays small and reliable. It currently runs
 
 - `GCC Debug`
 - `GCC ASAN`
-- `Clang Debug`
+- `GCC Release` (tests keep assertions active in every build type)
+- `Clang Debug` (clang-19)
+- `Clang TSAN` (clang-19, run with ASLR disabled through `setarch -R`)
 - `io_uring Debug` in a separate native-storage workflow
+
+All jobs install their toolchain through `support/install_build_deps.sh`, which provides GCC 14 and Clang 19.
 
 These jobs reuse the same repository scripts developers run locally:
 
@@ -44,7 +48,7 @@ That workflow:
 
 - builds with `TELEPATH_ENABLE_IO_URING=ON`,
 - uses `./scripts/build/io_uring_debug.sh`,
-- runs only tests labeled `native_io_uring`,
+- runs the tests labeled `native_io_uring`, then the full suite in the io_uring build,
 - sets `TELEPATH_REQUIRE_IO_URING_SUCCESS=1` so the job fails if the runner cannot execute the real `io_uring` path.
 
 This separation matters because the normal Linux/WSL development path must continue to validate fallback behavior even on systems where `io_uring` is blocked or unavailable.
@@ -57,7 +61,7 @@ The benchmark workflow:
 
 - runs on `workflow_dispatch`,
 - runs on a nightly `schedule`,
-- builds the debug benchmark target,
+- builds the `io_uring_release` benchmark target (RelWithDebInfo),
 - executes workload sweeps for `hotspot`, `uniform`, `sequential_shared`, and `sequential_disjoint`,
 - uploads CSV results with throughput, hit-rate, writeback, and operation-latency fields as GitHub Actions artifacts,
 - publishes a compact Markdown summary directly in the Actions UI using `scripts/bench/summarize.py`.

@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "telepath/common/block_geometry.h"
 #include "telepath/io/disk_backend.h"
 
 #if TELEPATH_HAS_LIBURING
@@ -20,13 +21,19 @@ class IoUringDiskBackendTestPeer;
 
 class IoUringDiskBackend : public DiskBackend {
  public:
-  IoUringDiskBackend(
+  // Creates a backend with an initialized io_uring ring. Returns
+  // ErrorCode::kUnavailable when io_uring is not compiled in or the kernel
+  // refuses ring setup, and kInvalidArgument for an empty root path.
+  static auto Create(
     std::string root_path,
-    std::size_t page_size,
+    BlockGeometry geometry,
     std::size_t queue_depth,
     std::size_t max_open_files = 64,
     bool sync_on_write = true
-  );
+  ) -> Result<std::unique_ptr<IoUringDiskBackend>>;
+
+  IoUringDiskBackend(const IoUringDiskBackend &) = delete;
+  IoUringDiskBackend &operator=(const IoUringDiskBackend &) = delete;
   ~IoUringDiskBackend() override;
 
   auto SubmitRead(
@@ -42,7 +49,6 @@ class IoUringDiskBackend : public DiskBackend {
   auto PollCompletion() -> Result<DiskCompletion> override;
   void Shutdown() override;
   auto GetCapabilities() const -> DiskBackendCapabilities override;
-  auto initialization_status() const -> Status { return init_status_; }
 
  private:
   friend class IoUringDiskBackendTestPeer;
@@ -55,6 +61,15 @@ class IoUringDiskBackend : public DiskBackend {
 
   struct RequestContext;
   struct Impl;
+
+  IoUringDiskBackend(
+    std::string root_path,
+    BlockGeometry geometry,
+    std::size_t queue_depth,
+    std::size_t max_open_files,
+    bool sync_on_write);
+
+  auto Initialize() -> Status;
 
   auto InitializeRootDirectory() -> Status;
   auto InitializeRing() -> Status;
@@ -109,13 +124,13 @@ class IoUringDiskBackend : public DiskBackend {
   auto InFlightRequestCountForTest() const -> std::size_t;
 
   std::string root_path_;
-  std::size_t page_size_{0};
+  BlockGeometry geometry_;
   std::size_t queue_depth_{0};
   std::size_t max_open_files_{64};
   bool sync_on_write_{true};
   uint64_t next_request_id_{1};
   uint64_t open_file_clock_{0};
-  Status init_status_{Status::Ok()};
+  bool ring_initialized_{false};
   mutable std::mutex latch_;
   bool shutdown_{false};
   std::optional<int> next_submit_result_for_test_;

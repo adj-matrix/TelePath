@@ -22,18 +22,18 @@ class IdleAwareDiskBackend : public telepath::DiskBackend {
   explicit IdleAwareDiskBackend(std::shared_ptr<IdleBackendState> state) : state_(std::move(state)) {}
 
   telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &, std::byte *, std::size_t) override {
-    return telepath::Status::Unavailable("not expected");
+    return telepath::Unavailable("not expected");
   }
 
   telepath::Result<uint64_t> SubmitWrite(const telepath::BufferTag &, const std::byte *, std::size_t) override {
-    return telepath::Status::Unavailable("not expected");
+    return telepath::Unavailable("not expected");
   }
 
   telepath::Result<telepath::DiskCompletion> PollCompletion() override {
     state_->poll_calls.fetch_add(1);
     std::unique_lock<std::mutex> lock(latch_);
     cv_.wait(lock, [this]() { return shutdown_; });
-    return telepath::Status::Unavailable("backend shutdown");
+    return telepath::Unavailable("backend shutdown");
   }
 
   void Shutdown() override {
@@ -60,7 +60,8 @@ void CreateAndDestroyManager(const std::shared_ptr<IdleBackendState> &state) {
   auto backend = std::make_unique<IdleAwareDiskBackend>(state);
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
 }
 
 void AssertIdleBackendWasNotPolled(const std::shared_ptr<IdleBackendState> &state) {

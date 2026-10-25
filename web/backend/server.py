@@ -21,8 +21,8 @@ from urllib.parse import urlparse
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_ROOT = REPO_ROOT / "web" / "frontend"
 LOCALIZATION_ROOT = REPO_ROOT / "localization" / "web-console"
-BENCHMARK_BIN = REPO_ROOT / "build" / "debug" / "test" / "telepath_benchmark"
-BUILD_SCRIPT = REPO_ROOT / "scripts" / "build" / "debug.sh"
+BENCHMARK_BIN = REPO_ROOT / "build" / "release" / "test" / "telepath_benchmark"
+BUILD_SCRIPT = REPO_ROOT / "scripts" / "build" / "release.sh"
 
 WORKLOADS = [
     "hotspot",
@@ -345,7 +345,7 @@ def ensure_benchmark_binary() -> None:
         )
         if result.returncode != 0 or not BENCHMARK_BIN.exists():
             raise RuntimeError(
-                "failed to build TelePath debug benchmark binary\n"
+                "failed to build TelePath release benchmark binary\n"
                 f"stdout:\n{result.stdout}\n"
                 f"stderr:\n{result.stderr}"
             )

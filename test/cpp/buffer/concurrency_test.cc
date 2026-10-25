@@ -19,28 +19,27 @@ constexpr int kWorkerCount = 8;
 constexpr int kRoundCount = 200;
 constexpr telepath::BlockId kSeededBlockCount = 4;
 
-auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
+auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = telepath::MakeClockReplacer(8);
-  return telepath::BufferManager(8, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+  return telepath::BufferManager::Create(8, 4096, std::move(disk_backend), std::move(replacer), telemetry).value();
 }
 
 void SeedPersistedPages(telepath::BufferManager *manager) {
   for (telepath::BlockId block_id = 0; block_id < kSeededBlockCount; ++block_id) {
-    auto result = manager->ReadBuffer(1, block_id);
-    assert(result.ok());
+    auto result = manager->ReadBufferExclusive(1, block_id);
+    assert(result.has_value());
 
     auto handle = std::move(result.value());
     handle.mutable_data()[0] = static_cast<std::byte>(block_id + 1);
-    assert(manager->MarkBufferDirty(handle).ok());
     handle.Reset();
   }
 
   const auto flush_status = manager->FlushAll();
-  if (flush_status.ok()) return;
+  if (flush_status.has_value()) return;
 
-  std::cerr << "FlushAll failed: " << flush_status.message() << "\n";
+  std::cerr << "FlushAll failed: " << flush_status.error().message() << "\n";
   std::abort();
 }
 
@@ -52,7 +51,7 @@ void RunWorker(
   for (int round = 0; round < kRoundCount; ++round) {
     const auto block_id = static_cast<telepath::BlockId>((worker + round) % kSeededBlockCount);
     auto result = manager->ReadBuffer(1, block_id);
-    if (!result.ok()) {
+    if (!result.has_value()) {
       failed->store(true);
       return;
     }
@@ -84,7 +83,8 @@ void ExpectConcurrentReadsStayConsistent(telepath::BufferManager *manager) {
 
 int main() {
   telepath::buffer_test_support::TestRootGuard root_guard("telepath_concurrency_test_data");
-  auto manager = BuildManager(root_guard.path());
+  auto manager_owner = BuildManager(root_guard.path());
+  telepath::BufferManager &manager = *manager_owner;
   SeedPersistedPages(&manager);
   ExpectConcurrentReadsStayConsistent(&manager);
   return 0;

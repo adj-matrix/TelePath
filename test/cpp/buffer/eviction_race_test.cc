@@ -22,7 +22,7 @@ namespace {
 // writeback is pending, then releases them with an optional injected failure.
 class GatedWriteBackend : public telepath::DiskBackend {
  public:
-  explicit GatedWriteBackend(const std::string &root) : inner_(root, 4096) {}
+  explicit GatedWriteBackend(const std::string &root) : inner_(root, telepath::BlockGeometry::Of<4096>()) {}
 
   auto SubmitRead(const telepath::BufferTag &tag, std::byte *out, std::size_t size) -> telepath::Result<uint64_t> override {
     return inner_.SubmitRead(tag, out, size);
@@ -36,7 +36,7 @@ class GatedWriteBackend : public telepath::DiskBackend {
         cv_.notify_all();
         cv_.wait(lock, [&]() { return !gate_closed_; });
       }
-      if (fail_writes_) return telepath::Status::IoError("injected write failure");
+      if (fail_writes_) return telepath::IoError("injected write failure");
     }
     return inner_.SubmitWrite(tag, data, size);
   }
@@ -100,16 +100,15 @@ class Watchdog {
 };
 
 void WriteDirtyPage(telepath::BufferManager *manager, telepath::BlockId block_id, std::byte value) {
-  auto result = manager->ReadBuffer(1, block_id);
-  assert(result.ok());
+  auto result = manager->ReadBufferExclusive(1, block_id);
+  assert(result.has_value());
   auto handle = std::move(result.value());
   handle.mutable_data()[0] = value;
-  assert(manager->MarkBufferDirty(handle).ok());
 }
 
 void TouchPage(telepath::BufferManager *manager, telepath::BlockId block_id) {
   auto result = manager->ReadBuffer(1, block_id);
-  assert(result.ok());
+  assert(result.has_value());
 }
 
 auto CountResidentCopies(const telepath::BufferManager &manager, telepath::BlockId block_id) -> int {
@@ -126,18 +125,20 @@ void ExpectReaderOfDirtyVictimSeesLatestBytes() {
   telepath::buffer_test_support::TestRootGuard root("telepath_eviction_race_stale");
   auto backend = std::make_unique<GatedWriteBackend>(root.path().string());
   auto *gate = backend.get();
-  telepath::BufferManager manager(2, 4096, std::move(backend), telepath::MakeLruReplacer(2), telepath::MakeNoOpTelemetrySink());
+  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), telepath::MakeLruReplacer(2), telepath::MakeNoOpTelemetrySink());
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   WriteDirtyPage(&manager, 0, std::byte{0xAB});
   TouchPage(&manager, 1);
 
   gate->CloseGate();
-  std::thread evictor([&]() { assert(manager.ReadBuffer(1, 2).ok()); });
+  std::thread evictor([&]() { assert(manager.ReadBuffer(1, 2).has_value()); });
   gate->WaitForBlockedWrite();
 
   {
     auto result = manager.ReadBuffer(1, 0);
-    assert(result.ok());
+    assert(result.has_value());
     assert(result.value().data()[0] == std::byte{0xAB});
   }
 
@@ -146,7 +147,7 @@ void ExpectReaderOfDirtyVictimSeesLatestBytes() {
 
   assert(CountResidentCopies(manager, 0) <= 1);
   auto reread = manager.ReadBuffer(1, 0);
-  assert(reread.ok());
+  assert(reread.has_value());
   assert(reread.value().data()[0] == std::byte{0xAB});
 }
 
@@ -157,7 +158,9 @@ void ExpectFailedVictimWritebackKeepsSingleResidentCopy() {
   auto backend = std::make_unique<GatedWriteBackend>(root.path().string());
   auto *gate = backend.get();
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  telepath::BufferManager manager(3, 4096, std::move(backend), telepath::MakeLruReplacer(3), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(3, 4096, std::move(backend), telepath::MakeLruReplacer(3), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   WriteDirtyPage(&manager, 0, std::byte{0xCD});
   TouchPage(&manager, 1);
@@ -166,8 +169,8 @@ void ExpectFailedVictimWritebackKeepsSingleResidentCopy() {
   gate->CloseGate();
   std::thread evictor([&]() {
     auto result = manager.ReadBuffer(1, 2);
-    assert(!result.ok());
-    assert(result.status().code() == telepath::StatusCode::kIoError);
+    assert(!result.has_value());
+    assert(result.error().code() == telepath::ErrorCode::kIoError);
   });
   gate->WaitForBlockedWrite();
   TouchPage(&manager, 0);
@@ -184,7 +187,7 @@ void ExpectFailedVictimWritebackKeepsSingleResidentCopy() {
   assert(telemetry->Snapshot().eviction_failures == 1);
 
   auto result = manager.ReadBuffer(1, 0);
-  assert(result.ok());
+  assert(result.has_value());
   assert(result.value().data()[0] == std::byte{0xCD});
 }
 
@@ -194,23 +197,25 @@ void ExpectBusyVictimReturnsToReplacer(const char *name, const std::function<std
   telepath::buffer_test_support::TestRootGuard root(std::string("telepath_eviction_race_leak_") + name);
   auto backend = std::make_unique<GatedWriteBackend>(root.path().string());
   auto *gate = backend.get();
-  telepath::BufferManager manager(2, 4096, std::move(backend), make_replacer(), telepath::MakeNoOpTelemetrySink());
+  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), make_replacer(), telepath::MakeNoOpTelemetrySink());
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   WriteDirtyPage(&manager, 0, std::byte{0x11});
   TouchPage(&manager, 1);
 
   gate->CloseGate();
-  std::thread flusher([&]() { assert(manager.FlushAll().ok()); });
+  std::thread flusher([&]() { assert(manager.FlushAll().has_value()); });
   gate->WaitForBlockedWrite();
   TouchPage(&manager, 2);
   gate->OpenGate(false);
   flusher.join();
 
   auto pinned = manager.ReadBuffer(1, 3);
-  assert(pinned.ok());
+  assert(pinned.has_value());
   auto other = manager.ReadBuffer(1, 4);
-  if (!other.ok()) std::fprintf(stderr, "%s replacer lost an evictable frame: %s\n", name, other.status().message().c_str());
-  assert(other.ok());
+  if (!other.has_value()) std::fprintf(stderr, "%s replacer lost an evictable frame: %s\n", name, other.error().message());
+  assert(other.has_value());
 }
 
 // FlushAll() must not publish a queued flush and then block behind a writer
@@ -218,24 +223,25 @@ void ExpectBusyVictimReturnsToReplacer(const char *name, const std::function<std
 // cleaner shares FlushAll()'s opportunistic scheduling path.
 void ExpectFlushAllDoesNotDeadlockWithWriterFlush() {
   telepath::buffer_test_support::TestRootGuard root("telepath_eviction_race_flush_all");
-  telepath::BufferManager manager(
+  auto manager_owner = telepath::BufferManager::Create(
     4, 4096,
-    std::make_unique<telepath::PosixDiskBackend>(root.path().string(), 4096, false, 64, false),
+    std::make_unique<telepath::PosixDiskBackend>(root.path().string(), telepath::BlockGeometry::Of<4096>(), false, 64, false),
     telepath::MakeLruReplacer(4), telepath::MakeNoOpTelemetrySink());
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
   Watchdog watchdog(20, "flush_all_vs_writer");
 
   std::atomic<bool> stop{false};
   std::thread flusher([&]() {
-    while (!stop.load()) assert(manager.FlushAll().ok());
+    while (!stop.load()) assert(manager.FlushAll().has_value());
   });
   for (int i = 0; i < 300; ++i) {
-    auto result = manager.ReadBuffer(1, 0);
-    assert(result.ok());
+    auto result = manager.ReadBufferExclusive(1, 0);
+    assert(result.has_value());
     auto handle = std::move(result.value());
     handle.mutable_data()[0] = std::byte(i & 0xff);
-    assert(manager.MarkBufferDirty(handle).ok());
     std::this_thread::sleep_for(std::chrono::microseconds(500));
-    assert(manager.FlushBuffer(handle).ok());
+    assert(manager.FlushBuffer(handle).has_value());
   }
   stop = true;
   flusher.join();

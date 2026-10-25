@@ -36,12 +36,12 @@ void BufferManagerMissCoordinator::Complete(const BufferTag &tag, const std::sha
 }
 
 auto BufferManagerMissCoordinator::Wait(const std::shared_ptr<BufferManagerMissState> &state) -> Result<FrameId> {
-  if (state == nullptr) return Status::InvalidArgument("miss state must not be null");
+  if (state == nullptr) return InvalidArgument("miss state must not be null");
 
   std::unique_lock<std::mutex> lock(state->latch);
   state->cv.wait(lock, [&state]() { return state->completed; });
-  if (!state->status.ok()) return state->status;
-  if (state->frame_id == kInvalidFrameId) return Status::Internal("completed miss is missing a frame id");
+  if (!state->status.has_value()) return PropagateError(state->status);
+  if (state->frame_id == kInvalidFrameId) return Internal("completed miss is missing a frame id");
   return state->frame_id;
 }
 

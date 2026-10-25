@@ -22,7 +22,6 @@ class BufferManagerCompletionDispatcher;
 struct BufferManagerFlushTask {
   FrameId frame_id{kInvalidFrameId};
   BufferTag tag{};
-  uint64_t generation{0};
   bool clear_dirty_on_success{false};
   bool cleaner_owned{false};
   std::vector<std::byte> snapshot;

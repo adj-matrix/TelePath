@@ -41,7 +41,7 @@ BufferManagerFlushScheduler::~BufferManagerFlushScheduler() { Shutdown(); }
 auto BufferManagerFlushScheduler::Start(TaskStartCallback on_task_start, TaskCompleteCallback on_task_complete) -> Status {
   {
     std::lock_guard<std::mutex> guard(latch_);
-    if (started_) return Status::Ok();
+    if (started_) return Ok();
     on_task_start_ = std::move(on_task_start);
     on_task_complete_ = std::move(on_task_complete);
   }
@@ -60,14 +60,14 @@ auto BufferManagerFlushScheduler::Start(TaskStartCallback on_task_start, TaskCom
       if (worker.joinable()) worker.join();
     }
     workers_.clear();
-    return Status::Unavailable("failed to start flush scheduler");
+    return Unavailable("failed to start flush scheduler");
   }
 
   {
     std::lock_guard<std::mutex> guard(latch_);
     started_ = true;
   }
-  return Status::Ok();
+  return Ok();
 }
 
 void BufferManagerFlushScheduler::Shutdown() {
@@ -88,20 +88,20 @@ void BufferManagerFlushScheduler::Shutdown() {
 }
 
 auto BufferManagerFlushScheduler::Enqueue(const TaskPtr &task) -> Status {
-  if (task == nullptr) return Status::InvalidArgument("flush task must not be null");
+  if (task == nullptr) return InvalidArgument("flush task must not be null");
 
   std::lock_guard<std::mutex> guard(latch_);
-  if (shutdown_) return Status::Unavailable("flush scheduler is shutting down");
+  if (shutdown_) return Unavailable("flush scheduler is shutting down");
 
   if (task->cleaner_owned) background_queue_.push_back(task);
   else foreground_queue_.push_back(task);
 
   cv_.notify_one();
-  return Status::Ok();
+  return Ok();
 }
 
 auto BufferManagerFlushScheduler::Wait(const TaskPtr &task) -> Status {
-  if (task == nullptr) return Status::InvalidArgument("flush task must not be null");
+  if (task == nullptr) return InvalidArgument("flush task must not be null");
   return task->Wait();
 }
 
@@ -159,8 +159,8 @@ void BufferManagerFlushScheduler::Run() {
       if (on_task_start_) on_task_start_(task);
 
       Result<uint64_t> submit_result = disk_backend_->SubmitWrite(task->tag, task->snapshot.data(), page_size_);
-      if (!submit_result.ok()) {
-        CompleteTask(task, submit_result.status());
+      if (!submit_result.has_value()) {
+        CompleteTask(task, PropagateError(submit_result));
         continue;
       }
 

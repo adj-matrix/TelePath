@@ -1,3 +1,6 @@
+# Tests rely on assert() side effects; keep them active in every build type.
+add_compile_options(-UNDEBUG)
+
 add_executable(telepath_smoke_test
   cpp/buffer/smoke_test.cc
 )
@@ -5,6 +8,14 @@ add_executable(telepath_smoke_test
 target_link_libraries(telepath_smoke_test PRIVATE telepath)
 
 add_test(NAME telepath_smoke_test COMMAND telepath_smoke_test)
+
+add_executable(telepath_block_geometry_test
+  cpp/common/block_geometry_test.cc
+)
+
+target_link_libraries(telepath_block_geometry_test PRIVATE telepath)
+
+add_test(NAME telepath_block_geometry_test COMMAND telepath_block_geometry_test)
 
 add_executable(telepath_replacer_test
   cpp/replacer/replacer_test.cc
@@ -40,14 +51,14 @@ target_link_libraries(telepath_miss_coordinator_test PRIVATE telepath)
 
 add_test(NAME telepath_miss_coordinator_test COMMAND telepath_miss_coordinator_test)
 
-add_executable(telepath_buffer_descriptor_state_test
-  cpp/buffer/buffer_descriptor_state_test.cc
+add_executable(telepath_frame_control_test
+  cpp/buffer/frame_control_test.cc
 )
 
-target_include_directories(telepath_buffer_descriptor_state_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
-target_link_libraries(telepath_buffer_descriptor_state_test PRIVATE telepath)
+target_include_directories(telepath_frame_control_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_frame_control_test PRIVATE telepath)
 
-add_test(NAME telepath_buffer_descriptor_state_test COMMAND telepath_buffer_descriptor_state_test)
+add_test(NAME telepath_frame_control_test COMMAND telepath_frame_control_test)
 
 add_executable(telepath_completion_dispatcher_test
   cpp/buffer/completion_dispatcher_test.cc
@@ -307,6 +318,23 @@ add_executable(telepath_wait_evict_interleave_test
 target_link_libraries(telepath_wait_evict_interleave_test PRIVATE telepath)
 
 add_test(NAME telepath_wait_evict_interleave_test COMMAND telepath_wait_evict_interleave_test)
+
+add_executable(telepath_fatal_state_test
+  cpp/buffer/fatal_state_test.cc
+)
+
+target_link_libraries(telepath_fatal_state_test PRIVATE telepath)
+
+add_test(NAME telepath_fatal_state_test COMMAND telepath_fatal_state_test)
+
+add_executable(telepath_stress_integrity_test
+  cpp/buffer/stress_integrity_test.cc
+)
+
+target_link_libraries(telepath_stress_integrity_test PRIVATE telepath)
+
+add_test(NAME telepath_stress_integrity_test COMMAND telepath_stress_integrity_test)
+set_tests_properties(telepath_stress_integrity_test PROPERTIES TIMEOUT 300)
 
 add_executable(telepath_eviction_race_test
   cpp/buffer/eviction_race_test.cc

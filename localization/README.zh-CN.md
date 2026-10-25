@@ -55,7 +55,7 @@ TelePath 想要提供一个更小、更清晰、也更容易审计的实验底�
 
 当前仓库已经从最初的 State 1/2 骨架推进到了一个建立在可用写回核心之上的 State 4 原型，包括：
 
-- `BufferManager`、`BufferHandle`、`BufferDescriptor`
+- `BufferManager`、`SharedBufferHandle`/`ExclusiveBufferHandle`、`BufferDescriptor`
 - 连续 frame memory pool
 - `DiskBackend`、`PosixDiskBackend`、`IoUringDiskBackend` 与 `DiskBackendFactory`
 - 同页并发 miss 的显式协调
@@ -113,6 +113,17 @@ sudo ./support/install_dev_tools.sh
 ./scripts/build/asan.sh
 ./scripts/test/asan.sh
 ```
+
+### TSAN 与 Release 构建
+
+TelePath 使用 C++23，需要 GCC 14 或 Clang 19，`support/install_build_deps.sh` 会安装这两个编译器。
+
+```bash
+./scripts/build/tsan.sh && ./scripts/test/tsan.sh
+./scripts/build/release.sh && ctest --preset release
+```
+
+Benchmark 与 Web 控制台使用 release 构建。
 
 ### Native `io_uring` 验证
 

@@ -37,6 +37,10 @@ struct DiskBackendCapabilities {
   bool supports_completion_batching{false};
   std::size_t recommended_queue_depth{1};
   bool is_fallback_backend{false};
+  // Block size the backend was configured with, or 0 when the backend accepts
+  // any request size. BufferManager::Create rejects a backend whose block size
+  // differs from the manager's.
+  std::size_t block_size{0};
 };
 
 class DiskBackend {

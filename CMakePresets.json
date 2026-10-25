@@ -15,7 +15,8 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "TELEPATH_ENABLE_ASAN": "OFF",
         "TELEPATH_ENABLE_LSAN": "OFF",
-        "TELEPATH_ENABLE_IO_URING": "OFF"
+        "TELEPATH_ENABLE_IO_URING": "OFF",
+        "TELEPATH_ENABLE_TSAN": "OFF"
       }
     },
     {
@@ -38,12 +39,39 @@
       }
     },
     {
+      "name": "tsan",
+      "displayName": "TSAN Debug (Clang)",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "TELEPATH_ENABLE_TSAN": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (RelWithDebInfo)",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
       "name": "io_uring_debug",
       "displayName": "io_uring Debug",
       "inherits": "debug",
       "binaryDir": "${sourceDir}/build/io_uring_debug",
       "cacheVariables": {
         "TELEPATH_ENABLE_IO_URING": "ON"
+      }
+    },
+    {
+      "name": "io_uring_release",
+      "displayName": "io_uring Release (RelWithDebInfo)",
+      "inherits": "io_uring_debug",
+      "binaryDir": "${sourceDir}/build/io_uring_release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     }
   ],
@@ -61,8 +89,20 @@
       "configurePreset": "lsan"
     },
     {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
       "name": "io_uring_debug",
       "configurePreset": "io_uring_debug"
+    },
+    {
+      "name": "io_uring_release",
+      "configurePreset": "io_uring_release"
     }
   ],
   "testPresets": [
@@ -81,6 +121,23 @@
       },
       "environment": {
         "ASAN_OPTIONS": "detect_leaks=0"
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "TSAN_OPTIONS": "halt_on_error=1"
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
       }
     },
     {

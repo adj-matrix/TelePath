@@ -2,8 +2,7 @@
 #define TELEPATH_BUFFER_BUFFER_HANDLE_H_
 
 #include <cstddef>
-#include <mutex>
-#include <shared_mutex>
+#include <span>
 
 #include "telepath/common/types.h"
 
@@ -11,53 +10,81 @@ namespace telepath {
 
 class BufferManager;
 
-class BufferHandle {
+// Shared access to one resident page, returned by BufferManager::ReadBuffer().
+// The handle holds a pin and the page's shared content latch from creation
+// until Reset() or destruction, so the page cannot be evicted or modified
+// while it is alive. Handles are movable and may be moved to another thread,
+// but must not be used by two threads at once. A thread must not hold two
+// handles on the same page.
+class SharedBufferHandle {
  public:
-  // Creates an empty handle that does not reference any frame.
-  BufferHandle() = default;
-  // Creates a pinned handle for a resident frame.
-  BufferHandle(
-    BufferManager *manager,
-    FrameId frame_id,
-    const BufferTag &tag,
-    std::byte *data,
-    std::size_t size);
+  SharedBufferHandle() = default;
+  SharedBufferHandle(const SharedBufferHandle &) = delete;
+  SharedBufferHandle &operator=(const SharedBufferHandle &) = delete;
+  SharedBufferHandle(SharedBufferHandle &&other) noexcept;
+  SharedBufferHandle &operator=(SharedBufferHandle &&other) noexcept;
+  ~SharedBufferHandle();
 
-  BufferHandle(const BufferHandle &) = delete;
-  BufferHandle &operator=(const BufferHandle &) = delete;
+  // Read-only view of the page; empty for a released handle.
+  auto data() const noexcept -> std::span<const std::byte> { return {data_, size_}; }
+  auto tag() const noexcept -> const BufferTag & { return tag_; }
+  auto frame_id() const noexcept -> FrameId { return frame_id_; }
+  auto size() const noexcept -> std::size_t { return size_; }
+  bool valid() const noexcept { return manager_ != nullptr; }
 
-  BufferHandle(BufferHandle &&other) noexcept;
-  BufferHandle &operator=(BufferHandle &&other) noexcept;
-
-  ~BufferHandle();
-
-  auto tag() const -> const BufferTag & { return tag_; }
-  auto frame_id() const -> FrameId { return frame_id_; }
-  auto size() const -> std::size_t { return size_; }
-
-  // Returns read-only access to the page contents. The handle acquires and
-  // holds a shared content latch on first access.
-  auto data() const -> const std::byte *;
-  // Returns writable access to the page contents. The handle upgrades to an
-  // exclusive content latch and holds it until Reset/destruction.
-  auto mutable_data() -> std::byte *;
-  bool writable() const { return data_ != nullptr; }
-
-  bool valid() const { return manager_ != nullptr; }
-
-  // Releases any held content latch and unpins the underlying frame.
-  void Reset();
+  // Releases the latch and the pin. Safe to call more than once.
+  void Reset() noexcept;
 
  private:
   friend class BufferManager;
+
+  SharedBufferHandle(BufferManager *manager, FrameId frame_id, const BufferTag &tag, std::byte *data, std::size_t size) noexcept;
 
   BufferManager *manager_{nullptr};
   FrameId frame_id_{kInvalidFrameId};
   BufferTag tag_{};
   std::byte *data_{nullptr};
   std::size_t size_{0};
-  mutable std::shared_lock<std::shared_mutex> read_lock_;
-  std::unique_lock<std::shared_mutex> write_lock_;
+};
+
+// Exclusive access to one resident page, returned by
+// BufferManager::ReadBufferExclusive(). The handle holds a pin and the page's
+// exclusive content latch from creation until Reset() or destruction.
+// Obtaining the writable view marks the page dirty; there is no separate
+// "mark dirty" call. Same threading rules as SharedBufferHandle.
+class ExclusiveBufferHandle {
+ public:
+  ExclusiveBufferHandle() = default;
+  ExclusiveBufferHandle(const ExclusiveBufferHandle &) = delete;
+  ExclusiveBufferHandle &operator=(const ExclusiveBufferHandle &) = delete;
+  ExclusiveBufferHandle(ExclusiveBufferHandle &&other) noexcept;
+  ExclusiveBufferHandle &operator=(ExclusiveBufferHandle &&other) noexcept;
+  ~ExclusiveBufferHandle();
+
+  // Read-only view of the page. Does not mark the page dirty.
+  auto data() const noexcept -> std::span<const std::byte> { return {data_, size_}; }
+  // Writable view of the page; marks the page dirty. Empty for a released
+  // handle.
+  auto mutable_data() noexcept -> std::span<std::byte>;
+  auto tag() const noexcept -> const BufferTag & { return tag_; }
+  auto frame_id() const noexcept -> FrameId { return frame_id_; }
+  auto size() const noexcept -> std::size_t { return size_; }
+  bool valid() const noexcept { return manager_ != nullptr; }
+
+  // Releases the latch and the pin. Safe to call more than once.
+  void Reset() noexcept;
+
+ private:
+  friend class BufferManager;
+
+  ExclusiveBufferHandle(BufferManager *manager, FrameId frame_id, const BufferTag &tag, std::byte *data, std::size_t size) noexcept;
+
+  BufferManager *manager_{nullptr};
+  FrameId frame_id_{kInvalidFrameId};
+  BufferTag tag_{};
+  std::byte *data_{nullptr};
+  std::size_t size_{0};
+  bool marked_dirty_{false};
 };
 
 }  // namespace telepath

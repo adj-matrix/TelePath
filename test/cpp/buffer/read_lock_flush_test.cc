@@ -14,49 +14,40 @@
 
 namespace {
 
-auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
+auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = telepath::MakeClockReplacer(2);
-  return telepath::BufferManager(2, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+  return telepath::BufferManager::Create(2, 4096, std::move(disk_backend), std::move(replacer), telemetry).value();
 }
 
 void SeedDirtyPage(telepath::BufferManager *manager) {
-  auto seed_result = manager->ReadBuffer(31, 0);
-  assert(seed_result.ok());
+  auto seed_result = manager->ReadBufferExclusive(31, 0);
+  assert(seed_result.has_value());
 
   auto seed = std::move(seed_result.value());
   seed.mutable_data()[0] = std::byte{0x6C};
   seed.mutable_data()[1] = std::byte{0x7D};
-  assert(manager->MarkBufferDirty(seed).ok());
 }
 
-struct FlushReadHandles {
-  telepath::BufferHandle reader;
-  telepath::BufferHandle flusher;
-};
-
-auto AcquireFlushReadHandles(telepath::BufferManager *manager) -> FlushReadHandles {
+auto AcquireReader(telepath::BufferManager *manager) -> telepath::SharedBufferHandle {
   auto reader_result = manager->ReadBuffer(31, 0);
-  auto flush_result = manager->ReadBuffer(31, 0);
-  assert(reader_result.ok());
-  assert(flush_result.ok());
-  return {
-    std::move(reader_result.value()),
-    std::move(flush_result.value()),
-  };
+  assert(reader_result.has_value());
+  return std::move(reader_result.value());
 }
 
 void ExpectFlushCompletesWhileReadHandleStaysPinned(
   telepath::BufferManager *manager,
-  FlushReadHandles handles
+  const telepath::SharedBufferHandle &reader
 ) {
-  assert(handles.reader.data()[0] == std::byte{0x6C});
+  assert(reader.data()[0] == std::byte{0x6C});
 
   std::atomic<bool> flush_finished{false};
-  telepath::Status flush_status = telepath::Status::Ok();
+  telepath::Status flush_status = telepath::Ok();
   std::thread flush_thread([&]() {
-    flush_status = manager->FlushBuffer(handles.flusher);
+    auto flusher = manager->ReadBuffer(31, 0);
+    assert(flusher.has_value());
+    flush_status = manager->FlushBuffer(*flusher);
     flush_finished.store(true);
   });
 
@@ -66,18 +57,18 @@ void ExpectFlushCompletesWhileReadHandleStaysPinned(
   }
   assert(flush_finished.load());
   flush_thread.join();
-  assert(flush_status.ok());
+  assert(flush_status.has_value());
 }
 
 void ExpectPersistedPageMatches(const std::filesystem::path &root) {
-  auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> page{};
   auto request = verifier->SubmitRead(telepath::BufferTag{31, 0}, page.data(), page.size());
-  assert(request.ok());
+  assert(request.has_value());
 
   auto completion = verifier->PollCompletion();
-  assert(completion.ok());
-  assert(completion.value().status.ok());
+  assert(completion.has_value());
+  assert(completion.value().status.has_value());
   assert(page[0] == std::byte{0x6C});
   assert(page[1] == std::byte{0x7D});
 }
@@ -86,10 +77,11 @@ void ExpectPersistedPageMatches(const std::filesystem::path &root) {
 
 int main() {
   telepath::buffer_test_support::TestRootGuard root_guard("telepath_read_lock_flush_test_data");
-  auto manager = BuildManager(root_guard.path());
+  auto manager_owner = BuildManager(root_guard.path());
+  telepath::BufferManager &manager = *manager_owner;
   SeedDirtyPage(&manager);
-  auto handles = AcquireFlushReadHandles(&manager);
-  ExpectFlushCompletesWhileReadHandleStaysPinned(&manager, std::move(handles));
+  const telepath::SharedBufferHandle reader = AcquireReader(&manager);
+  ExpectFlushCompletesWhileReadHandleStaysPinned(&manager, reader);
   ExpectPersistedPageMatches(root_guard.path());
   return 0;
 }

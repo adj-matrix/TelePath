@@ -16,21 +16,21 @@ namespace {
 class ScriptedCompletionBackend : public telepath::DiskBackend {
  public:
   telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &, std::byte *, std::size_t) override {
-    return telepath::Status::Unavailable("not used");
+    return telepath::Unavailable("not used");
   }
 
   telepath::Result<uint64_t> SubmitWrite(const telepath::BufferTag &, const std::byte *, std::size_t) override {
-    return telepath::Status::Unavailable("not used");
+    return telepath::Unavailable("not used");
   }
 
   telepath::Result<telepath::DiskCompletion> PollCompletion() override {
     std::unique_lock<std::mutex> lock(latch_);
     cv_.wait(lock, [&]() { return shutdown_ || !results_.empty(); });
-    if (results_.empty()) return telepath::Status::Unavailable("backend shutdown");
+    if (results_.empty()) return telepath::Unavailable("backend shutdown");
 
     auto result = std::move(results_.front());
     results_.pop_front();
-    if (result.ok()) {
+    if (result.has_value()) {
       last_polled_request_id_ = result.value().request_id;
       has_polled_request_ = true;
       cv_.notify_all();
@@ -56,7 +56,7 @@ class ScriptedCompletionBackend : public telepath::DiskBackend {
 
   void PushFailure(const telepath::Status &status) {
     std::lock_guard<std::mutex> guard(latch_);
-    results_.push_back(status);
+    results_.push_back(std::unexpected(status.error()));
     cv_.notify_all();
   }
 
@@ -79,68 +79,68 @@ class ScriptedCompletionBackend : public telepath::DiskBackend {
 void AssertWaitReturnsCompletionStatus() {
   ScriptedCompletionBackend backend;
   telepath::BufferManagerCompletionDispatcher dispatcher(&backend);
-  assert(dispatcher.Start().ok());
+  assert(dispatcher.Start().has_value());
 
   dispatcher.Register(11);
-  backend.PushCompletion(11, telepath::Status::Ok());
+  backend.PushCompletion(11, telepath::Ok());
   auto status = dispatcher.Wait(11);
-  assert(status.ok());
+  assert(status.has_value());
 
-  dispatcher.Shutdown(telepath::Status::Unavailable("test shutdown"));
+  dispatcher.Shutdown(telepath::Unavailable("test shutdown"));
 }
 
 void AssertOutOfOrderCompletionsReachCorrectWaiters() {
   ScriptedCompletionBackend backend;
   telepath::BufferManagerCompletionDispatcher dispatcher(&backend);
-  assert(dispatcher.Start().ok());
+  assert(dispatcher.Start().has_value());
 
   dispatcher.Register(21);
   dispatcher.Register(22);
-  backend.PushCompletion(22, telepath::Status::Ok());
-  backend.PushCompletion(21, telepath::Status::Ok());
+  backend.PushCompletion(22, telepath::Ok());
+  backend.PushCompletion(21, telepath::Ok());
 
   auto first_status = dispatcher.Wait(21);
   auto second_status = dispatcher.Wait(22);
-  assert(first_status.ok());
-  assert(second_status.ok());
+  assert(first_status.has_value());
+  assert(second_status.has_value());
 
-  dispatcher.Shutdown(telepath::Status::Unavailable("test shutdown"));
+  dispatcher.Shutdown(telepath::Unavailable("test shutdown"));
 }
 
 void AssertBackendFailureUnblocksRegisteredWaiters() {
   ScriptedCompletionBackend backend;
   telepath::BufferManagerCompletionDispatcher dispatcher(&backend);
-  assert(dispatcher.Start().ok());
+  assert(dispatcher.Start().has_value());
 
   dispatcher.Register(31);
-  telepath::Status wait_status = telepath::Status::Ok();
+  telepath::Status wait_status = telepath::Ok();
   std::thread waiter([&]() { wait_status = dispatcher.Wait(31); });
 
-  backend.PushFailure(telepath::Status::Unavailable("forced completion failure"));
+  backend.PushFailure(telepath::Unavailable("forced completion failure"));
   waiter.join();
-  assert(wait_status.code() == telepath::StatusCode::kUnavailable);
+  assert(wait_status.error().code() == telepath::ErrorCode::kUnavailable);
 
-  dispatcher.Shutdown(telepath::Status::Unavailable("test shutdown"));
+  dispatcher.Shutdown(telepath::Unavailable("test shutdown"));
 }
 
 void AssertEarlyCompletionIsDeliveredAfterRegistration() {
   ScriptedCompletionBackend backend;
   telepath::BufferManagerCompletionDispatcher dispatcher(&backend);
-  assert(dispatcher.Start().ok());
+  assert(dispatcher.Start().has_value());
 
   dispatcher.Register(41);
-  backend.PushCompletion(42, telepath::Status::Ok());
+  backend.PushCompletion(42, telepath::Ok());
   assert(backend.WaitUntilPolled(42, std::chrono::milliseconds(200)));
 
   dispatcher.Register(42);
   telepath::Status late_wait_status = dispatcher.Wait(42);
-  assert(late_wait_status.ok());
+  assert(late_wait_status.has_value());
 
-  backend.PushCompletion(41, telepath::Status::Ok());
+  backend.PushCompletion(41, telepath::Ok());
   auto original_wait_status = dispatcher.Wait(41);
-  assert(original_wait_status.ok());
+  assert(original_wait_status.has_value());
 
-  dispatcher.Shutdown(telepath::Status::Unavailable("test shutdown"));
+  dispatcher.Shutdown(telepath::Unavailable("test shutdown"));
 }
 
 }  // namespace

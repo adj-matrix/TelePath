@@ -94,20 +94,20 @@ auto SerializeTelemetryExportJson(const TelemetryExportSnapshot &snapshot) -> st
 }
 
 auto AppendTelemetryExportJsonLine(const std::string &path, const TelemetryExportSnapshot &snapshot) -> Status {
-  if (path.empty()) return Status::InvalidArgument("telemetry export path must not be empty");
+  if (path.empty()) return InvalidArgument("telemetry export path must not be empty");
 
   std::filesystem::path export_path(path);
   std::error_code create_error;
   if (export_path.has_parent_path()) {
     std::filesystem::create_directories(export_path.parent_path(), create_error);
-    if (create_error) return Status::IoError("failed to create telemetry export directory: " + create_error.message());
+    if (create_error) return IoError("failed to create telemetry export directory", create_error.value());
   }
 
   std::ofstream out(export_path, std::ios::out | std::ios::app);
-  if (!out.is_open()) return Status::IoError("failed to open telemetry export file");
+  if (!out.is_open()) return IoError("failed to open telemetry export file");
   out << SerializeTelemetryExportJson(snapshot) << "\n";
-  if (!out.good()) return Status::IoError("failed to write telemetry export file");
-  return Status::Ok();
+  if (!out.good()) return IoError("failed to write telemetry export file");
+  return Ok();
 }
 
 }  // namespace telepath

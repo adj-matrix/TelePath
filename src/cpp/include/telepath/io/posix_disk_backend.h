@@ -9,6 +9,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "telepath/common/block_geometry.h"
 #include "telepath/io/disk_backend.h"
 
 namespace telepath {
@@ -17,7 +18,7 @@ class PosixDiskBackend : public DiskBackend {
  public:
   explicit PosixDiskBackend(
     std::string root_path,
-    std::size_t page_size,
+    BlockGeometry geometry,
     bool is_fallback_backend = false,
     std::size_t max_open_files = 64,
     bool sync_on_write = true
@@ -93,7 +94,7 @@ class PosixDiskBackend : public DiskBackend {
   bool worker_active_{false};
   bool is_fallback_backend_{false};
   std::string root_path_;
-  std::size_t page_size_{0};
+  BlockGeometry geometry_;
   std::size_t max_open_files_{64};
   bool sync_on_write_{true};
   uint64_t open_file_clock_{0};

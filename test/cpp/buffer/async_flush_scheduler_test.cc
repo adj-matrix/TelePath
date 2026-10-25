@@ -26,7 +26,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
   explicit CoordinatedWriteBackend(std::size_t page_size) : page_size_(page_size) {}
 
   telepath::Result<uint64_t> SubmitRead(const telepath::BufferTag &tag, std::byte *out, std::size_t size) override {
-    if (out == nullptr || size != page_size_) return telepath::Status::InvalidArgument("invalid read request");
+    if (out == nullptr || size != page_size_) return telepath::InvalidArgument("invalid read request");
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
     pending_.push_back({request_id, telepath::DiskOperation::kRead, tag, out, nullptr, size});
@@ -38,12 +38,12 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
     const telepath::BufferTag &tag,
     const std::byte *data,
     std::size_t size) override {
-    if (data == nullptr || size != page_size_) return telepath::Status::InvalidArgument("invalid write request");
+    if (data == nullptr || size != page_size_) return telepath::InvalidArgument("invalid write request");
     std::lock_guard<std::mutex> guard(latch_);
     auto submit_failure_it = write_submit_failures_remaining_.find(tag);
     if (submit_failure_it != write_submit_failures_remaining_.end() && submit_failure_it->second > 0) {
       --submit_failure_it->second;
-      return telepath::Status::IoError("forced write submit failure");
+      return telepath::IoError("forced write submit failure");
     }
     const uint64_t request_id = next_request_id_++;
     pending_.push_back({request_id, telepath::DiskOperation::kWrite, tag, nullptr, data, size});
@@ -59,7 +59,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
     {
       std::unique_lock<std::mutex> lock(latch_);
       cv_.wait(lock, [&]() { return shutdown_ || !pending_.empty(); });
-      if (shutdown_ && pending_.empty()) return telepath::Status::Unavailable("backend shutting down");
+      if (shutdown_ && pending_.empty()) return telepath::Unavailable("backend shutting down");
       request = pending_.front();
       pending_.pop_front();
 
@@ -67,7 +67,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
         first_write_blocked_ = true;
         cv_.notify_all();
         cv_.wait(lock, [&]() { return shutdown_ || allow_first_write_completion_; });
-        if (shutdown_) return telepath::Status::Unavailable("backend shutting down");
+        if (shutdown_) return telepath::Unavailable("backend shutting down");
         block_first_write_completion_ = false;
       }
 
@@ -78,13 +78,13 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
           cv_.notify_all();
           cv_.wait(lock, [&]() { return shutdown_ || blocked_write_tags_.find(request.tag) == blocked_write_tags_.end(); });
           blocked_write_waiters_.erase(request.tag);
-          if (shutdown_) return telepath::Status::Unavailable("backend shutting down");
+          if (shutdown_) return telepath::Unavailable("backend shutting down");
         }
       }
 
       if (request.operation == telepath::DiskOperation::kWrite && block_all_write_completions_) {
         cv_.wait(lock, [&]() { return shutdown_ || allow_all_write_completions_; });
-        if (shutdown_) return telepath::Status::Unavailable("backend shutting down");
+        if (shutdown_) return telepath::Unavailable("backend shutting down");
       }
     }
 
@@ -102,7 +102,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
         auto failure_it = write_failures_remaining_.find(request.tag);
         if (failure_it != write_failures_remaining_.end() && failure_it->second > 0) {
           --failure_it->second;
-          return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Status::IoError("forced write failure")};
+          return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::IoError("forced write failure")};
         }
       }
 
@@ -115,7 +115,7 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
       cv_.notify_all();
     }
 
-    return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Status::Ok()};
+    return telepath::DiskCompletion{request.request_id, request.operation, request.tag, telepath::Ok()};
   }
 
   void Shutdown() override {
@@ -251,13 +251,13 @@ class CoordinatedWriteBackend : public telepath::DiskBackend {
   bool allow_all_write_completions_{false};
 };
 
-auto ReadHandle(
+auto WriteHandle(
   telepath::BufferManager *manager,
   telepath::FileId file_id,
   telepath::BlockId block_id
-) -> telepath::BufferHandle {
-  auto result = manager->ReadBuffer(file_id, block_id);
-  assert(result.ok());
+) -> telepath::ExclusiveBufferHandle {
+  auto result = manager->ReadBufferExclusive(file_id, block_id);
+  assert(result.has_value());
   return std::move(result.value());
 }
 
@@ -267,9 +267,8 @@ void SeedDirtyByte(
   telepath::BlockId block_id,
   std::byte value
 ) {
-  auto handle = ReadHandle(manager, file_id, block_id);
+  auto handle = WriteHandle(manager, file_id, block_id);
   handle.mutable_data()[0] = value;
-  assert(manager->MarkBufferDirty(handle).ok());
 }
 
 void ExpectForegroundFlushUsesFlushWorkerAndPersistsLatestDirtyVersion() {
@@ -279,33 +278,32 @@ void ExpectForegroundFlushUsesFlushWorkerAndPersistsLatestDirtyVersion() {
 
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  telepath::BufferManager manager(
+  auto manager_owner = telepath::BufferManager::Create(
       2, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   SeedDirtyByte(&manager, 5, 1, std::byte{0x11});
 
-  auto flusher = ReadHandle(&manager, 5, 1);
-  auto updater = ReadHandle(&manager, 5, 1);
-
   std::thread::id flush_requester_thread_id;
-  telepath::Status flush_status = telepath::Status::Ok();
+  telepath::Status flush_status = telepath::Ok();
   std::thread flush_thread([&]() {
     flush_requester_thread_id = std::this_thread::get_id();
-    flush_status = manager.FlushBuffer(flusher);
+    flush_status = manager.FlushBuffer(5, 1);
   });
 
   backend_ptr->WaitForSubmittedWrites(1);
   backend_ptr->WaitForFirstWriteBlocked();
 
+  auto updater = WriteHandle(&manager, 5, 1);
   updater.mutable_data()[0] = std::byte{0x22};
-  assert(manager.MarkBufferDirty(updater).ok());
   updater.Reset();
 
   backend_ptr->AllowFirstWriteCompletion();
   backend_ptr->WaitForSubmittedWrites(2);
 
   flush_thread.join();
-  assert(flush_status.ok());
+  assert(flush_status.has_value());
 
   const auto write_threads = backend_ptr->submit_write_threads();
   assert(write_threads.size() >= 2);
@@ -321,17 +319,19 @@ void ExpectEvictionUsesFlushWorkerForWriteback() {
 
   auto replacer = telepath::MakeClockReplacer(1);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(1, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(1, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   SeedDirtyByte(&manager, 8, 0, std::byte{0x33});
 
   std::thread::id eviction_requester_thread_id;
-  telepath::Status eviction_status = telepath::Status::Ok();
+  telepath::Status eviction_status = telepath::Ok();
   std::thread eviction_thread([&]() {
     eviction_requester_thread_id = std::this_thread::get_id();
     auto result = manager.ReadBuffer(8, 1);
-    if (!result.ok()) {
-      eviction_status = result.status();
+    if (!result.has_value()) {
+      eviction_status = std::unexpected(result.error());
       return;
     }
     auto handle = std::move(result.value());
@@ -343,7 +343,7 @@ void ExpectEvictionUsesFlushWorkerForWriteback() {
   backend_ptr->AllowFirstWriteCompletion();
   eviction_thread.join();
 
-  assert(eviction_status.ok());
+  assert(eviction_status.has_value());
   const auto write_threads = backend_ptr->submit_write_threads();
   assert(!write_threads.empty());
   assert(write_threads.front() != eviction_requester_thread_id);
@@ -366,16 +366,16 @@ void ExpectForegroundBurstLimitLetsForegroundFlushesCutAhead() {
   options.dirty_page_low_watermark = 0;
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto bg_first = ReadHandle(&manager, 19, 0);
-  auto bg_second = ReadHandle(&manager, 19, 1);
-  auto fg_first = ReadHandle(&manager, 19, 2);
-  auto fg_second = ReadHandle(&manager, 19, 3);
+  auto bg_first = WriteHandle(&manager, 19, 0);
+  auto bg_second = WriteHandle(&manager, 19, 1);
+  auto fg_first = WriteHandle(&manager, 19, 2);
+  auto fg_second = WriteHandle(&manager, 19, 3);
   bg_first.mutable_data()[0] = std::byte{0x30};
   bg_second.mutable_data()[0] = std::byte{0x31};
-  assert(manager.MarkBufferDirty(bg_first).ok());
-  assert(manager.MarkBufferDirty(bg_second).ok());
   bg_first.Reset();
   bg_second.Reset();
 
@@ -384,11 +384,9 @@ void ExpectForegroundBurstLimitLetsForegroundFlushesCutAhead() {
 
   fg_first.mutable_data()[0] = std::byte{0x32};
   fg_second.mutable_data()[0] = std::byte{0x33};
-  assert(manager.MarkBufferDirty(fg_first).ok());
-  assert(manager.MarkBufferDirty(fg_second).ok());
 
-  telepath::Status fg_first_status = telepath::Status::Ok();
-  telepath::Status fg_second_status = telepath::Status::Ok();
+  telepath::Status fg_first_status = telepath::Ok();
+  telepath::Status fg_second_status = telepath::Ok();
   std::atomic<bool> fg_first_started{false};
   std::atomic<bool> fg_second_started{false};
   std::thread fg_first_flush([&]() {
@@ -408,8 +406,8 @@ void ExpectForegroundBurstLimitLetsForegroundFlushesCutAhead() {
   backend_ptr->AllowAllWriteCompletions();
   fg_first_flush.join();
   fg_second_flush.join();
-  assert(fg_first_status.ok());
-  assert(fg_second_status.ok());
+  assert(fg_first_status.has_value());
+  assert(fg_second_status.has_value());
   assert(backend_ptr->WaitForSubmittedWritesFor(4, std::chrono::milliseconds(1000)));
 
   const auto submit_order = backend_ptr->submitted_write_tags();
@@ -447,26 +445,25 @@ void ExpectForegroundFlushSubmitsAfterOlderBackgroundWrite() {
   options.dirty_page_low_watermark = 0;
   auto replacer = telepath::MakeClockReplacer(3);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto first = ReadHandle(&manager, 20, 0);
-  auto second = ReadHandle(&manager, 20, 1);
-  auto resident = ReadHandle(&manager, 20, 2);
+  auto first = WriteHandle(&manager, 20, 0);
+  auto second = WriteHandle(&manager, 20, 1);
+  auto resident = WriteHandle(&manager, 20, 2);
   first.mutable_data()[0] = std::byte{0x50};
   second.mutable_data()[0] = std::byte{0x51};
-  assert(manager.MarkBufferDirty(first).ok());
-  assert(manager.MarkBufferDirty(second).ok());
   resident.Reset();
   first.Reset();
   second.Reset();
   backend_ptr->WaitForSubmittedWrites(1);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  auto foreground_handle = ReadHandle(&manager, 20, 2);
+  auto foreground_handle = WriteHandle(&manager, 20, 2);
   foreground_handle.mutable_data()[0] = std::byte{0x5A};
-  assert(manager.MarkBufferDirty(foreground_handle).ok());
 
-  telepath::Status foreground_flush_status = telepath::Status::Ok();
+  telepath::Status foreground_flush_status = telepath::Ok();
   std::atomic<bool> foreground_flush_started{false};
   std::thread foreground_flush_thread([&]() {
     foreground_flush_started.store(true);
@@ -480,7 +477,7 @@ void ExpectForegroundFlushSubmitsAfterOlderBackgroundWrite() {
 
   backend_ptr->AllowAllWriteCompletions();
   foreground_flush_thread.join();
-  assert(foreground_flush_status.ok());
+  assert(foreground_flush_status.has_value());
   foreground_handle.Reset();
   assert(backend_ptr->WaitForSubmittedWritesFor(2, std::chrono::milliseconds(1000)));
   assert(backend_ptr->WaitForPersistedByte({20, 2}, 0, std::byte{0x5A}, std::chrono::milliseconds(1000)));
@@ -512,12 +509,13 @@ void ExpectCleanerBacklogDoesNotPreventFlushAllProgress() {
   options.dirty_page_low_watermark = 1;
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   for (telepath::BlockId block_id : {0UL, 1UL, 2UL}) {
-    auto handle = ReadHandle(&manager, 21, block_id);
+    auto handle = WriteHandle(&manager, 21, block_id);
     handle.mutable_data()[0] = static_cast<std::byte>(0x78 + block_id);
-    assert(manager.MarkBufferDirty(handle).ok());
     handle.Reset();
   }
 
@@ -525,7 +523,7 @@ void ExpectCleanerBacklogDoesNotPreventFlushAllProgress() {
   assert(!backend_ptr->WaitForSubmittedWritesFor(3, std::chrono::milliseconds(50)));
 
   backend_ptr->AllowAllWriteCompletions();
-  assert(manager.FlushAll().ok());
+  assert(manager.FlushAll().has_value());
   assert(backend_ptr->submitted_writes() == 3);
 
   for (telepath::BlockId block_id : {0UL, 1UL, 2UL}) {
@@ -546,17 +544,17 @@ void ExpectSerializedFlushWorkerCompletesIndependentFlushes() {
   options.flush_submit_batch_size = 1;
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   SeedDirtyByte(&manager, 12, 0, std::byte{0x40});
   SeedDirtyByte(&manager, 12, 1, std::byte{0x41});
 
-  auto first = ReadHandle(&manager, 12, 0);
-  auto second = ReadHandle(&manager, 12, 1);
-  telepath::Status first_status = telepath::Status::Ok();
-  telepath::Status second_status = telepath::Status::Ok();
-  std::thread first_flush([&]() { first_status = manager.FlushBuffer(first); });
-  std::thread second_flush([&]() { second_status = manager.FlushBuffer(second); });
+  telepath::Status first_status = telepath::Ok();
+  telepath::Status second_status = telepath::Ok();
+  std::thread first_flush([&]() { first_status = manager.FlushBuffer(12, 0); });
+  std::thread second_flush([&]() { second_status = manager.FlushBuffer(12, 1); });
 
   backend_ptr->WaitForSubmittedWrites(1);
   assert(backend_ptr->submitted_writes() >= 1);
@@ -564,8 +562,8 @@ void ExpectSerializedFlushWorkerCompletesIndependentFlushes() {
   backend_ptr->AllowAllWriteCompletions();
   first_flush.join();
   second_flush.join();
-  assert(first_status.ok());
-  assert(second_status.ok());
+  assert(first_status.has_value());
+  assert(second_status.has_value());
   assert(backend_ptr->ReadPersistedPage({12, 0})[0] == std::byte{0x40});
   assert(backend_ptr->ReadPersistedPage({12, 1})[0] == std::byte{0x41});
 }
@@ -582,16 +580,17 @@ void ExpectFlushAllSubmitsSecondBatchAfterFirstBatchCompletes() {
   options.flush_submit_batch_size = 2;
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   for (telepath::BlockId block_id : {13UL, 14UL}) {
-    auto handle = ReadHandle(&manager, 13, block_id);
+    auto handle = WriteHandle(&manager, 13, block_id);
     handle.mutable_data()[0] = static_cast<std::byte>(0x44 + block_id - 13);
-    assert(manager.MarkBufferDirty(handle).ok());
   }
 
   std::atomic<bool> flush_all_finished{false};
-  telepath::Status flush_all_status = telepath::Status::Ok();
+  telepath::Status flush_all_status = telepath::Ok();
   std::thread flush_all_thread([&]() {
     flush_all_status = manager.FlushAll();
     flush_all_finished.store(true);
@@ -602,7 +601,7 @@ void ExpectFlushAllSubmitsSecondBatchAfterFirstBatchCompletes() {
 
   backend_ptr->AllowAllWriteCompletions();
   flush_all_thread.join();
-  assert(flush_all_status.ok());
+  assert(flush_all_status.has_value());
   assert(backend_ptr->submitted_writes() == 2);
   assert(backend_ptr->ReadPersistedPage({13, 13})[0] == std::byte{0x44});
   assert(backend_ptr->ReadPersistedPage({13, 14})[0] == std::byte{0x45});
@@ -615,16 +614,17 @@ void ExpectFlushAllWaitsForAllBlockedWrites() {
 
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(4, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(4, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   for (telepath::BlockId block_id : {0UL, 1UL}) {
-    auto seed = ReadHandle(&manager, 14, block_id);
+    auto seed = WriteHandle(&manager, 14, block_id);
     seed.mutable_data()[0] = static_cast<std::byte>(0x60 + block_id);
-    assert(manager.MarkBufferDirty(seed).ok());
   }
 
   std::atomic<bool> flush_all_finished{false};
-  telepath::Status flush_all_status = telepath::Status::Ok();
+  telepath::Status flush_all_status = telepath::Ok();
   std::thread flush_all_thread([&]() {
     flush_all_status = manager.FlushAll();
     flush_all_finished.store(true);
@@ -635,7 +635,7 @@ void ExpectFlushAllWaitsForAllBlockedWrites() {
 
   backend_ptr->AllowAllWriteCompletions();
   flush_all_thread.join();
-  assert(flush_all_status.ok());
+  assert(flush_all_status.has_value());
   assert(backend_ptr->ReadPersistedPage({14, 0})[0] == std::byte{0x60});
   assert(backend_ptr->ReadPersistedPage({14, 1})[0] == std::byte{0x61});
 }
@@ -645,12 +645,13 @@ void ExpectFailedFlushAllLeavesHealthyPagePersistedAndAllowsRetry() {
   auto *backend_ptr = backend.get();
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   for (telepath::BlockId block_id : {0UL, 1UL}) {
-    auto seed = ReadHandle(&manager, 18, block_id);
+    auto seed = WriteHandle(&manager, 18, block_id);
     seed.mutable_data()[0] = static_cast<std::byte>(0x70 + block_id);
-    assert(manager.MarkBufferDirty(seed).ok());
   }
 
   const telepath::BufferTag failed_tag{18, 1};
@@ -659,7 +660,7 @@ void ExpectFailedFlushAllLeavesHealthyPagePersistedAndAllowsRetry() {
   backend_ptr->BlockWriteCompletionForTag(blocked_tag);
 
   std::atomic<bool> flush_all_finished{false};
-  telepath::Status flush_all_status = telepath::Status::Ok();
+  telepath::Status flush_all_status = telepath::Ok();
   std::thread flush_all_thread([&]() {
     flush_all_status = manager.FlushAll();
     flush_all_finished.store(true);
@@ -671,14 +672,13 @@ void ExpectFailedFlushAllLeavesHealthyPagePersistedAndAllowsRetry() {
 
   backend_ptr->AllowWriteCompletionForTag(blocked_tag);
   flush_all_thread.join();
-  assert(!flush_all_status.ok());
-  assert(flush_all_status.code() == telepath::StatusCode::kIoError);
+  assert(!flush_all_status.has_value());
+  assert(flush_all_status.error().code() == telepath::ErrorCode::kIoError);
   assert(backend_ptr->ReadPersistedPage(blocked_tag)[0] == std::byte{0x70});
   assert(backend_ptr->ReadPersistedPage(failed_tag)[0] == std::byte{0x00});
 
-  auto retry_handle = ReadHandle(&manager, failed_tag.file_id, failed_tag.block_id);
-  const auto retry_status = manager.FlushBuffer(retry_handle);
-  assert(retry_status.ok());
+  const auto retry_status = manager.FlushBuffer(failed_tag.file_id, failed_tag.block_id);
+  assert(retry_status.has_value());
   assert(backend_ptr->ReadPersistedPage(failed_tag)[0] == std::byte{0x71});
 }
 
@@ -693,12 +693,13 @@ void ExpectFlushAllReportsSubmitFailureAndAllowsRetry() {
   options.flush_submit_batch_size = 2;
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   for (telepath::BlockId block_id : {0UL, 1UL}) {
-    auto handle = ReadHandle(&manager, 25, block_id);
+    auto handle = WriteHandle(&manager, 25, block_id);
     handle.mutable_data()[0] = static_cast<std::byte>(0xB0 + block_id);
-    assert(manager.MarkBufferDirty(handle).ok());
   }
 
   const telepath::BufferTag submit_fail_tag{25, 0};
@@ -706,15 +707,14 @@ void ExpectFlushAllReportsSubmitFailureAndAllowsRetry() {
   backend_ptr->FailWriteSubmitOnce(submit_fail_tag);
 
   const auto flush_all_status = manager.FlushAll();
-  assert(!flush_all_status.ok());
-  assert(flush_all_status.code() == telepath::StatusCode::kIoError);
+  assert(!flush_all_status.has_value());
+  assert(flush_all_status.error().code() == telepath::ErrorCode::kIoError);
   assert(backend_ptr->submitted_writes() == 1);
   assert(backend_ptr->ReadPersistedPage(submit_fail_tag)[0] == std::byte{0x00});
   assert(backend_ptr->ReadPersistedPage(success_tag)[0] == std::byte{0xB1});
 
-  auto retry_handle = ReadHandle(&manager, submit_fail_tag.file_id, submit_fail_tag.block_id);
-  const auto retry_status = manager.FlushBuffer(retry_handle);
-  assert(retry_status.ok());
+  const auto retry_status = manager.FlushBuffer(submit_fail_tag.file_id, submit_fail_tag.block_id);
+  assert(retry_status.has_value());
   assert(backend_ptr->ReadPersistedPage(submit_fail_tag)[0] == std::byte{0xB0});
 }
 
@@ -731,12 +731,13 @@ void ExpectBackgroundCleanerPersistsAtLeastOneDirtyPage() {
   options.dirty_page_low_watermark = 1;
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   for (telepath::BlockId block_id : {0UL, 1UL}) {
-    auto handle = ReadHandle(&manager, 22, block_id);
+    auto handle = WriteHandle(&manager, 22, block_id);
     handle.mutable_data()[0] = static_cast<std::byte>(0x80 + block_id);
-    assert(manager.MarkBufferDirty(handle).ok());
     handle.Reset();
   }
 
@@ -761,12 +762,13 @@ void ExpectCleanerFlushFailureRequeuesAndRetries() {
   options.dirty_page_low_watermark = 0;
   auto replacer = telepath::MakeClockReplacer(1);
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   const telepath::BufferTag tag{27, 0};
-  auto handle = ReadHandle(&manager, tag.file_id, tag.block_id);
+  auto handle = WriteHandle(&manager, tag.file_id, tag.block_id);
   handle.mutable_data()[0] = std::byte{0xD0};
-  assert(manager.MarkBufferDirty(handle).ok());
   backend_ptr->FailWriteOnce(tag);
   handle.Reset();
 
@@ -795,12 +797,14 @@ void ExpectSnapshotAggregatesQueuedAndInFlightFlushes() {
   options.flush_submit_batch_size = 1;
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   SeedDirtyByte(&manager, 28, 0, std::byte{0xE0});
   SeedDirtyByte(&manager, 28, 1, std::byte{0xE1});
 
-  telepath::Status flush_all_status = telepath::Status::Ok();
+  telepath::Status flush_all_status = telepath::Ok();
   std::thread flush_all_thread([&]() {
     flush_all_status = manager.FlushAll();
   });
@@ -823,7 +827,7 @@ void ExpectSnapshotAggregatesQueuedAndInFlightFlushes() {
   assert(saw_queued_and_in_flight);
   backend_ptr->AllowAllWriteCompletions();
   flush_all_thread.join();
-  assert(flush_all_status.ok());
+  assert(flush_all_status.has_value());
 
   const auto clean_snapshot = manager.ExportSnapshot();
   assert(clean_snapshot.dirty_page_count == 0);
@@ -844,11 +848,12 @@ void ExpectPinnedDirtyPageDoesNotFlushUntilReleased() {
   options.dirty_page_low_watermark = 0;
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto handle = ReadHandle(&manager, 23, 0);
+  auto handle = WriteHandle(&manager, 23, 0);
   handle.mutable_data()[0] = std::byte{0x90};
-  assert(manager.MarkBufferDirty(handle).ok());
   assert(!backend_ptr->WaitForSubmittedWritesFor(1, std::chrono::milliseconds(50)));
 
   handle.Reset();
@@ -870,17 +875,18 @@ void ExpectFlushAllWaitsForInFlightBackgroundFlush() {
   options.dirty_page_low_watermark = 0;
   auto replacer = telepath::MakeClockReplacer(1);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto handle = ReadHandle(&manager, 26, 0);
+  auto handle = WriteHandle(&manager, 26, 0);
   handle.mutable_data()[0] = std::byte{0xC0};
-  assert(manager.MarkBufferDirty(handle).ok());
   handle.Reset();
 
   backend_ptr->WaitForSubmittedWrites(1);
 
   std::atomic<bool> flush_all_finished{false};
-  telepath::Status flush_all_status = telepath::Status::Ok();
+  telepath::Status flush_all_status = telepath::Ok();
   std::thread flush_all_thread([&]() {
     flush_all_status = manager.FlushAll();
     flush_all_finished.store(true);
@@ -892,7 +898,7 @@ void ExpectFlushAllWaitsForInFlightBackgroundFlush() {
 
   backend_ptr->AllowAllWriteCompletions();
   flush_all_thread.join();
-  assert(flush_all_status.ok());
+  assert(flush_all_status.has_value());
   assert(backend_ptr->submitted_writes() == 1);
   assert(backend_ptr->WaitForPersistedByte({26, 0}, 0, std::byte{0xC0}, std::chrono::milliseconds(1000)));
 }
@@ -909,21 +915,22 @@ void ExpectEvictionAfterCleanerFlushDoesNotDuplicateWriteback() {
   options.dirty_page_low_watermark = 0;
   auto replacer = telepath::MakeClockReplacer(1);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(options, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(options, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto first = ReadHandle(&manager, 24, 0);
+  auto first = WriteHandle(&manager, 24, 0);
   first.mutable_data()[0] = std::byte{0xA0};
-  assert(manager.MarkBufferDirty(first).ok());
   first.Reset();
 
   assert(backend_ptr->WaitForSubmittedWritesFor(1, std::chrono::milliseconds(200)));
   assert(backend_ptr->WaitForPersistedByte({24, 0}, 0, std::byte{0xA0}, std::chrono::milliseconds(200)));
 
   const std::size_t writes_before_eviction = backend_ptr->submitted_writes();
-  assert(manager.FlushAll().ok());
+  assert(manager.FlushAll().has_value());
   assert(backend_ptr->submitted_writes() == writes_before_eviction);
 
-  auto second = ReadHandle(&manager, 24, 1);
+  auto second = WriteHandle(&manager, 24, 1);
   assert(second.data()[0] == std::byte{0x00});
   second.Reset();
   assert(backend_ptr->submitted_writes() == writes_before_eviction);

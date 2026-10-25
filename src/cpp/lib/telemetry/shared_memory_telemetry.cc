@@ -73,19 +73,15 @@ class MappedRegion {
   std::size_t size_{0};
 };
 
-auto ErrnoMessage(const char *prefix, int error) -> std::string {
-  return std::string(prefix) + ": " + std::strerror(error);
-}
-
 auto ValidateSharedMemoryName(const std::string &name) -> Status {
-  if (name.empty()) return Status::InvalidArgument("telemetry shared-memory name must not be empty");
+  if (name.empty()) return InvalidArgument("telemetry shared-memory name must not be empty");
   if (name.size() < 2 || name.front() != '/') {
-    return Status::InvalidArgument("telemetry shared-memory name must start with '/' and include a name");
+    return InvalidArgument("telemetry shared-memory name must start with '/' and include a name");
   }
   if (name.find('/', 1) != std::string::npos) {
-    return Status::InvalidArgument("telemetry shared-memory name must not contain nested '/' characters");
+    return InvalidArgument("telemetry shared-memory name must not contain nested '/' characters");
   }
-  return Status::Ok();
+  return Ok();
 }
 
 auto BuildHeader(
@@ -124,15 +120,15 @@ auto NextSequence(uint64_t previous) -> uint64_t {
 auto OpenSharedMemory(const std::string &name, int flags, mode_t mode) -> Result<FileDescriptor> {
   const int fd = shm_open(name.c_str(), flags, mode);
   if (fd < 0) {
-    if (errno == ENOENT) return Status::NotFound(ErrnoMessage("telemetry shared memory not found", errno));
-    return Status::IoError(ErrnoMessage("failed to open telemetry shared memory", errno));
+    if (errno == ENOENT) return NotFound("telemetry shared memory not found", errno);
+    return IoError("failed to open telemetry shared memory", errno);
   }
   return FileDescriptor(fd);
 }
 
 auto MapSharedMemory(int fd, std::size_t size, int protection) -> Result<MappedRegion> {
   void *address = mmap(nullptr, size, protection, MAP_SHARED, fd, 0);
-  if (address == MAP_FAILED) return Status::IoError(ErrnoMessage("failed to map telemetry shared memory", errno));
+  if (address == MAP_FAILED) return IoError("failed to map telemetry shared memory", errno);
   return MappedRegion(address, size);
 }
 
@@ -144,23 +140,23 @@ auto WriteTelemetryExportSharedMemory(
   const TelemetryExportSnapshot &snapshot
 ) -> Status {
   auto name_status = ValidateSharedMemoryName(name);
-  if (!name_status.ok()) return name_status;
-  if (payload_capacity == 0) return Status::InvalidArgument("telemetry shared-memory payload capacity must be greater than zero");
-  if (payload_capacity > std::numeric_limits<std::size_t>::max() - sizeof(TelemetrySharedMemoryHeader)) return Status::ResourceExhausted("telemetry shared-memory payload capacity is too large");
+  if (!name_status.has_value()) return name_status;
+  if (payload_capacity == 0) return InvalidArgument("telemetry shared-memory payload capacity must be greater than zero");
+  if (payload_capacity > std::numeric_limits<std::size_t>::max() - sizeof(TelemetrySharedMemoryHeader)) return ResourceExhausted("telemetry shared-memory payload capacity is too large");
 
   const std::string payload = SerializeTelemetryExportJson(snapshot);
-  if (payload.size() > payload_capacity) return Status::ResourceExhausted("telemetry shared-memory payload capacity is too small");
+  if (payload.size() > payload_capacity) return ResourceExhausted("telemetry shared-memory payload capacity is too small");
 
   auto fd_result = OpenSharedMemory(name, O_CREAT | O_RDWR, 0600);
-  if (!fd_result.ok()) return fd_result.status();
+  if (!fd_result.has_value()) return PropagateError(fd_result);
   FileDescriptor fd(std::move(fd_result.value()));
 
   const uint64_t sequence = NextSequence(ReadPreviousSequence(fd.get()));
   const std::size_t total_size = sizeof(TelemetrySharedMemoryHeader) + payload_capacity;
-  if (ftruncate(fd.get(), static_cast<off_t>(total_size)) != 0) return Status::IoError(ErrnoMessage("failed to size telemetry shared memory", errno));
+  if (ftruncate(fd.get(), static_cast<off_t>(total_size)) != 0) return IoError("failed to size telemetry shared memory", errno);
 
   auto mapping_result = MapSharedMemory(fd.get(), total_size, PROT_READ | PROT_WRITE);
-  if (!mapping_result.ok()) return mapping_result.status();
+  if (!mapping_result.has_value()) return PropagateError(mapping_result);
   MappedRegion mapping(std::move(mapping_result.value()));
 
   const auto writing_header = BuildHeader(
@@ -183,33 +179,33 @@ auto WriteTelemetryExportSharedMemory(
     static_cast<uint64_t>(payload_capacity),
     kTelemetrySharedMemoryReady);
   std::memcpy(mapping.data(), &ready_header, sizeof(ready_header));
-  return Status::Ok();
+  return Ok();
 }
 
 auto ReadTelemetryExportSharedMemory(const std::string &name) -> Result<std::string> {
   auto name_status = ValidateSharedMemoryName(name);
-  if (!name_status.ok()) return name_status;
+  if (!name_status.has_value()) return PropagateError(name_status);
 
   auto fd_result = OpenSharedMemory(name, O_RDONLY, 0);
-  if (!fd_result.ok()) return fd_result.status();
+  if (!fd_result.has_value()) return PropagateError(fd_result);
   FileDescriptor fd(std::move(fd_result.value()));
 
   struct stat stat_buffer {};
-  if (fstat(fd.get(), &stat_buffer) != 0) return Status::IoError(ErrnoMessage("failed to stat telemetry shared memory", errno));
-  if (stat_buffer.st_size < static_cast<off_t>(sizeof(TelemetrySharedMemoryHeader))) return Status::NotFound("telemetry shared memory is smaller than the header");
+  if (fstat(fd.get(), &stat_buffer) != 0) return IoError("failed to stat telemetry shared memory", errno);
+  if (stat_buffer.st_size < static_cast<off_t>(sizeof(TelemetrySharedMemoryHeader))) return NotFound("telemetry shared memory is smaller than the header");
 
   const auto total_size = static_cast<std::size_t>(stat_buffer.st_size);
   auto mapping_result = MapSharedMemory(fd.get(), total_size, PROT_READ);
-  if (!mapping_result.ok()) return mapping_result.status();
+  if (!mapping_result.has_value()) return PropagateError(mapping_result);
   MappedRegion mapping(std::move(mapping_result.value()));
 
   TelemetrySharedMemoryHeader header;
   std::memcpy(&header, mapping.data(), sizeof(header));
-  if (!IsHeaderCompatible(header)) return Status::InvalidArgument("telemetry shared memory header is not compatible");
-  if ((header.flags & kTelemetrySharedMemoryReady) == 0) return Status::Unavailable("telemetry shared memory snapshot is not ready");
+  if (!IsHeaderCompatible(header)) return InvalidArgument("telemetry shared memory header is not compatible");
+  if ((header.flags & kTelemetrySharedMemoryReady) == 0) return Unavailable("telemetry shared memory snapshot is not ready");
 
   const std::size_t available_payload = total_size - sizeof(TelemetrySharedMemoryHeader);
-  if (header.payload_capacity > available_payload || header.payload_size > header.payload_capacity) return Status::Internal("telemetry shared memory header has invalid payload bounds");
+  if (header.payload_capacity > available_payload || header.payload_size > header.payload_capacity) return Internal("telemetry shared memory header has invalid payload bounds");
 
   std::atomic_thread_fence(std::memory_order_acquire);
   const char *payload_begin = mapping.data() + sizeof(TelemetrySharedMemoryHeader);
@@ -218,12 +214,12 @@ auto ReadTelemetryExportSharedMemory(const std::string &name) -> Result<std::str
 
 auto UnlinkTelemetryExportSharedMemory(const std::string &name) -> Status {
   auto name_status = ValidateSharedMemoryName(name);
-  if (!name_status.ok()) return name_status;
+  if (!name_status.has_value()) return name_status;
   if (shm_unlink(name.c_str()) != 0) {
-    if (errno == ENOENT) return Status::Ok();
-    return Status::IoError(ErrnoMessage("failed to unlink telemetry shared memory", errno));
+    if (errno == ENOENT) return Ok();
+    return IoError("failed to unlink telemetry shared memory", errno);
   }
-  return Status::Ok();
+  return Ok();
 }
 
 }  // namespace telepath

@@ -75,10 +75,12 @@ void AssertCustomOptions(const telepath::BufferManagerOptions &custom) {
 void AssertManagerAppliesResolvedOptions(const std::filesystem::path &root, const telepath::BufferManagerOptions &custom) {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
   auto disk_backend_result = telepath::CreateDiskBackend(root.string(), 4096, custom.disk_backend);
-  assert(disk_backend_result.ok());
+  assert(disk_backend_result.has_value());
 
   auto replacer = telepath::MakeClockReplacer(32);
-  telepath::BufferManager manager(custom, std::move(disk_backend_result.value()), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(custom, std::move(disk_backend_result.value()), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   assert(manager.options().page_table_stripe_count == 7);
   assert(manager.pool_size() == 32);

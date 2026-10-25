@@ -39,7 +39,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
     auto validate_status = ValidateReadRequest(out, size);
-    if (!validate_status.ok()) return validate_status;
+    if (!validate_status.has_value()) return std::unexpected(validate_status.error());
     return EnqueueReadRequest(tag, out, size);
   }
 
@@ -49,7 +49,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
     auto validate_status = ValidateWriteRequest(data, size);
-    if (!validate_status.ok()) return validate_status;
+    if (!validate_status.has_value()) return std::unexpected(validate_status.error());
     return CompleteWriteRequest(tag, size);
   }
 
@@ -58,7 +58,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     completion_cv_.wait(lock, [this]() {
       return !completed_.empty() || CanReturnUnavailableAfterShutdown();
     });
-    if (completed_.empty()) return telepath::Status::Unavailable("backend is shutting down");
+    if (completed_.empty()) return telepath::Unavailable("backend is shutting down");
 
     telepath::DiskCompletion completion = completed_.front();
     completed_.pop_front();
@@ -89,18 +89,18 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     std::byte *out,
     std::size_t size
   ) const -> telepath::Status {
-    if (out == nullptr) return telepath::Status::InvalidArgument("read buffer must not be null");
-    if (size != page_size_) return telepath::Status::InvalidArgument("read size does not match page size");
-    return telepath::Status::Ok();
+    if (out == nullptr) return telepath::InvalidArgument("read buffer must not be null");
+    if (size != page_size_) return telepath::InvalidArgument("read size does not match page size");
+    return telepath::Ok();
   }
 
   auto ValidateWriteRequest(
     const std::byte *data,
     std::size_t size
   ) const -> telepath::Status {
-    if (data == nullptr) return telepath::Status::InvalidArgument("write buffer must not be null");
-    if (size != page_size_) return telepath::Status::InvalidArgument("write size does not match page size");
-    return telepath::Status::Ok();
+    if (data == nullptr) return telepath::InvalidArgument("write buffer must not be null");
+    if (size != page_size_) return telepath::InvalidArgument("write size does not match page size");
+    return telepath::Ok();
   }
 
   auto NextRequestIdLocked() -> uint64_t { return next_request_id_++; }
@@ -111,7 +111,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> {
     std::lock_guard<std::mutex> guard(latch_);
-    if (shutdown_) return telepath::Status::Unavailable("backend is shutting down");
+    if (shutdown_) return telepath::Unavailable("backend is shutting down");
 
     const uint64_t request_id = NextRequestIdLocked();
     pending_.push_back({
@@ -133,14 +133,14 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
     (void)size;
 
     std::lock_guard<std::mutex> guard(latch_);
-    if (shutdown_) return telepath::Status::Unavailable("backend is shutting down");
+    if (shutdown_) return telepath::Unavailable("backend is shutting down");
 
     const uint64_t request_id = NextRequestIdLocked();
     completed_.push_back({
       request_id,
       telepath::DiskOperation::kWrite,
       tag,
-      telepath::Status::Ok(),
+      telepath::Ok(),
     });
     completion_cv_.notify_one();
     return request_id;
@@ -186,7 +186,7 @@ class ReorderingDiskBackend : public telepath::DiskBackend {
       request.request_id,
       request.operation,
       request.tag,
-      telepath::Status::Ok(),
+      telepath::Ok(),
     });
   }
 
@@ -237,9 +237,9 @@ bool ReadExpectedBlock(
   telepath::BlockId block_id
 ) {
   auto result = manager->ReadBuffer(9, block_id);
-  if (!result.ok()) return false;
+  if (!result.has_value()) return false;
 
-  telepath::BufferHandle handle = std::move(result.value());
+  telepath::SharedBufferHandle handle = std::move(result.value());
   const std::byte expected = static_cast<std::byte>((block_id % 251) + 1);
   return handle.data()[0] == expected;
 }
@@ -274,7 +274,9 @@ int main() {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
   auto backend = std::make_unique<ReorderingDiskBackend>(kPageSize);
   auto replacer = telepath::MakeClockReplacer(kWorkerCount);
-  telepath::BufferManager manager(kWorkerCount, kPageSize, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(kWorkerCount, kPageSize, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   std::atomic<bool> failed{false};
   std::atomic<int> ready{0};

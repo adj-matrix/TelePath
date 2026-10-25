@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+TELEPATH_LLVM_VERSION="${TELEPATH_LLVM_VERSION:-19}"
+
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Please run this script with sudo."
   exit 1
@@ -19,24 +21,25 @@ if [[ "${ID:-}" != "ubuntu" ]]; then
   exit 1
 fi
 
-apt-get update
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"${SCRIPT_DIR}/install_build_deps.sh"
+
 apt-get install -y \
-  clang \
-  clangd \
-  clang-format \
-  clang-tidy \
+  "clangd-${TELEPATH_LLVM_VERSION}" \
+  "clang-format-${TELEPATH_LLVM_VERSION}" \
+  "clang-tidy-${TELEPATH_LLVM_VERSION}" \
+  "lldb-${TELEPATH_LLVM_VERSION}" \
   doxygen \
   gdb \
-  lldb \
   valgrind
 
-cat <<'EOF'
+cat <<EOF
 Installed TelePath development tools.
 
 Notes:
-- clangd is included for IDE/LSP support and code navigation.
-- ASAN and LSAN are compiler/runtime sanitizers, not standalone apt packages.
-- Enable them with CMake options, for example:
-    cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=Debug \
-      -DTELEPATH_ENABLE_ASAN=ON -DTELEPATH_ENABLE_LSAN=ON
+- LLVM tools are versioned (clangd-${TELEPATH_LLVM_VERSION}, clang-tidy-${TELEPATH_LLVM_VERSION}, ...).
+- ASAN, LSAN, and TSAN are compiler/runtime sanitizers, not standalone apt packages.
+- Enable them through the CMake presets, for example:
+    ./scripts/build/asan.sh
+    ./scripts/build/tsan.sh
 EOF

@@ -17,18 +17,18 @@ BufferManagerCleanerController::~BufferManagerCleanerController() { Shutdown(); 
 
 auto BufferManagerCleanerController::Start(SeedCallback on_seed, ScheduleCallback on_schedule) -> Status {
   std::lock_guard<std::mutex> guard(latch_);
-  if (started_) return Status::Ok();
+  if (started_) return Ok();
 
   on_seed_ = std::move(on_seed);
   on_schedule_ = std::move(on_schedule);
   try {
     thread_ = std::thread(&BufferManagerCleanerController::Run, this);
   } catch (...) {
-    return Status::Unavailable("failed to start background cleaner");
+    return Unavailable("failed to start background cleaner");
   }
 
   started_ = true;
-  return Status::Ok();
+  return Ok();
 }
 
 void BufferManagerCleanerController::Shutdown() {

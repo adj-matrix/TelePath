@@ -86,7 +86,7 @@ class BenchmarkSnapshotSampler {
     std::size_t operation_index,
     const telepath::BufferManager &manager
   ) {
-    std::lock_guard<std::mutex> guard(latch_);
+    std::lock_guard<std::mutex> handle(latch_);
     if (max_samples_ == 0 || samples_.size() >= max_samples_) return;
     if (reason == "after_read" && captured_after_read_) return;
     if (reason == "after_mark_dirty" && captured_after_mark_dirty_) return;
@@ -103,7 +103,7 @@ class BenchmarkSnapshotSampler {
   }
 
   void TryCaptureRuntimeIo(const telepath::BufferManager &manager) {
-    std::lock_guard<std::mutex> guard(latch_);
+    std::lock_guard<std::mutex> handle(latch_);
     if (max_samples_ == 0 || samples_.size() >= max_samples_ || captured_runtime_io_) return;
 
     telepath::BufferPoolSnapshot snapshot = manager.ExportSnapshot();
@@ -119,7 +119,7 @@ class BenchmarkSnapshotSampler {
   }
 
   auto samples() const -> std::vector<BenchmarkSnapshotSample> {
-    std::lock_guard<std::mutex> guard(latch_);
+    std::lock_guard<std::mutex> handle(latch_);
     return samples_;
   }
 
@@ -250,25 +250,25 @@ auto InitializeDiskBackend(
   telepath::DiskBackendCapabilities *capabilities
 ) -> telepath::Status {
   auto disk_backend_result = telepath::CreateDiskBackend(root.string(), options.page_size, disk_backend_options);
-  if (!disk_backend_result.ok()) return disk_backend_result.status();
+  if (!disk_backend_result.has_value()) return std::unexpected(disk_backend_result.error());
 
   *capabilities = disk_backend_result.value()->GetCapabilities();
   *disk_backend = std::move(disk_backend_result.value());
-  return telepath::Status::Ok();
+  return telepath::Ok();
 }
 
 auto PreloadBlock(
   telepath::BufferManager *manager,
   telepath::BlockId block_id
 ) -> telepath::Status {
-  auto result = manager->ReadBuffer(1, block_id);
-  if (!result.ok()) return telepath::Status::Internal("preload failed for block " + std::to_string(block_id) + ": " + result.status().message());
+  auto result = manager->ReadBufferExclusive(1, block_id);
+  if (!result.has_value()) {
+    std::cerr << "preload failed for block " << block_id << ": " << result.error().ToString() << "\n";
+    return telepath::PropagateError(result);
+  }
 
-  telepath::BufferHandle handle = std::move(result.value());
-  handle.mutable_data()[0] = static_cast<std::byte>(block_id % 251);
-  auto dirty_status = manager->MarkBufferDirty(handle);
-  if (!dirty_status.ok()) return telepath::Status::Internal("mark dirty failed for block " + std::to_string(block_id) + ": " + dirty_status.message());
-  return telepath::Status::Ok();
+  result->mutable_data()[0] = static_cast<std::byte>(block_id % 251);
+  return telepath::Ok();
 }
 
 auto PreloadBenchmarkData(
@@ -277,12 +277,44 @@ auto PreloadBenchmarkData(
 ) -> telepath::Status {
   for (telepath::BlockId block_id = 0; block_id < options.block_count; ++block_id) {
     auto preload_status = PreloadBlock(manager, block_id);
-    if (!preload_status.ok()) return preload_status;
+    if (!preload_status.has_value()) return preload_status;
   }
 
   auto flush_status = manager->FlushAll();
-  if (!flush_status.ok()) return telepath::Status::Internal("flush all failed after preload: " + flush_status.message());
-  return telepath::Status::Ok();
+  if (!flush_status.has_value()) std::cerr << "flush all failed after preload: " << flush_status.error().ToString() << "\n";
+  return flush_status;
+}
+
+auto RunReadOperation(
+  telepath::BufferManager *manager,
+  telepath::BlockId block_id,
+  std::size_t op,
+  std::size_t thread_index,
+  BenchmarkSnapshotSampler *snapshot_sampler
+) -> bool {
+  auto handle = manager->ReadBuffer(1, block_id);
+  if (!handle.has_value()) return false;
+  if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_read", thread_index, op, *manager);
+  volatile std::byte sink = handle->data()[0];
+  (void)sink;
+  return true;
+}
+
+auto RunWriteOperation(
+  telepath::BufferManager *manager,
+  telepath::BlockId block_id,
+  std::size_t op,
+  std::size_t thread_index,
+  std::atomic<uint64_t> *writes_marked_dirty,
+  BenchmarkSnapshotSampler *snapshot_sampler
+) -> bool {
+  auto handle = manager->ReadBufferExclusive(1, block_id);
+  if (!handle.has_value()) return false;
+  if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_read", thread_index, op, *manager);
+  handle->mutable_data()[0] = static_cast<std::byte>((op + thread_index) % 251);
+  writes_marked_dirty->fetch_add(1, std::memory_order_relaxed);
+  if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_mark_dirty", thread_index, op, *manager);
+  return true;
 }
 
 void RunWorker(
@@ -302,30 +334,14 @@ void RunWorker(
     const telepath::BlockId block_id = ChooseBlock(&rng, op, thread_index, options);
     ++(*access_counts)[block_id];
 
-    auto result = manager->ReadBuffer(1, block_id);
-    if (!result.ok()) {
-      const auto operation_end = std::chrono::steady_clock::now();
-      latency_samples_ns->push_back(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(operation_end - operation_start).count()));
-      continue;
+    const bool write = ShouldWriteOperation(&rng, op, options);
+    const bool acquired = write
+      ? RunWriteOperation(manager, block_id, op, thread_index, writes_marked_dirty, snapshot_sampler)
+      : RunReadOperation(manager, block_id, op, thread_index, snapshot_sampler);
+    if (acquired && options.flush_every_ops != 0 && (op + 1) % options.flush_every_ops == 0) {
+      auto flush_status = manager->FlushBuffer(1, block_id);
+      if (flush_status.has_value()) foreground_flushes_requested->fetch_add(1, std::memory_order_relaxed);
     }
-
-    telepath::BufferHandle handle = std::move(result.value());
-    if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_read", thread_index, op, *manager);
-    if (ShouldWriteOperation(&rng, op, options)) {
-      std::byte *data = handle.mutable_data();
-      data[0] = static_cast<std::byte>((op + thread_index) % 251);
-      auto dirty_status = manager->MarkBufferDirty(handle);
-      if (dirty_status.ok()) {
-        writes_marked_dirty->fetch_add(1, std::memory_order_relaxed);
-        if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_mark_dirty", thread_index, op, *manager);
-      }
-    }
-    if (options.flush_every_ops != 0 && (op + 1) % options.flush_every_ops == 0) {
-      auto flush_status = manager->FlushBuffer(handle);
-      if (flush_status.ok()) foreground_flushes_requested->fetch_add(1, std::memory_order_relaxed);
-    }
-    volatile std::byte sink = handle.data()[0];
-    (void)sink;
     const auto operation_end = std::chrono::steady_clock::now();
     latency_samples_ns->push_back(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(operation_end - operation_start).count()));
   }
@@ -440,7 +456,7 @@ auto RunBenchmark(
   uint64_t final_flush_all_latency_ns = 0;
   if (options.flush_all_after_run) {
     const auto flush_start = std::chrono::steady_clock::now();
-    final_flush_all_ok = manager->FlushAll().ok();
+    final_flush_all_ok = manager->FlushAll().has_value();
     const auto flush_end = std::chrono::steady_clock::now();
     final_flush_all_latency_ns = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(flush_end - flush_start).count());
@@ -532,21 +548,21 @@ auto MaybeExportTelemetry(
   const BenchmarkMetrics &metrics,
   const telepath::BufferPoolSnapshot &snapshot
 ) -> telepath::Status {
-  if (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty()) return telepath::Status::Ok();
+  if (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty()) return telepath::Ok();
 
   const telepath::TelemetryExportSnapshot export_snapshot = BuildTelemetryExportSnapshot(options, metrics, snapshot);
   if (!options.telemetry_export_path.empty()) {
     auto file_status = telepath::AppendTelemetryExportJsonLine(options.telemetry_export_path, export_snapshot);
-    if (!file_status.ok()) return file_status;
+    if (!file_status.has_value()) return file_status;
   }
   if (!options.telemetry_shm_name.empty()) {
     auto shared_memory_status = telepath::WriteTelemetryExportSharedMemory(
       options.telemetry_shm_name,
       options.telemetry_shm_capacity,
       export_snapshot);
-    if (!shared_memory_status.ok()) return shared_memory_status;
+    if (!shared_memory_status.has_value()) return shared_memory_status;
   }
-  return telepath::Status::Ok();
+  return telepath::Ok();
 }
 
 void PrintTextSummary(
@@ -895,28 +911,30 @@ int main(int argc, char **argv) {
   std::unique_ptr<telepath::DiskBackend> disk_backend;
   telepath::DiskBackendCapabilities disk_backend_capabilities;
   auto disk_backend_status = InitializeDiskBackend(root_guard.path(), options, disk_backend_options, &disk_backend, &disk_backend_capabilities);
-  if (!disk_backend_status.ok()) {
-    std::cerr << "backend creation failed: " << disk_backend_status.message() << "\n";
+  if (!disk_backend_status.has_value()) {
+    std::cerr << "backend creation failed: " << disk_backend_status.error().ToString() << "\n";
     return 1;
   }
 
   auto replacer = BuildReplacer(options);
   const telepath::BufferManagerOptions manager_options = BuildManagerOptions(options, disk_backend_options);
-  telepath::BufferManager manager(manager_options, std::move(disk_backend), std::move(replacer), telemetry);
-
-  auto preload_status = PreloadBenchmarkData(&manager, options);
-  if (!preload_status.ok()) {
-    std::cerr << preload_status.message() << "\n";
+  auto manager_result = telepath::BufferManager::Create(manager_options, std::move(disk_backend), std::move(replacer), telemetry);
+  if (!manager_result.has_value()) {
+    std::cerr << "buffer manager creation failed: " << manager_result.error().ToString() << "\n";
     return 1;
   }
+  telepath::BufferManager &manager = *manager_result.value();
+
+  auto preload_status = PreloadBenchmarkData(&manager, options);
+  if (!preload_status.has_value()) return 1;
 
   std::vector<uint64_t> block_access_counts;
   std::vector<BenchmarkSnapshotSample> snapshot_samples;
   const BenchmarkMetrics metrics = RunBenchmark(&manager, telemetry, options, &block_access_counts, &snapshot_samples);
   const telepath::BufferPoolSnapshot snapshot = manager.ExportSnapshot();
   auto export_status = MaybeExportTelemetry(options, metrics, snapshot);
-  if (!export_status.ok()) {
-    std::cerr << "telemetry export failed: " << export_status.message() << "\n";
+  if (!export_status.has_value()) {
+    std::cerr << "telemetry export failed: " << export_status.error().ToString() << "\n";
     return 1;
   }
   PrintSummary(options, metadata, ResolveBackendKindName(disk_backend_capabilities), metrics, snapshot, snapshot_samples, block_access_counts);

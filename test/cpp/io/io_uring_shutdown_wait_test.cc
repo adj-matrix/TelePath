@@ -11,11 +11,11 @@
 
 namespace {
 
-bool HandleUnavailableIoUringBackend(const telepath::IoUringDiskBackend &backend) {
-  if (backend.initialization_status().ok()) return false;
+bool HandleUnavailableIoUringBackend(const telepath::Result<std::unique_ptr<telepath::IoUringDiskBackend>> &backend_result) {
+  if (backend_result.has_value()) return false;
 
   assert(!telepath::io_test_support::RequireIoUringSuccess());
-  assert(backend.initialization_status().code() == telepath::StatusCode::kUnavailable);
+  assert(backend_result.error().code() == telepath::ErrorCode::kUnavailable);
   return true;
 }
 
@@ -24,14 +24,14 @@ void WaitForCompletionExit(
     std::atomic<bool> *completed,
     telepath::Status *poll_status) {
   auto result = backend->PollCompletion();
-  assert(!result.ok());
-  *poll_status = result.status();
+  assert(!result.has_value());
+  *poll_status = std::unexpected(result.error());
   completed->store(true);
 }
 
 void AssertWaiterUnblocksOnShutdown(telepath::IoUringDiskBackend *backend) {
   std::atomic<bool> completed{false};
-  telepath::Status poll_status = telepath::Status::Ok();
+  telepath::Status poll_status = telepath::Ok();
 
   std::thread waiter([&]() { WaitForCompletionExit(backend, &completed, &poll_status); });
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -44,15 +44,16 @@ void AssertWaiterUnblocksOnShutdown(telepath::IoUringDiskBackend *backend) {
 
   waiter.join();
   assert(completed.load());
-  assert(poll_status.code() == telepath::StatusCode::kUnavailable);
+  assert(poll_status.error().code() == telepath::ErrorCode::kUnavailable);
 }
 
 }  // namespace
 
 int main() {
   telepath::io_test_support::TestRootGuard root_guard("telepath_io_uring_shutdown_wait_test");
-  telepath::IoUringDiskBackend backend(root_guard.path().string(), 4096, 32);
-  if (HandleUnavailableIoUringBackend(backend)) return 0;
+  auto backend_result = telepath::IoUringDiskBackend::Create(root_guard.path().string(), telepath::BlockGeometry::Of<4096>(), 32);
+  if (HandleUnavailableIoUringBackend(backend_result)) return 0;
+  telepath::IoUringDiskBackend &backend = *backend_result.value();
   AssertWaiterUnblocksOnShutdown(&backend);
   return 0;
 }

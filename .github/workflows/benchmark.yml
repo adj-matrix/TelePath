@@ -22,7 +22,10 @@ jobs:
         run: sudo ./support/install_build_deps.sh
 
       - name: Build io_uring benchmark target
-        run: ./scripts/build/io_uring_debug.sh
+        run: |
+          source scripts/lib/cmake.sh
+          TELEPATH_ROOT_DIR="$(telepath_root_dir)"
+          telepath_configure_and_build io_uring_release
 
       - name: Run benchmark sweeps
         shell: bash
@@ -32,7 +35,7 @@ jobs:
 
           for backend in posix io_uring; do
             for workload in hotspot uniform sequential_shared sequential_disjoint scan_pollution; do
-              BENCHMARK_PRESET="io_uring_debug" \
+              BENCHMARK_PRESET="io_uring_release" \
               WORKLOAD="${workload}" \
               DISK_BACKEND="${backend}" \
               THREADS="1 2 4" \

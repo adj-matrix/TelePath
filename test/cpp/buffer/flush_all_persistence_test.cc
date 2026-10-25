@@ -10,22 +10,21 @@
 
 namespace {
 
-auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
+auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = telepath::MakeLruKReplacer(3, 2);
-  return telepath::BufferManager(3, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+  return telepath::BufferManager::Create(3, 4096, std::move(disk_backend), std::move(replacer), telemetry).value();
 }
 
 void SeedDirtyPages(telepath::BufferManager *manager) {
   for (telepath::BlockId block_id = 0; block_id < 3; ++block_id) {
-    auto result = manager->ReadBuffer(8, block_id);
-    assert(result.ok());
+    auto result = manager->ReadBufferExclusive(8, block_id);
+    assert(result.has_value());
 
     auto handle = std::move(result.value());
     handle.mutable_data()[0] = static_cast<std::byte>(0x40 + block_id);
     handle.mutable_data()[1] = static_cast<std::byte>(0x50 + block_id);
-    assert(manager->MarkBufferDirty(handle).ok());
   }
 }
 
@@ -35,23 +34,24 @@ void ExpectPersistedPageMatches(
 ) {
   std::array<std::byte, 4096> page{};
   auto request = backend->SubmitRead(telepath::BufferTag{8, block_id}, page.data(), page.size());
-  assert(request.ok());
+  assert(request.has_value());
 
   auto completion = backend->PollCompletion();
-  assert(completion.ok());
-  assert(completion.value().status.ok());
+  assert(completion.has_value());
+  assert(completion.value().status.has_value());
   assert(page[0] == static_cast<std::byte>(0x40 + block_id));
   assert(page[1] == static_cast<std::byte>(0x50 + block_id));
 }
 
 void ExpectFlushAllPersistsDirtyPages(const std::filesystem::path &root) {
   {
-    auto manager = BuildManager(root);
+    auto manager_owner = BuildManager(root);
+    telepath::BufferManager &manager = *manager_owner;
     SeedDirtyPages(&manager);
-    assert(manager.FlushAll().ok());
+    assert(manager.FlushAll().has_value());
   }
 
-  auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   for (telepath::BlockId block_id = 0; block_id < 3; ++block_id) {
     ExpectPersistedPageMatches(verifier.get(), block_id);
   }

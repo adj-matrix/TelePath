@@ -14,7 +14,8 @@ namespace telepath {
 bool IsIoUringBackendSupported();
 
 // Creates a disk backend using the requested policy, falling back when
-// permitted by `options`.
+// permitted by `options`. Returns kInvalidArgument unless `page_size` is a
+// valid BlockGeometry block size.
 auto CreateDiskBackend(
   std::string root_path,
   std::size_t page_size,

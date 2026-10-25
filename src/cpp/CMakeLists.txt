@@ -1,8 +1,9 @@
 set(TELEPATH_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_library(telepath
+  lib/common/status.cc
   lib/buffer/buffer_handle.cc
-  lib/buffer/buffer_descriptor_state.cc
+  lib/buffer/frame_control.cc
   lib/buffer/buffer_manager.cc
   lib/buffer/buffer_manager_cleaner.cc
   lib/buffer/buffer_manager_eviction.cc
@@ -46,7 +47,7 @@ if(UNIX AND NOT APPLE)
   endif()
 endif()
 
-target_compile_features(telepath PUBLIC cxx_std_17)
+target_compile_features(telepath PUBLIC cxx_std_23)
 target_compile_definitions(telepath
   PUBLIC
     TELEPATH_HAS_LIBURING=$<BOOL:${TELEPATH_HAS_LIBURING}>

@@ -15,30 +15,30 @@
 namespace {
 
 void SeedDiskPages(const std::filesystem::path &root) {
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> seed_a{};
   std::array<std::byte, 4096> seed_b{};
   seed_a[0] = std::byte{0xA1};
   seed_b[0] = std::byte{0xB2};
 
   auto write_a = disk_backend->SubmitWrite(telepath::BufferTag{3, 0}, seed_a.data(), seed_a.size());
-  assert(write_a.ok());
+  assert(write_a.has_value());
   auto completion_a = disk_backend->PollCompletion();
-  assert(completion_a.ok());
-  assert(completion_a.value().status.ok());
+  assert(completion_a.has_value());
+  assert(completion_a.value().status.has_value());
 
   auto write_b = disk_backend->SubmitWrite(telepath::BufferTag{3, 1}, seed_b.data(), seed_b.size());
-  assert(write_b.ok());
+  assert(write_b.has_value());
   auto completion_b = disk_backend->PollCompletion();
-  assert(completion_b.ok());
-  assert(completion_b.value().status.ok());
+  assert(completion_b.has_value());
+  assert(completion_b.value().status.has_value());
 }
 
-auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
+auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = telepath::MakeLruKReplacer(1, 2);
-  return telepath::BufferManager(1, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+  return telepath::BufferManager::Create(1, 4096, std::move(disk_backend), std::move(replacer), telemetry).value();
 }
 
 void RunHotPageWorker(
@@ -46,7 +46,7 @@ void RunHotPageWorker(
   std::atomic<bool> *failed
 ) {
   auto result = manager->ReadBuffer(3, 0);
-  if (!result.ok()) {
+  if (!result.has_value()) {
     failed->store(true);
     return;
   }
@@ -73,14 +73,14 @@ void ExpectHotPageWaitersCompleteFirst(telepath::BufferManager *manager) {
 
 void ExpectColdPageCanEvictAndBeRead(telepath::BufferManager *manager) {
   auto result = manager->ReadBuffer(3, 1);
-  assert(result.ok());
+  assert(result.has_value());
   auto handle = std::move(result.value());
   assert(handle.data()[0] == std::byte{0xB2});
 }
 
 void ExpectOriginalPageCanBeReadAgain(telepath::BufferManager *manager) {
   auto result = manager->ReadBuffer(3, 0);
-  assert(result.ok());
+  assert(result.has_value());
   auto handle = std::move(result.value());
   assert(handle.data()[0] == std::byte{0xA1});
 }
@@ -90,7 +90,8 @@ void ExpectOriginalPageCanBeReadAgain(telepath::BufferManager *manager) {
 int main() {
   telepath::buffer_test_support::TestRootGuard root_guard("telepath_wait_evict_interleave_data");
   SeedDiskPages(root_guard.path());
-  auto manager = BuildManager(root_guard.path());
+  auto manager_owner = BuildManager(root_guard.path());
+  telepath::BufferManager &manager = *manager_owner;
   ExpectHotPageWaitersCompleteFirst(&manager);
   ExpectColdPageCanEvictAndBeRead(&manager);
   ExpectOriginalPageCanBeReadAgain(&manager);

@@ -15,28 +15,28 @@
 namespace {
 
 void SeedDiskPage(const std::filesystem::path &root) {
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> seed{};
   seed[0] = std::byte{0x55};
   auto request = disk_backend->SubmitWrite(telepath::BufferTag{11, 3}, seed.data(), seed.size());
-  assert(request.ok());
+  assert(request.has_value());
   auto completion = disk_backend->PollCompletion();
-  assert(completion.ok());
-  assert(completion.value().status.ok());
+  assert(completion.has_value());
+  assert(completion.value().status.has_value());
 }
 
 struct SamePageMissContext {
   std::shared_ptr<telepath::TelemetrySink> telemetry;
-  telepath::BufferManager manager;
+  std::unique_ptr<telepath::BufferManager> manager;
 };
 
 auto BuildContext(const std::filesystem::path &root) -> SamePageMissContext {
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = telepath::MakeClockReplacer(4);
   return {
     telemetry,
-    telepath::BufferManager(4, 4096, std::move(disk_backend), std::move(replacer), telemetry),
+    telepath::BufferManager::Create(4, 4096, std::move(disk_backend), std::move(replacer), telemetry).value(),
   };
 }
 
@@ -45,7 +45,7 @@ void RunWorker(
   std::atomic<bool> *failed
 ) {
   auto result = manager->ReadBuffer(11, 3);
-  if (!result.ok()) {
+  if (!result.has_value()) {
     failed->store(true);
     return;
   }
@@ -81,7 +81,7 @@ int main() {
   telepath::buffer_test_support::TestRootGuard root_guard("telepath_same_page_miss_data");
   SeedDiskPage(root_guard.path());
   auto context = BuildContext(root_guard.path());
-  ExpectConcurrentReadersShareSingleMiss(&context.manager);
+  ExpectConcurrentReadersShareSingleMiss(context.manager.get());
   ExpectMissAndHitTelemetry(context.telemetry->Snapshot());
   return 0;
 }

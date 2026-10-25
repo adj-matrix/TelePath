@@ -13,8 +13,51 @@
 
 namespace telepath {
 
+auto BufferManager::Initialize() -> Status {
+  if (Status dependency_status = ValidateRuntimeDependencies(); !dependency_status.has_value()) return dependency_status;
+  if (Status frame_status = InitializeFramePool(); !frame_status.has_value()) return frame_status;
+
+  SeedFreeFrames();
+  ResolveCleanerOptions();
+  const DiskBackendCapabilities capabilities = disk_backend_->GetCapabilities();
+  options_.flush_worker_count = ResolveFlushWorkerCount(capabilities);
+  options_.flush_submit_batch_size = ResolveFlushSubmitBatchSize(capabilities, options_.flush_worker_count);
+  options_.flush_foreground_burst_limit = ResolveFlushForegroundBurstLimit();
+
+  if (Status completion_status = StartCompletionDispatcher(); !completion_status.has_value()) return completion_status;
+
+  if (Status flush_status = StartFlushScheduler(); !flush_status.has_value()) {
+    StopFlushPipeline(Unavailable("failed to start flush scheduler"));
+    return flush_status;
+  }
+
+  if (Status cleaner_status = StartCleanerController(); !cleaner_status.has_value()) {
+    StopFlushPipeline(Unavailable("failed to start background cleaner"));
+    return cleaner_status;
+  }
+  return Ok();
+}
+
+auto BufferManager::CheckUsable() const -> Status {
+  if (!failed_.load(std::memory_order_acquire)) return Ok();
+  return Failed("buffer manager is in the failed state");
+}
+
+void BufferManager::EnterFailedState(const Error &cause) {
+  std::lock_guard<std::mutex> failure_guard(failure_latch_);
+  if (failure_.has_value()) return;
+  failure_ = cause;
+  failed_.store(true, std::memory_order_release);
+}
+
+auto BufferManager::failure() const -> std::optional<Error> {
+  if (!failed_.load(std::memory_order_acquire)) return std::nullopt;
+  std::lock_guard<std::mutex> failure_guard(failure_latch_);
+  return failure_;
+}
+
 auto BufferManager::InitializeFramePool() -> Status {
-  if (frame_pool_ == nullptr) return Status::InvalidArgument("frame pool must not be null");
+  if (frame_pool_ == nullptr) return InvalidArgument("frame pool must not be null");
   return frame_pool_->Initialize();
 }
 
@@ -27,12 +70,12 @@ void BufferManager::SeedFreeFrames() {
 }
 
 auto BufferManager::ValidateRuntimeDependencies() const -> Status {
-  if (disk_backend_ == nullptr) return Status::InvalidArgument("disk backend must not be null");
-  if (replacer_ == nullptr) return Status::InvalidArgument("replacer must not be null");
-  if (miss_coordinator_ == nullptr) return Status::InvalidArgument("miss coordinator must not be null");
-  if (completion_dispatcher_ == nullptr) return Status::InvalidArgument("completion dispatcher must not be null");
-  if (page_table_ == nullptr) return Status::InvalidArgument("page table must not be null");
-  return Status::Ok();
+  if (disk_backend_ == nullptr) return InvalidArgument("disk backend must not be null");
+  if (replacer_ == nullptr) return InvalidArgument("replacer must not be null");
+  if (miss_coordinator_ == nullptr) return InvalidArgument("miss coordinator must not be null");
+  if (completion_dispatcher_ == nullptr) return InvalidArgument("completion dispatcher must not be null");
+  if (page_table_ == nullptr) return InvalidArgument("page table must not be null");
+  return Ok();
 }
 
 void BufferManager::ResolveCleanerOptions() {
@@ -72,7 +115,7 @@ auto BufferManager::ResolveFlushForegroundBurstLimit() const -> std::size_t {
 }
 
 auto BufferManager::StartFlushScheduler() -> Status {
-  flush_scheduler_ = std::make_unique<BufferManagerFlushScheduler>(disk_backend_.get(), completion_dispatcher_.get(), page_size_, options_.flush_worker_count, options_.flush_submit_batch_size, options_.flush_foreground_burst_limit);
+  flush_scheduler_ = std::make_unique<BufferManagerFlushScheduler>(disk_backend_.get(), completion_dispatcher_.get(), geometry_.block_size(), options_.flush_worker_count, options_.flush_submit_batch_size, options_.flush_foreground_burst_limit);
   return flush_scheduler_->Start(
     [this](const std::shared_ptr<BufferManagerFlushTask> &task) { BeginFlushTask(task); },
     [this](const std::shared_ptr<BufferManagerFlushTask> &task, const Status &status) { FinalizeFlushTask(task, status); });
@@ -85,8 +128,8 @@ void BufferManager::StopFlushPipeline(const Status &reason) {
 }
 
 auto BufferManager::StartCompletionDispatcher() -> Status{
-  if (completion_dispatcher_ == nullptr) return Status::InvalidArgument("completion dispatcher must not be null");
-  return completion_dispatcher_->Start();
+  if (completion_dispatcher_ == nullptr) return InvalidArgument("completion dispatcher must not be null");
+  return completion_dispatcher_->Start([this](const Error &cause) { EnterFailedState(cause); });
 }
 
 }  // namespace telepath

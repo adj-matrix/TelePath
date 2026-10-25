@@ -10,11 +10,11 @@
 
 namespace {
 
-auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
+auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = std::make_unique<telepath::ClockReplacer>(2);
-  return telepath::BufferManager(2, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+  return telepath::BufferManager::Create(2, 4096, std::move(disk_backend), std::move(replacer), telemetry).value();
 }
 
 auto FindLoadedFrame(const telepath::BufferPoolSnapshot &snapshot)
@@ -43,9 +43,9 @@ void ExpectInitialSnapshotShowsFreeFrames(
   }
 }
 
-auto PinPageForInspection(telepath::BufferManager *manager) -> telepath::BufferHandle {
-  auto read_result = manager->ReadBuffer(3, 9);
-  assert(read_result.ok());
+auto PinPageForInspection(telepath::BufferManager *manager) -> telepath::ExclusiveBufferHandle {
+  auto read_result = manager->ReadBufferExclusive(3, 9);
+  assert(read_result.has_value());
   return std::move(read_result.value());
 }
 
@@ -90,14 +90,15 @@ void ExpectReleasedSnapshotShowsUnpinnedResidentFrame(
 
 int main() {
   telepath::buffer_test_support::TestRootGuard root_guard("telepath_frame_snapshot_test");
-  auto manager = BuildManager(root_guard.path());
+  auto manager_owner = BuildManager(root_guard.path());
+  telepath::BufferManager &manager = *manager_owner;
 
   ExpectInitialSnapshotShowsFreeFrames(manager.ExportSnapshot());
 
   auto handle = PinPageForInspection(&manager);
   ExpectPinnedSnapshotShowsResidentFrame(manager.ExportSnapshot());
 
-  assert(manager.MarkBufferDirty(handle).ok());
+  handle.mutable_data();
   ExpectDirtySnapshotShowsDirtyResidentFrame(manager.ExportSnapshot());
 
   handle.Reset();

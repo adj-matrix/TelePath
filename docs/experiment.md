@@ -28,7 +28,7 @@ The benchmark output reports the following paper-facing metrics:
 | `flush_tasks_scheduled` / `flush_tasks_completed` | Async scheduler activity | Writeback scheduler explanation |
 | `cleaner_flushes_*` | Background cleaner activity | Dirty-page control explanation |
 
-Operation latency measures a benchmark operation from `ReadBuffer()` through optional dirty marking and foreground flush completion.
+Operation latency measures a benchmark operation from `ReadBuffer()`/`ReadBufferExclusive()` through optional dirty marking and foreground flush completion.
 
 JSON benchmark output also includes a small `sampled_snapshots` array for Web and paper-demo use. These samples are captured while worker threads still hold pages or while runtime I/O state is observable, so they can show pinned, dirty, queued-flush, or in-flight-flush states that may disappear from the final end-of-run snapshot. The Web frame map exposes both the final snapshot and each captured runtime sample through an explicit selector, so a run can be inspected from more than one observation point.
 

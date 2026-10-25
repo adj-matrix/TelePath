@@ -22,7 +22,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
     auto validate_status = ValidateReadRequest(out, size);
-    if (!validate_status.ok()) return validate_status;
+    if (!validate_status.has_value()) return std::unexpected(validate_status.error());
 
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
@@ -36,7 +36,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
     std::size_t size
   ) -> telepath::Result<uint64_t> override {
     auto validate_status = ValidateWriteRequest(data, size);
-    if (!validate_status.ok()) return validate_status;
+    if (!validate_status.has_value()) return std::unexpected(validate_status.error());
 
     std::lock_guard<std::mutex> guard(latch_);
     const uint64_t request_id = next_request_id_++;
@@ -46,7 +46,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
 
   auto PollCompletion() -> telepath::Result<telepath::DiskCompletion> override {
     auto request = TakePendingRequest();
-    if (!request.ok()) return request.status();
+    if (!request.has_value()) return std::unexpected(request.error());
     return CompleteRequest(request.value());
   }
 
@@ -70,23 +70,23 @@ class FailingDiskBackend : public telepath::DiskBackend {
     std::byte *out,
     std::size_t size
   ) const -> telepath::Status {
-    if (out == nullptr) return telepath::Status::InvalidArgument("invalid read request");
-    if (size != page_size_) return telepath::Status::InvalidArgument("invalid read request");
-    return telepath::Status::Ok();
+    if (out == nullptr) return telepath::InvalidArgument("invalid read request");
+    if (size != page_size_) return telepath::InvalidArgument("invalid read request");
+    return telepath::Ok();
   }
 
   auto ValidateWriteRequest(
     const std::byte *data,
     std::size_t size
   ) const -> telepath::Status {
-    if (data == nullptr) return telepath::Status::InvalidArgument("invalid write request");
-    if (size != page_size_) return telepath::Status::InvalidArgument("invalid write request");
-    return telepath::Status::Ok();
+    if (data == nullptr) return telepath::InvalidArgument("invalid write request");
+    if (size != page_size_) return telepath::InvalidArgument("invalid write request");
+    return telepath::Ok();
   }
 
   auto TakePendingRequest() -> telepath::Result<telepath::DiskRequest> {
     std::lock_guard<std::mutex> guard(latch_);
-    if (pending_.empty()) return telepath::Status::Unavailable("no pending request");
+    if (pending_.empty()) return telepath::Unavailable("no pending request");
 
     auto request = pending_.front();
     pending_.pop_front();
@@ -101,7 +101,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
         request.request_id,
         request.operation,
         request.tag,
-        telepath::Status::IoError("forced read failure"),
+        telepath::IoError("forced read failure"),
       };
     }
     if (request.operation == telepath::DiskOperation::kWrite && fail_writes_) {
@@ -109,7 +109,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
         request.request_id,
         request.operation,
         request.tag,
-        telepath::Status::IoError("forced write failure"),
+        telepath::IoError("forced write failure"),
       };
     }
 
@@ -122,7 +122,7 @@ class FailingDiskBackend : public telepath::DiskBackend {
       request.request_id,
       request.operation,
       request.tag,
-      telepath::Status::Ok(),
+      telepath::Ok(),
     };
   }
 
@@ -139,11 +139,13 @@ void ExpectReadFailurePropagates() {
   backend->set_fail_reads(true);
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
   auto result = manager.ReadBuffer(1, 0);
-  assert(!result.ok());
-  assert(result.status().code() == telepath::StatusCode::kIoError);
+  assert(!result.has_value());
+  assert(result.error().code() == telepath::ErrorCode::kIoError);
 }
 
 void ExpectWriteFailurePropagates() {
@@ -151,19 +153,20 @@ void ExpectWriteFailurePropagates() {
   auto *backend_ptr = backend.get();
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  telepath::BufferManager manager(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  assert(manager_owner.has_value());
+  telepath::BufferManager &manager = *manager_owner.value();
 
-  auto result = manager.ReadBuffer(1, 1);
-  assert(result.ok());
+  auto result = manager.ReadBufferExclusive(1, 1);
+  assert(result.has_value());
 
   auto handle = std::move(result.value());
   handle.mutable_data()[0] = std::byte{0x5A};
-  assert(manager.MarkBufferDirty(handle).ok());
 
   backend_ptr->set_fail_writes(true);
   const auto flush_status = manager.FlushBuffer(handle);
-  assert(!flush_status.ok());
-  assert(flush_status.code() == telepath::StatusCode::kIoError);
+  assert(!flush_status.has_value());
+  assert(flush_status.error().code() == telepath::ErrorCode::kIoError);
 }
 
 }  // namespace

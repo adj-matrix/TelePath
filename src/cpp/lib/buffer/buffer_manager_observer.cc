@@ -70,7 +70,7 @@ void BufferManagerObserver::RecordFlushTaskScheduled(const BufferTag &tag) const
 
 void BufferManagerObserver::RecordFlushTaskCompletion(const BufferTag &tag, const Status &status) const {
   telemetry_sink_->RecordFlushTaskCompleted(tag);
-  if (!status.ok()) RecordFlushFailure(tag);
+  if (!status.has_value()) RecordFlushFailure(tag);
 }
 
 void BufferManagerObserver::RecordCleanerFlushScheduled(const BufferTag &tag) const {

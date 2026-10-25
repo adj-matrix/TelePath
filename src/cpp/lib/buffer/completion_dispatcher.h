@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -21,7 +22,9 @@ class BufferManagerCompletionDispatcher {
   explicit BufferManagerCompletionDispatcher(DiskBackend *disk_backend);
   ~BufferManagerCompletionDispatcher();
 
-  auto Start() -> Status;
+  using FatalCallback = std::move_only_function<void(const Error &)>;
+
+  auto Start(FatalCallback on_fatal = {}) -> Status;
   void Shutdown(const Status &status);
 
   void Register(uint64_t request_id);
@@ -36,13 +39,14 @@ class BufferManagerCompletionDispatcher {
   void Run();
 
   DiskBackend *disk_backend_{nullptr};
+  FatalCallback on_fatal_;
   std::mutex latch_;
   std::condition_variable cv_;
   std::unordered_map<uint64_t, RequestState> request_states_;
   std::size_t outstanding_requests_{0};
   bool shutdown_{false};
   bool stopped_{false};
-  Status shutdown_status_{Status::Unavailable("completion dispatcher stopped")};
+  Status shutdown_status_{Unavailable("completion dispatcher stopped")};
   std::thread thread_;
 };
 

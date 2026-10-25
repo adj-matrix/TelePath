@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../lib/cmake.sh"
 
 TELEPATH_ROOT_DIR="$(telepath_root_dir)"
-BENCHMARK_PRESET="${BENCHMARK_PRESET:-debug}"
+BENCHMARK_PRESET="${BENCHMARK_PRESET:-release}"
 BUILD_DIR="$(telepath_build_dir_for_preset "${BENCHMARK_PRESET}")"
 BENCH_BIN="${BUILD_DIR}/test/telepath_benchmark"
 

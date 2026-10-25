@@ -6,15 +6,21 @@ This document records the concurrency rules of the TelePath buffer manager that 
 
 Implementation files stay lightly commented by convention. When a change touches locking, frame state, eviction, or writeback, check it against this document and update the document in the same change.
 
-Regression coverage for the rules below lives in `test/cpp/buffer/eviction_race_test.cc`.
+Regression coverage:
 
-## 1. Lock Inventory
+- `test/cpp/buffer/frame_control_test.cc`: control-word transitions, latch exclusion, dirty clearing, futex wake-ups.
+- `test/cpp/buffer/eviction_race_test.cc`: eviction/writeback interleavings and the replacer contract.
+- `test/cpp/buffer/stress_integrity_test.cc`: sustained mixed load with torn-page and lost-update detection after a reopen.
+- `test/cpp/buffer/page_table_test.cc`: conditional remap and newest-mapping-first lookups.
 
-| Lock | Scope | Protects |
+## 1. Synchronization Inventory
+
+| Primitive | Scope | Protects |
 | --- | --- | --- |
-| `BufferDescriptor::content_latch` (`shared_mutex`) | per frame | page bytes in the frame |
-| `BufferDescriptor::latch` (`mutex`) + `io_cv` | per frame | descriptor metadata: tag, state, pin count, dirty state, I/O and flush flags |
-| page table stripe latches | per stripe | `BufferTag -> FrameId` mapping |
+| `BufferDescriptor::control` (32-bit atomic, futex word) | per frame | state, dirty and writeback flags, content latch, pin count |
+| `BufferDescriptor::version` (64-bit atomic) | per frame | write/reuse counter (reserved for optimistic reads) |
+| `BufferDescriptor::tag_file_id` / `tag_block_id` (atomics) | per frame | current tag; written only while the frame is `Loading` and owned by its loader |
+| page table stripe spinlock + sequence counter | per stripe | `BufferTag -> FrameId` chains; writers lock, lookups validate the sequence without locking |
 | miss coordinator stripe latches, `BufferManagerMissState::latch` | per stripe / per miss | same-page miss ownership and outcome |
 | replacer `latch_` | global | replacement-policy state |
 | cleaner controller `latch_` | global | cleaner candidate queue and in-flight count |
@@ -22,70 +28,104 @@ Regression coverage for the rules below lives in `test/cpp/buffer/eviction_race_
 | flush scheduler `latch_`, `BufferManagerFlushTask::latch` | global / per task | flush queues and task completion |
 | completion dispatcher `latch_` | global | request-id completion states |
 
-## 2. Lock Order
+The control-word bit layout is specified in `docs/design/kernel-refactor.md` (section 3.3) and implemented in `src/cpp/lib/buffer/frame_control.h`. Every control-word transition is a single CAS.
 
-Acquire locks only in this order:
+## 2. Ordering Rules
 
-```
-content_latch  ->  descriptor latch  ->  { page table stripe, replacer, cleaner controller, free list }
-```
-
-- Handle holders already follow this order: they hold `content_latch` (through `data()` / `mutable_data()`) and then call `MarkBufferDirty()` or `FlushBuffer()`, which take the descriptor latch.
-- `PrepareFlushTask()` takes `content_latch` first, then the descriptor latch.
-- Never acquire `content_latch` while holding a descriptor latch.
-- Cross-stripe page table updates lock the lower stripe index first.
-- The miss coordinator, flush scheduler, completion dispatcher, and backend locks are never held while acquiring a descriptor latch or `content_latch`.
+- No mutex is ever held while blocking on a frame's control word, except the waits listed in section 3.
+- The content latch (shared or exclusive) is the only control-word "lock" a thread holds across other operations; a `SharedBufferHandle` or `ExclusiveBufferHandle` holds it for its whole lifetime. Handle holders mark the page dirty (`ExclusiveBufferHandle::mutable_data()`) and call `FlushBuffer(handle)` while holding it; those calls only perform CAS transitions on the same word and never wait for the latch.
+- Page table, replacer, cleaner, and free-list mutexes are leaf locks: no other lock is acquired while holding one, and none is held while waiting on a control word.
+- Cross-stripe page table updates lock the lower stripe address first.
+- The completion dispatcher may invoke the fatal callback while holding its own latch; the callback only takes `BufferManager::failure_latch_`, which is never held while taking the dispatcher latch.
 
 ## 3. Waiting Rules
 
-Threads block on `io_cv` while holding a descriptor latch (`WaitForFrameReady()`, `WaitForPendingFlush()`). A blocking flush caller may also hold `content_latch` in shared mode while waiting.
+Threads sleep on a frame's control word through `frame_control::WaitWhile()`: set the `waiters` bit, then `futex_wait` on the observed value. Every transition that can unblock a waiter (latch release, `Loading` → `Resident`/`Free`, clearing writeback flags) clears `waiters` in its CAS and wakes all sleepers, which re-check their condition.
 
-This is safe only because a queued flush never needs `content_latch` to make progress: its page snapshot is copied before the flush becomes visible (rule 4.1), and the flush worker only takes the descriptor latch, the backend, and the dispatcher.
+Current waits:
 
-Any new wait on `io_cv` must keep that property: the condition being waited for must not depend on a lock the waiter holds.
+| Wait | Condition | May hold |
+| --- | --- | --- |
+| `AcquireShared` | exclusive held, or 255 readers | nothing |
+| `AcquireExclusive` | any latch holder | nothing |
+| `WaitForPendingFlush` | `writeback_queued` or `writeback_active` | the frame's shared latch, or the caller's own handle latch |
+
+A pending writeback never needs the content latch to finish: its snapshot is copied before the writeback becomes visible (4.1), and the flush worker only performs `BeginWriteback`/`CompleteWriteback` CAS transitions. That is why waiting for a writeback while holding a latch is safe. Any new wait must keep the property that its condition does not depend on a latch the waiter holds.
+
+The content latch prefers readers, like the glibc rwlock it replaced: a steady stream of readers can delay a writer.
 
 ## 4. Writeback Invariants
 
-### 4.1 Snapshot Before Publishing a Flush
+### 4.1 Snapshot Before Publishing a Writeback
 
-`flush_queued` is set only together with copying the page snapshot, inside one critical section that holds `content_latch` (shared) and the descriptor latch.
+`writeback_queued` is published by `TryQueueWriteback` while the snapshot source is stable: either the flusher holds the shared latch, or the caller's handle holds a latch and passes its data as the stable source. The snapshot is copied before the shared latch is released.
 
-If `flush_queued` were published first and the snapshot copied afterwards, the copy could block behind a writer that is itself waiting for that flush in `FlushBuffer()`, which is an ABBA deadlock.
+Publishing the writeback first and copying afterwards would let the copy block behind a writer that is itself waiting for that writeback in `FlushBuffer()`, which is an ABBA deadlock.
 
 ### 4.2 Opportunistic Callers Never Block on a Writer
 
-Callers that pass `was_busy` (the background cleaner and the first pass of `FlushAll()`) use `try_lock` on `content_latch` and report the frame as busy instead of waiting. `FlushAll()` retries busy frames through the blocking path.
+Callers that pass `was_busy` (the background cleaner and the first pass of `FlushAll()`) use `TryAcquireShared` and report the frame as busy instead of waiting. `FlushAll()` retries busy frames through the blocking path. The cleaner also skips pinned frames.
 
-### 4.3 Dirty Generation
+### 4.3 Dirty Clearing
 
-A completed flush clears `is_dirty` only if the frame still holds the same tag and the same `dirty_generation` that was captured with the snapshot. A page re-dirtied during writeback stays dirty and is flushed again later.
+`CompleteWriteback` clears `dirty` only when the write succeeded, `redirtied` is clear, and nobody holds the exclusive latch, in the same CAS that clears the writeback flags. `redirtied` is set when, while a writeback is queued or active:
+
+- the exclusive latch is released, or
+- the page is marked dirty (`ExclusiveBufferHandle::mutable_data()`).
+
+Every modification happens through an `ExclusiveBufferHandle`, which holds the exclusive latch and marks the page dirty when it hands out the writable view. A page with an active writer is therefore never considered clean, and any change made after the snapshot keeps the page dirty until a later round. Completion never takes a latch, so a writer waiting in `FlushBuffer()` cannot deadlock with it.
+
+Consequences for the flush entry points:
+
+- `FlushBuffer(ExclusiveBufferHandle&)` runs exactly one round: it persists the current bytes, and the page stays dirty while the handle lives (the holder may still write through a view obtained earlier).
+- `FlushBuffer(const SharedBufferHandle&)`, `FlushBuffer(file, block)`, `FlushAll()`, and victim writeback loop until the page is clean. With a shared holder or no holder, writers can only add rounds, so the loop terminates once writes stop.
 
 ### 4.4 One Writer per Page
 
-At any time, a page has at most one resident frame, and each frame has at most one flush queued or in flight. Writes for one page therefore cannot be reordered on disk.
+At any time, a page has at most one resident frame, and each frame has at most one writeback queued or active. Writes for one page therefore cannot be reordered on disk.
 
 ## 5. Eviction Invariants
 
-### 5.1 Write Back Before Remapping
+### 5.1 Pin and Reservation Share One CAS
 
-A dirty victim is written back while it is still mapped under its old tag. The page table is remapped to the new tag only when the frame is clean, unpinned, and has no I/O or flush in flight.
+`TryReserve` moves a frame to `Loading` (with one pin for the loader) only if, in the same CAS, it is `Free`, or `Resident` with zero pins, no latch holders, no writeback flags, and clean. `TryPinResident` succeeds only on `Resident`. A pin and a reservation can therefore never both succeed on the same frame state.
+
+After pinning, the reader compares the frame's tag with the requested tag and unpins on a mismatch. The tag is stable while the frame is `Resident` because it is only written by the loader during `Loading`, before `PublishResident`'s release CAS.
+
+### 5.2 Write Back Before Remapping
+
+A dirty victim is written back while it is still mapped under its old tag. The page table is remapped to the new tag only after a successful reservation, which requires a clean frame.
 
 Remapping first would let a concurrent reader of the old page miss, load stale bytes from disk, and lose the update. If that writeback then failed, restoring the old mapping would leave two resident copies of the same page.
 
 During the victim writeback the frame stays resident, so readers of the old page hit it normally. If the frame is pinned or re-dirtied by the time the writeback finishes, it is handed back to the replacer and the reservation moves on to another victim.
 
-### 5.2 Writeback Failure
+### 5.3 Conditional Remap
 
-When a victim writeback fails, the frame keeps its tag, data, and dirty state, returns to the replacer, and the failing `ReadBuffer()` returns the I/O error. Eviction failures are counted in telemetry (`eviction_failures`).
+Between a successful reservation and the page table remap, a reader of the old tag can fail to pin the now-`Loading` frame, miss, and load the old page into a different frame. `BufferManagerPageTable::Replace` therefore erases the old mapping only if it still points to the reserved frame.
+
+### 5.4 Newest Mapping First
+
+The page table's chains are intrusive (frames are the nodes) and `Link` always inserts at the chain head. In the window of 5.3, two frames can carry the same key: the reserved frame (now `Loading`) and the frame that reloaded the old page. Head insertion keeps the newer mapping ahead of the older one, so lookups find the frame that can actually be pinned. Returning the stale frame first would make every later reader miss, become the miss owner, and load yet another copy.
+
+Lookups are lock-free: a reader samples the stripe's sequence counter, walks the chain with relaxed loads (bounded by the frame count, so a chain rewritten mid-walk cannot loop forever), and retries if the counter changed or was odd. The table keeps its own copy of each frame's key, written only under the stripe lock, so a validated walk sees a consistent snapshot; the descriptor's tag is updated separately and is not used for lookups.
+
+### 5.5 Writeback Failure
+
+When a victim writeback fails, the frame keeps its tag, data, and dirty state, returns to the replacer, and the failing `ReadBuffer()`/`ReadBufferExclusive()` returns the I/O error. Eviction failures are counted in telemetry (`eviction_failures`).
 
 ## 6. Replacer Contract
 
 `Replacer::Victim()` stops tracking the frame it returns. The LRU, LRU-K, and 2Q policies drop the entry; Clock re-registers on `SetEvictable()`, but callers must not rely on that.
 
-A victim that is not reused (pinned, busy with I/O or flush, or still dirty) must be handed back through `ReturnUnreservedVictim()`, which calls `RecordAccess()` and, for unpinned frames, `SetEvictable(true)`. Calling `SetEvictable(true)` alone silently removes the frame from the evictable set for the policies that drop entries.
+A victim that is not reused (pinned, latched, busy with a writeback, or still dirty) must be handed back through `ReturnUnreservedVictim()`: it calls `RecordAccess()` first and only then reads the pin count, calling `SetEvictable(true)` if the frame is unpinned. Reading the pin count before `RecordAccess()` would lose the frame if its last holder unpinned in between, because that holder's `SetEvictable(true)` hit a missing entry.
+
+Pin and unpin call the replacer outside any frame lock. A late `SetEvictable(false)` can leave a pinned frame marked evictable; eviction still fails the reservation CAS and returns the frame through `ReturnUnreservedVictim()`. Phase 2 of the refactor removes evictability from the replacer.
 
 ## 7. Known Limits
 
-- If the only evictable frame is busy with a flush, `ReserveFrameForTag()` spins on `Victim()` until the flush completes.
-- A thread that holds `content_latch` on a page must not call `FlushAll()`, and must not call `FlushBuffer()` through a different handle to the same page: the blocking path would wait on a latch the thread already holds.
-- Upgrading a handle from read to write releases the shared latch before taking the exclusive one, so another writer can run in between.
+- If the only evictable frame is busy with a writeback, `ReserveFrameForTag()` spins on `Victim()` until the writeback completes.
+- A thread that holds an `ExclusiveBufferHandle` must not call `FlushAll()` or `FlushBuffer(file, block)` for that page: the blocking path would wait for the shared latch the thread blocks itself.
+- A thread must not hold two handles on the same page; `ReadBuffer` followed by `ReadBufferExclusive` on the same page in one thread deadlocks. Debug detection is not implemented yet.
+- There is no in-place upgrade: release the `SharedBufferHandle`, acquire an `ExclusiveBufferHandle`, and re-check.
+- Pin counts saturate at 32767 per frame; further pins yield until one is released.

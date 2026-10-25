@@ -2,9 +2,9 @@
 
 #include <utility>
 
-#include "buffer_descriptor_state.h"
 #include "buffer_manager_observer.h"
 #include "completion_dispatcher.h"
+#include "frame_control.h"
 #include "frame_memory_pool.h"
 #include "miss_coordinator.h"
 #include "page_table.h"
@@ -13,34 +13,42 @@
 
 namespace telepath {
 
-auto BufferManager::TryReadResidentHit(const BufferTag &tag) -> std::optional<BufferHandle> {
-  auto frame_id = page_table_->LookupFrameId(tag);
-  if (!frame_id.has_value()) return std::nullopt;
-  auto handle = TryPinResidentFrame(frame_id.value(), tag);
-  if (!handle.has_value()) return std::nullopt;
+auto BufferManager::PinPage(const BufferTag &tag) -> Result<FrameId> {
+  if (Status usable = CheckUsable(); !usable.has_value()) return PropagateError(usable);
 
-  observer_->RecordResidentHit(tag);
-  return std::move(handle.value());
+  if (auto resident_hit = TryReadResidentHit(tag); resident_hit.has_value()) return resident_hit.value();
+
+  auto registration = miss_coordinator_->RegisterOrJoin(tag);
+  if (!registration.is_owner) return AwaitJoinedMiss(tag, registration.state);
+
+  if (auto owner_hit = TryReadResidentHit(tag); owner_hit.has_value()) {
+    miss_coordinator_->Complete(tag, registration.state, Ok(), owner_hit.value());
+    return owner_hit.value();
+  }
+  return LoadMissOwnerBuffer(tag, registration.state);
 }
 
-auto BufferManager::AwaitJoinedMiss(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state) -> Result<BufferHandle> {
+auto BufferManager::TryReadResidentHit(const BufferTag &tag) -> std::optional<FrameId> {
+  auto frame_id = page_table_->LookupFrameId(tag);
+  if (!frame_id.has_value()) return std::nullopt;
+  if (!TryPinResidentFrame(frame_id.value(), tag)) return std::nullopt;
+
+  observer_->RecordResidentHit(tag);
+  return frame_id.value();
+}
+
+auto BufferManager::AwaitJoinedMiss(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state) -> Result<FrameId> {
   auto joined_state = state;
   while (true) {
     Result<FrameId> wait_result = miss_coordinator_->Wait(joined_state);
-    if (!wait_result.ok()) return wait_result.status();
+    if (!wait_result.has_value()) return PropagateError(wait_result);
 
-    FrameId frame_id = wait_result.value();
-    Status wait_status = WaitForFrameReady(frame_id);
-    if (!wait_status.ok()) return wait_status;
-
-    auto handle = TryPinResidentFrame(frame_id, tag);
-    if (handle.has_value()) {
+    if (TryPinResidentFrame(wait_result.value(), tag)) {
       observer_->RecordJoinedMissHit(tag);
-      return std::move(handle.value());
+      return wait_result.value();
     }
 
-    auto resident_hit = TryReadResidentHit(tag);
-    if (resident_hit.has_value()) return std::move(resident_hit.value());
+    if (auto resident_hit = TryReadResidentHit(tag); resident_hit.has_value()) return resident_hit.value();
 
     auto registration = miss_coordinator_->RegisterOrJoin(tag);
     if (!registration.is_owner) {
@@ -48,70 +56,52 @@ auto BufferManager::AwaitJoinedMiss(const BufferTag &tag, const std::shared_ptr<
       continue;
     }
 
-    auto owner_hit = TryReadResidentHit(tag);
-    if (owner_hit.has_value()) {
-      miss_coordinator_->Complete(tag, registration.state, Status::Ok(), owner_hit->frame_id());
-      return std::move(owner_hit.value());
+    if (auto owner_hit = TryReadResidentHit(tag); owner_hit.has_value()) {
+      miss_coordinator_->Complete(tag, registration.state, Ok(), owner_hit.value());
+      return owner_hit.value();
     }
     return LoadMissOwnerBuffer(tag, registration.state);
   }
 }
 
-auto BufferManager::LoadMissOwnerBuffer(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state) -> Result<BufferHandle> {
+auto BufferManager::LoadMissOwnerBuffer(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state) -> Result<FrameId> {
   observer_->RecordReadMiss(tag);
 
   Result<FrameReservation> reserve_result = ReserveFrameForTag(tag);
-  if (!reserve_result.ok()) {
-    miss_coordinator_->Complete(tag, state, reserve_result.status(), kInvalidFrameId);
-    return reserve_result.status();
+  if (!reserve_result.has_value()) {
+    miss_coordinator_->Complete(tag, state, PropagateError(reserve_result), kInvalidFrameId);
+    return PropagateError(reserve_result);
   }
 
   Result<FrameId> frame_result = CompleteReservation(tag, reserve_result.value());
-  if (!frame_result.ok()) {
-    miss_coordinator_->Complete(tag, state, frame_result.status(), kInvalidFrameId);
-    return frame_result.status();
-  }
-
-  const FrameId frame_id = frame_result.value();
-  miss_coordinator_->Complete(tag, state, Status::Ok(), frame_id);
-  return BufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), page_size_);
+  miss_coordinator_->Complete(tag, state, frame_result.has_value() ? Ok() : PropagateError(frame_result), frame_result.value_or(kInvalidFrameId));
+  return frame_result;
 }
 
-auto BufferManager::TryPinResidentFrame(FrameId frame_id, const BufferTag &tag) -> std::optional<BufferHandle> {
+bool BufferManager::TryPinResidentFrame(FrameId frame_id, const BufferTag &tag) {
   BufferDescriptor &descriptor = descriptors_[frame_id];
-  {
-    std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-    if (!buffer_descriptor_state::IsResidentFrameMatch(descriptor, tag)) return std::nullopt;
-    ++descriptor.pin_count;
+  if (!frame_control::TryPinResident(descriptor.control)) return false;
+  if (LoadTag(descriptor) != tag) {
+    std::ignore = frame_control::Unpin(descriptor.control);
+    return false;
   }
 
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
-  return BufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), page_size_);
-}
-
-auto BufferManager::WaitForFrameReady(FrameId frame_id) -> Status {
-  if (frame_id >= pool_size_) return Status::InvalidArgument("invalid frame id while awaiting buffer");
-
-  BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::unique_lock<std::mutex> lock(descriptor.latch);
-  while (descriptor.state == BufferFrameState::kLoading || descriptor.io_in_flight) {
-    descriptor.io_cv.wait(lock);
-  }
-  return descriptor.last_io_status;
+  return true;
 }
 
 auto BufferManager::ReserveFrameForTag(const BufferTag &tag) -> Result<FrameReservation> {
   while (true) {
     Result<FrameId> frame_result = AcquireReservationFrame();
-    if (!frame_result.ok()) return frame_result.status();
+    if (!frame_result.has_value()) return PropagateError(frame_result);
     const FrameId frame_id = frame_result.value();
 
     FrameReservation reservation;
     FrameReservationOutcome outcome = TryReserveFrameForTag(frame_id, tag, true, &reservation);
     if (outcome == FrameReservationOutcome::kNeedsFlush) {
       Status flush_status = FlushVictimBeforeReuse(frame_id);
-      if (!flush_status.ok()) return flush_status;
+      if (!flush_status.has_value()) return PropagateError(flush_status);
       outcome = TryReserveFrameForTag(frame_id, tag, false, &reservation);
     }
     if (outcome == FrameReservationOutcome::kReserved) return reservation;
@@ -122,7 +112,7 @@ auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReserva
   const FrameId frame_id = reservation.frame_id;
 
   Status read_status = ReadReservedPage(frame_id, tag);
-  if (!read_status.ok()) return AbortLoadReservation(frame_id, tag, read_status);
+  if (!read_status.has_value()) return PropagateError(AbortLoadReservation(frame_id, tag, read_status));
 
   CompleteLoadedFrame(frame_id);
   replacer_->RecordAccess(frame_id);
@@ -136,26 +126,27 @@ auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReserva
 }
 
 void BufferManager::CompleteLoadedFrame(FrameId frame_id) {
-  BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-  buffer_descriptor_state::EnterResidentState(&descriptor);
-  descriptor.io_cv.notify_all();
   ResetCleanerCandidate(frame_id);
-}
-
-void BufferManager::MarkFrameReadInFlight(FrameId frame_id) {
-  BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::lock_guard<std::mutex> descriptor_guard(descriptor.latch);
-  descriptor.io_in_flight = true;
-  descriptor.last_io_status = Status::Ok();
+  frame_control::PublishResident(descriptors_[frame_id].control);
 }
 
 auto BufferManager::ReadReservedPage(FrameId frame_id, const BufferTag &tag) -> Status {
-  MarkFrameReadInFlight(frame_id);
-  Result<uint64_t> read_submit = disk_backend_->SubmitRead(tag, frame_pool_->GetFrameData(frame_id), page_size_);
-  if (!read_submit.ok()) return read_submit.status();
+  Result<uint64_t> read_submit = disk_backend_->SubmitRead(tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
+  if (!read_submit.has_value()) return PropagateError(read_submit);
   completion_dispatcher_->Register(read_submit.value());
   return completion_dispatcher_->Wait(read_submit.value());
+}
+
+auto BufferManager::LoadTag(const BufferDescriptor &descriptor) const -> BufferTag {
+  return BufferTag{
+    descriptor.tag_file_id.load(std::memory_order_relaxed),
+    descriptor.tag_block_id.load(std::memory_order_relaxed),
+  };
+}
+
+void BufferManager::StoreTag(BufferDescriptor *descriptor, const BufferTag &tag) {
+  descriptor->tag_file_id.store(tag.file_id, std::memory_order_relaxed);
+  descriptor->tag_block_id.store(tag.block_id, std::memory_order_relaxed);
 }
 
 }  // namespace telepath

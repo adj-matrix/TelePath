@@ -149,7 +149,7 @@ void WriteRawSharedMemoryObjectForTest(
   const std::string &payload,
   std::size_t object_size
 ) {
-  assert(telepath::UnlinkTelemetryExportSharedMemory(name).ok());
+  assert(telepath::UnlinkTelemetryExportSharedMemory(name).has_value());
   const int fd = shm_open(name.c_str(), O_CREAT | O_RDWR, 0600);
   assert(fd >= 0);
   assert(ftruncate(fd, static_cast<off_t>(object_size)) == 0);
@@ -184,9 +184,9 @@ void AssertTelemetryExportSerializesAndAppends() {
 
   const std::filesystem::path path = BuildExportPath();
   auto first_append = telepath::AppendTelemetryExportJsonLine(path.string(), snapshot);
-  assert(first_append.ok());
+  assert(first_append.has_value());
   auto second_append = telepath::AppendTelemetryExportJsonLine(path.string(), snapshot);
-  assert(second_append.ok());
+  assert(second_append.has_value());
 
   std::ifstream in(path);
   assert(in.is_open());
@@ -227,7 +227,7 @@ void AssertTelemetryExportEscapesJsonAndCreatesParentDirectories() {
   std::filesystem::remove_all(parent.parent_path());
 
   auto append = telepath::AppendTelemetryExportJsonLine(path.string(), snapshot);
-  assert(append.ok());
+  assert(append.has_value());
   assert(std::filesystem::exists(path));
 
   std::ifstream in(path);
@@ -242,14 +242,14 @@ void AssertTelemetryExportEscapesJsonAndCreatesParentDirectories() {
 
 void AssertTelemetryExportSharedMemoryRoundTrips() {
   const std::string name = BuildSharedMemoryName("telemetry_export");
-  assert(telepath::UnlinkTelemetryExportSharedMemory(name).ok());
+  assert(telepath::UnlinkTelemetryExportSharedMemory(name).has_value());
 
   const telepath::TelemetryExportSnapshot snapshot = BuildTelemetryExportSnapshot("unit-test-shm", 5);
   auto small_write = telepath::WriteTelemetryExportSharedMemory(name, 8, snapshot);
-  assert(!small_write.ok());
+  assert(!small_write.has_value());
 
   auto first_write = telepath::WriteTelemetryExportSharedMemory(name, 4096, snapshot);
-  assert(first_write.ok());
+  assert(first_write.has_value());
 
   const telepath::TelemetrySharedMemoryHeader first_header = ReadSharedMemoryHeaderForTest(name);
   assert(first_header.magic == telepath::kTelemetrySharedMemoryMagic);
@@ -260,14 +260,14 @@ void AssertTelemetryExportSharedMemoryRoundTrips() {
   assert(first_header.payload_size == telepath::SerializeTelemetryExportJson(snapshot).size());
 
   auto first_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(first_read.ok());
+  assert(first_read.has_value());
   assert(first_read.value().find("\"source\":\"unit-test-shm\"") != std::string::npos);
   assert(first_read.value().find("\"buffer_hits\":5") != std::string::npos);
   assert(first_read.value().find("\"frames\":[") != std::string::npos);
 
   const telepath::TelemetryExportSnapshot second_snapshot = BuildTelemetryExportSnapshot("unit-test-shm-second", 9);
   auto second_write = telepath::WriteTelemetryExportSharedMemory(name, 4096, second_snapshot);
-  assert(second_write.ok());
+  assert(second_write.has_value());
 
   const telepath::TelemetrySharedMemoryHeader second_header = ReadSharedMemoryHeaderForTest(name);
   assert(second_header.sequence == 2);
@@ -275,23 +275,23 @@ void AssertTelemetryExportSharedMemoryRoundTrips() {
   assert(second_header.payload_size == telepath::SerializeTelemetryExportJson(second_snapshot).size());
 
   auto second_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(second_read.ok());
+  assert(second_read.has_value());
   assert(second_read.value().find("\"source\":\"unit-test-shm-second\"") != std::string::npos);
   assert(second_read.value().find("\"buffer_hits\":9") != std::string::npos);
 
-  assert(telepath::UnlinkTelemetryExportSharedMemory(name).ok());
+  assert(telepath::UnlinkTelemetryExportSharedMemory(name).has_value());
   auto read_after_unlink = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(!read_after_unlink.ok());
+  assert(!read_after_unlink.has_value());
 }
 
 void AssertTelemetryExportSharedMemoryRejectsInvalidNames() {
   const telepath::TelemetryExportSnapshot snapshot = BuildTelemetryExportSnapshot("unit-test-shm", 1);
   auto missing_slash = telepath::WriteTelemetryExportSharedMemory("telepath_invalid", 4096, snapshot);
-  assert(!missing_slash.ok());
+  assert(!missing_slash.has_value());
   auto zero_capacity = telepath::WriteTelemetryExportSharedMemory(BuildSharedMemoryName("zero_capacity"), 0, snapshot);
-  assert(!zero_capacity.ok());
+  assert(!zero_capacity.has_value());
   auto nested_name = telepath::ReadTelemetryExportSharedMemory("/telepath/invalid");
-  assert(!nested_name.ok());
+  assert(!nested_name.has_value());
 }
 
 void AssertTelemetryExportSharedMemoryRejectsMalformedObjects() {
@@ -307,7 +307,7 @@ void AssertTelemetryExportSharedMemoryRejectsMalformedObjects() {
     payload.size());
   WriteRawSharedMemoryObjectForTest(name, incompatible_header, payload, sizeof(incompatible_header) + payload.size());
   auto incompatible_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(!incompatible_read.ok());
+  assert(!incompatible_read.has_value());
 
   const auto not_ready_header = BuildSharedMemoryHeader(
     telepath::kTelemetrySharedMemoryMagic,
@@ -318,7 +318,7 @@ void AssertTelemetryExportSharedMemoryRejectsMalformedObjects() {
     payload.size());
   WriteRawSharedMemoryObjectForTest(name, not_ready_header, payload, sizeof(not_ready_header) + payload.size());
   auto not_ready_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(!not_ready_read.ok());
+  assert(!not_ready_read.has_value());
 
   const auto payload_size_exceeds_capacity_header = BuildSharedMemoryHeader(
     telepath::kTelemetrySharedMemoryMagic,
@@ -333,7 +333,7 @@ void AssertTelemetryExportSharedMemoryRejectsMalformedObjects() {
     payload,
     sizeof(payload_size_exceeds_capacity_header) + payload.size());
   auto invalid_size_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(!invalid_size_read.ok());
+  assert(!invalid_size_read.has_value());
 
   const auto capacity_exceeds_mapping_header = BuildSharedMemoryHeader(
     telepath::kTelemetrySharedMemoryMagic,
@@ -348,13 +348,13 @@ void AssertTelemetryExportSharedMemoryRejectsMalformedObjects() {
     payload,
     sizeof(capacity_exceeds_mapping_header) + 1);
   auto invalid_capacity_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(!invalid_capacity_read.ok());
+  assert(!invalid_capacity_read.has_value());
 
   WriteRawSharedMemoryObjectForTest(name, capacity_exceeds_mapping_header, "", sizeof(capacity_exceeds_mapping_header) - 1);
   auto tiny_object_read = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(!tiny_object_read.ok());
+  assert(!tiny_object_read.has_value());
 
-  assert(telepath::UnlinkTelemetryExportSharedMemory(name).ok());
+  assert(telepath::UnlinkTelemetryExportSharedMemory(name).has_value());
 }
 
 }  // namespace

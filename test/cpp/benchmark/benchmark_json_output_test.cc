@@ -22,7 +22,7 @@ auto BuildBenchmarkCommand(const std::filesystem::path &benchmark_bin) -> Benchm
   const std::filesystem::path export_path = std::filesystem::temp_directory_path() / ("telepath_benchmark_json_output_export_" + std::to_string(unique_suffix) + ".jsonl");
   const std::string shm_name = "/telepath_benchmark_json_output_" + std::to_string(unique_suffix);
   std::filesystem::remove(export_path);
-  assert(telepath::UnlinkTelemetryExportSharedMemory(shm_name).ok());
+  assert(telepath::UnlinkTelemetryExportSharedMemory(shm_name).has_value());
   BenchmarkCommand command;
   command.export_path = export_path;
   command.shm_name = shm_name;
@@ -100,11 +100,11 @@ void AssertTelemetryExportFileWritten(const std::filesystem::path &path) {
 
 void AssertTelemetrySharedMemoryWritten(const std::string &name) {
   auto read_result = telepath::ReadTelemetryExportSharedMemory(name);
-  assert(read_result.ok());
+  assert(read_result.has_value());
   assert(read_result.value().find("\"source\":\"telepath_benchmark\"") != std::string::npos);
   assert(read_result.value().find("\"frames\":[") != std::string::npos);
   assert(read_result.value().find("\"dirty_page_count\"") != std::string::npos);
-  assert(telepath::UnlinkTelemetryExportSharedMemory(name).ok());
+  assert(telepath::UnlinkTelemetryExportSharedMemory(name).has_value());
 }
 
 }  // namespace

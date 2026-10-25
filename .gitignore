@@ -9,6 +9,7 @@
 /.reference/
 /.temp/
 
+/docs/design/baseline/*.csv
 /docs/journal/
 /docs/old/
 /docs/sketch/

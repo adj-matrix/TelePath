@@ -14,42 +14,33 @@
 
 namespace {
 
-auto BuildManager(const std::filesystem::path &root) -> telepath::BufferManager {
+auto BuildManager(const std::filesystem::path &root) -> std::unique_ptr<telepath::BufferManager> {
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto disk_backend = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   auto replacer = telepath::MakeClockReplacer(2);
-  return telepath::BufferManager(2, 4096, std::move(disk_backend), std::move(replacer), telemetry);
+  return telepath::BufferManager::Create(2, 4096, std::move(disk_backend), std::move(replacer), telemetry).value();
 }
 
-struct FlushConsistencyHandles {
-  telepath::BufferHandle writer;
-  telepath::BufferHandle flusher;
-};
-
-auto AcquireFlushConsistencyHandles(telepath::BufferManager *manager) -> FlushConsistencyHandles {
-  auto writer_result = manager->ReadBuffer(21, 0);
-  auto flush_result = manager->ReadBuffer(21, 0);
-  assert(writer_result.ok());
-  assert(flush_result.ok());
-  return {
-    std::move(writer_result.value()),
-    std::move(flush_result.value()),
-  };
+auto AcquireWriter(telepath::BufferManager *manager) -> telepath::ExclusiveBufferHandle {
+  auto writer_result = manager->ReadBufferExclusive(21, 0);
+  assert(writer_result.has_value());
+  return std::move(writer_result.value());
 }
 
 void ExpectFlushWaitsForWriterRelease(
   telepath::BufferManager *manager,
-  FlushConsistencyHandles handles
+  telepath::ExclusiveBufferHandle writer
 ) {
-  handles.writer.mutable_data()[0] = std::byte{0xA5};
-  assert(manager->MarkBufferDirty(handles.writer).ok());
+  writer.mutable_data()[0] = std::byte{0xA5};
 
   std::atomic<bool> flush_started{false};
   std::atomic<bool> flush_finished{false};
-  telepath::Status flush_status = telepath::Status::Ok();
+  telepath::Status flush_status = telepath::Ok();
   std::thread flush_thread([&]() {
     flush_started.store(true);
-    flush_status = manager->FlushBuffer(handles.flusher);
+    auto flusher = manager->ReadBuffer(21, 0);
+    assert(flusher.has_value());
+    flush_status = manager->FlushBuffer(*flusher);
     flush_finished.store(true);
   });
 
@@ -58,23 +49,23 @@ void ExpectFlushWaitsForWriterRelease(
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   assert(!flush_finished.load());
 
-  handles.writer.Reset();
+  writer.Reset();
   flush_thread.join();
-  assert(flush_status.ok());
+  assert(flush_status.has_value());
   assert(flush_finished.load());
 }
 
 void ExpectPersistedPageContainsFlushedByte(
   const std::filesystem::path &root
 ) {
-  auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), 4096);
+  auto verifier = std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<4096>());
   std::array<std::byte, 4096> page{};
   auto request = verifier->SubmitRead(telepath::BufferTag{21, 0}, page.data(), page.size());
-  assert(request.ok());
+  assert(request.has_value());
 
   auto completion = verifier->PollCompletion();
-  assert(completion.ok());
-  assert(completion.value().status.ok());
+  assert(completion.has_value());
+  assert(completion.value().status.has_value());
   assert(page[0] == std::byte{0xA5});
 }
 
@@ -82,9 +73,9 @@ void ExpectPersistedPageContainsFlushedByte(
 
 int main() {
   telepath::buffer_test_support::TestRootGuard root_guard("telepath_flush_consistency_test_data");
-  auto manager = BuildManager(root_guard.path());
-  auto handles = AcquireFlushConsistencyHandles(&manager);
-  ExpectFlushWaitsForWriterRelease(&manager, std::move(handles));
+  auto manager_owner = BuildManager(root_guard.path());
+  telepath::BufferManager &manager = *manager_owner;
+  ExpectFlushWaitsForWriterRelease(&manager, AcquireWriter(&manager));
   ExpectPersistedPageContainsFlushedByte(root_guard.path());
   return 0;
 }

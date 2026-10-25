@@ -20,7 +20,7 @@ def main() -> int:
     bench_sweep = read_text("scripts/bench/sweep.sh")
     bench_matrix = read_text("scripts/bench/matrix.sh")
 
-    assert_contains(benchmark_workflow, "io_uring_debug")
+    assert_contains(benchmark_workflow, "io_uring_release")
     assert_contains(benchmark_workflow, "for backend in posix io_uring")
     assert_contains(benchmark_workflow, "scan_pollution")
 
