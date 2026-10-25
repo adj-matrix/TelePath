@@ -58,18 +58,10 @@ bool CanReserveFrame(const BufferDescriptor &descriptor) {
   return true;
 }
 
-bool ShouldRequeueReservationCandidate(const BufferDescriptor &descriptor) {
-  if (descriptor.pin_count != 0) return false;
-  if (descriptor.io_in_flight) return true;
-  if (descriptor.flush_queued) return true;
-  if (descriptor.flush_in_flight) return true;
-  return false;
-}
-
 auto BuildFrameReservation(FrameId frame_id, const BufferDescriptor &descriptor) -> FrameReservation {
   if (!descriptor.is_valid) return FrameReservation{frame_id};
 
-  return FrameReservation{frame_id, true, descriptor.tag, descriptor.is_dirty, descriptor.dirty_generation};
+  return FrameReservation{frame_id, true, descriptor.tag};
 }
 
 void EnterLoadingState(BufferDescriptor *descriptor, const BufferTag &tag) {
@@ -112,16 +104,6 @@ void EnterFreeState(BufferDescriptor *descriptor, FrameId frame_id, const Status
   descriptor->last_io_status = status;
   descriptor->last_flush_status = Status::Ok();
   descriptor->state = BufferFrameState::kFree;
-}
-
-void RestoreEvictedFrameDescriptor(BufferDescriptor *descriptor, const BufferTag &old_tag, bool was_dirty, uint64_t dirty_generation) {
-  EnterResidentState(descriptor);
-  descriptor->tag = old_tag;
-  descriptor->pin_count = 0;
-  descriptor->is_dirty = was_dirty;
-  descriptor->dirty_generation = dirty_generation;
-  descriptor->last_io_status = Status::IoError("eviction flush failed");
-  descriptor->io_cv.notify_all();
 }
 
 }  // namespace buffer_descriptor_state

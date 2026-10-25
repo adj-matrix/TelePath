@@ -308,6 +308,15 @@ target_link_libraries(telepath_wait_evict_interleave_test PRIVATE telepath)
 
 add_test(NAME telepath_wait_evict_interleave_test COMMAND telepath_wait_evict_interleave_test)
 
+add_executable(telepath_eviction_race_test
+  cpp/buffer/eviction_race_test.cc
+)
+
+target_link_libraries(telepath_eviction_race_test PRIVATE telepath)
+
+add_test(NAME telepath_eviction_race_test COMMAND telepath_eviction_race_test)
+set_tests_properties(telepath_eviction_race_test PROPERTIES TIMEOUT 60)
+
 add_executable(telepath_completion_order_test
   cpp/benchmark/completion_order_test.cc
 )

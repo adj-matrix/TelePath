@@ -190,6 +190,7 @@ Recommended entry points:
 - [State Summary](./docs/state.md)
 - [CI Guide](./docs/ci.md)
 - [Test Guide](./docs/test.md)
+- [Concurrency Invariants](./docs/concurrency.md)
 - [Repository Tree Guide](./docs/tree.md)
 - [Architecture Mermaid](./docs/mermaid/architecture.mmd)
 

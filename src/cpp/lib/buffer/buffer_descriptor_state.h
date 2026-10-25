@@ -25,7 +25,6 @@ bool CanClearDirtyAfterFlush(
     const BufferManagerFlushTask &task,
     const Status &flush_status);
 bool CanReserveFrame(const BufferDescriptor &descriptor);
-bool ShouldRequeueReservationCandidate(const BufferDescriptor &descriptor);
 auto BuildFrameReservation(FrameId frame_id, const BufferDescriptor &descriptor)
   -> FrameReservation;
 void EnterLoadingState(BufferDescriptor *descriptor, const BufferTag &tag);
@@ -34,10 +33,6 @@ void EnterFreeState(
     BufferDescriptor *descriptor,
     FrameId frame_id,
     const Status &status);
-void RestoreEvictedFrameDescriptor(
-    BufferDescriptor *descriptor,
-    const BufferTag &old_tag, bool was_dirty,
-    uint64_t dirty_generation);
 
 }  // namespace buffer_descriptor_state
 

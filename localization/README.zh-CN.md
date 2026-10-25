@@ -190,6 +190,7 @@ TelePath 现在包含一个浏览器端 Console，用于运行负载并查看引
 - [State Summary](../docs/state.md)
 - [CI Guide](../docs/ci.md)
 - [Test Guide](../docs/test.md)
+- [Concurrency Invariants](../docs/concurrency.md)
 - [Repository Tree Guide](../docs/tree.md)
 - [Architecture Mermaid](../docs/mermaid/architecture.mmd)
 

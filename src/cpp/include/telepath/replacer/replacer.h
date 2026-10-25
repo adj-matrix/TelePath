@@ -20,8 +20,11 @@ class Replacer {
   // Marks whether the given frame may currently be selected as an eviction
   // victim. Pinned frames are typically non-evictable.
   virtual void SetEvictable(FrameId frame_id, bool evictable) = 0;
-  // Selects one evictable frame as the next victim. Returns false when no
-  // evictable frame is available.
+  // Selects one evictable frame as the next victim and stops tracking it.
+  // Returns false when no evictable frame is available. A caller that does not
+  // reuse the victim must hand it back with RecordAccess() (and
+  // SetEvictable(true) once unpinned); SetEvictable() alone is not enough for
+  // policies that drop untracked frames.
   virtual bool Victim(FrameId *frame_id) = 0;
   // Removes a frame from the replacer state if it is currently tracked.
   virtual void Remove(FrameId frame_id) = 0;

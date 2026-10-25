@@ -105,17 +105,21 @@ auto BufferManager::ReserveFrameForTag(const BufferTag &tag) -> Result<FrameRese
   while (true) {
     Result<FrameId> frame_result = AcquireReservationFrame();
     if (!frame_result.ok()) return frame_result.status();
+    const FrameId frame_id = frame_result.value();
 
-    auto reservation = TryReserveFrameForTag(frame_result.value(), tag);
-    if (reservation.has_value()) return std::move(reservation.value());
+    FrameReservation reservation;
+    FrameReservationOutcome outcome = TryReserveFrameForTag(frame_id, tag, true, &reservation);
+    if (outcome == FrameReservationOutcome::kNeedsFlush) {
+      Status flush_status = FlushVictimBeforeReuse(frame_id);
+      if (!flush_status.ok()) return flush_status;
+      outcome = TryReserveFrameForTag(frame_id, tag, false, &reservation);
+    }
+    if (outcome == FrameReservationOutcome::kReserved) return reservation;
   }
 }
 
 auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReservation &reservation) -> Result<FrameId>{
   const FrameId frame_id = reservation.frame_id;
-
-  Status flush_status = FlushReservedVictim(reservation);
-  if (!flush_status.ok()) return RestoreEvictionFailure(reservation, flush_status);
 
   Status read_status = ReadReservedPage(frame_id, tag);
   if (!read_status.ok()) return AbortLoadReservation(frame_id, tag, read_status);

@@ -33,12 +33,18 @@ class BufferManagerTestPeer;
 struct BufferManagerMissState;
 struct BufferManagerFlushTask;
 
+// A reserved frame never carries a dirty victim: dirty victims are written back
+// while still mapped under their old tag, before the frame can be reserved.
 struct FrameReservation {
   FrameId frame_id{kInvalidFrameId};
   bool had_evicted_page{false};
   BufferTag evicted_tag{};
-  bool evicted_dirty{false};
-  uint64_t evicted_dirty_generation{0};
+};
+
+enum class FrameReservationOutcome {
+  kReserved = 0,
+  kNeedsFlush,
+  kRejected,
 };
 
 struct FrameSnapshot {
@@ -136,7 +142,6 @@ class BufferManager {
   void MaybeEnqueueCleanerCandidate(FrameId frame_id);
   bool ShouldSeedCleanerCandidate(FrameId frame_id) const;
   void SeedCleanerCandidates();
-  void RestoreDirtyEviction(FrameId frame_id);
 
   // buffer_manager_flush.cc
   auto FlushFrameWithStableSource(
@@ -159,9 +164,10 @@ class BufferManager {
     bool *was_busy,
     bool cleaner_owned,
     BufferTag *tag,
-    uint64_t *dirty_generation
+    uint64_t *dirty_generation,
+    std::vector<std::byte> *snapshot
   ) -> Result<bool>;
-  auto CaptureFlushSnapshot(FrameId frame_id, const std::byte *stable_data) -> std::vector<std::byte>;
+  auto CopyFlushSource(FrameId frame_id, const std::byte *stable_data) -> std::vector<std::byte>;
   auto EnqueueFlushTask(const std::shared_ptr<BufferManagerFlushTask> &task) -> Status;
   auto RollBackFlushTask(
     FrameId frame_id,
@@ -185,23 +191,24 @@ class BufferManager {
     const Status &flush_status);
 
   // buffer_manager_eviction.cc
-  auto RestoreEvictionFailure(
-    const FrameReservation &reservation,
-    const Status &status
-  ) -> Status;
   auto AbortLoadReservation(
     FrameId frame_id,
     const BufferTag &tag,
     const Status &status
   ) -> Status;
   void ReleaseFreeFrame(FrameId frame_id);
-  auto FlushEvictedPage(const FrameReservation &reservation) -> Status;
   auto AcquireReservationFrame() -> Result<FrameId>;
   void InstallReservationEntry(
     const BufferTag &tag,
     const FrameReservation &reservation);
-  auto TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag) -> std::optional<FrameReservation>;
-  auto FlushReservedVictim(const FrameReservation &reservation) -> Status;
+  auto TryReserveFrameForTag(
+    FrameId frame_id,
+    const BufferTag &tag,
+    bool allow_victim_flush,
+    FrameReservation *reservation
+  ) -> FrameReservationOutcome;
+  void ReturnUnreservedVictim(FrameId frame_id, const BufferDescriptor &descriptor);
+  auto FlushVictimBeforeReuse(FrameId frame_id) -> Status;
 
   // buffer_manager_handle.cc
   auto ValidateOwnedHandle(const BufferHandle &handle) const -> Status;

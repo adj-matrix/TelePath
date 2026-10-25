@@ -54,8 +54,9 @@ auto BufferManager::TryScheduleFlushTask(FrameId frame_id, const std::byte *stab
 
   BufferTag tag;
   uint64_t dirty_generation = 0;
+  std::vector<std::byte> snapshot;
 
-  Result<bool> prepare_result = PrepareFlushTask(frame_id, stable_data, was_busy, cleaner_owned, &tag, &dirty_generation);
+  Result<bool> prepare_result = PrepareFlushTask(frame_id, stable_data, was_busy, cleaner_owned, &tag, &dirty_generation, &snapshot);
   if (!prepare_result.ok()) return prepare_result.status();
   if (!prepare_result.value()) return std::shared_ptr<BufferManagerFlushTask>{};
 
@@ -65,7 +66,7 @@ auto BufferManager::TryScheduleFlushTask(FrameId frame_id, const std::byte *stab
   task->generation = dirty_generation;
   task->clear_dirty_on_success = true;
   task->cleaner_owned = cleaner_owned;
-  task->snapshot = CaptureFlushSnapshot(frame_id, stable_data);
+  task->snapshot = std::move(snapshot);
   Status enqueue_status = EnqueueFlushTask(task);
   if (!enqueue_status.ok()) return RollBackFlushTask(frame_id, cleaner_owned, enqueue_status);
   observer_->RecordFlushTaskScheduled(task->tag);
@@ -73,8 +74,18 @@ auto BufferManager::TryScheduleFlushTask(FrameId frame_id, const std::byte *stab
   return task;
 }
 
-auto BufferManager::PrepareFlushTask(FrameId frame_id, const std::byte *stable_data, bool *was_busy, bool cleaner_owned, BufferTag *tag, uint64_t *dirty_generation) -> Result<bool> {
+auto BufferManager::PrepareFlushTask(FrameId frame_id, const std::byte *stable_data, bool *was_busy, bool cleaner_owned, BufferTag *tag, uint64_t *dirty_generation, std::vector<std::byte> *snapshot) -> Result<bool> {
   BufferDescriptor &descriptor = descriptors_[frame_id];
+  std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch, std::defer_lock);
+  if (stable_data == nullptr) {
+    if (was_busy == nullptr) {
+      content_guard.lock();
+    } else if (!content_guard.try_lock()) {
+      *was_busy = true;
+      return false;
+    }
+  }
+
   std::unique_lock<std::mutex> descriptor_guard(descriptor.latch);
   Result<bool> wait_result = WaitForPendingFlush(&descriptor, &descriptor_guard, stable_data, was_busy);
   if (!wait_result.ok()) return wait_result.status();
@@ -86,19 +97,14 @@ auto BufferManager::PrepareFlushTask(FrameId frame_id, const std::byte *stable_d
   }
 
   buffer_descriptor_state::ReserveFlushSlot(&descriptor, tag, dirty_generation);
+  *snapshot = CopyFlushSource(frame_id, stable_data);
   return true;
 }
 
-auto BufferManager::CaptureFlushSnapshot(FrameId frame_id, const std::byte *stable_data) -> std::vector<std::byte> {
+auto BufferManager::CopyFlushSource(FrameId frame_id, const std::byte *stable_data) -> std::vector<std::byte> {
   std::vector<std::byte> snapshot(page_size_);
-  if (stable_data != nullptr) {
-    std::memcpy(snapshot.data(), stable_data, page_size_);
-    return snapshot;
-  }
-
-  const BufferDescriptor &descriptor = descriptors_[frame_id];
-  std::shared_lock<std::shared_mutex> content_guard(descriptor.content_latch);
-  std::memcpy(snapshot.data(), frame_pool_->GetFrameData(frame_id), page_size_);
+  const std::byte *source = stable_data != nullptr ? stable_data : frame_pool_->GetFrameData(frame_id);
+  std::memcpy(snapshot.data(), source, page_size_);
   return snapshot;
 }
 

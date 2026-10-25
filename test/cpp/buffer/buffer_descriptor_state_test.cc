@@ -51,15 +51,11 @@ void AssertBuildFrameReservationReflectsEvictedPageMetadata() {
   telepath::BufferDescriptor descriptor;
   descriptor.is_valid = true;
   descriptor.tag = {6, 13};
-  descriptor.is_dirty = true;
-  descriptor.dirty_generation = 5;
 
   auto reservation = telepath::buffer_descriptor_state::BuildFrameReservation(12, descriptor);
   assert(reservation.frame_id == 12);
   assert(reservation.had_evicted_page);
   assert(reservation.evicted_tag == descriptor.tag);
-  assert(reservation.evicted_dirty);
-  assert(reservation.evicted_dirty_generation == 5);
 
   descriptor.is_valid = false;
   reservation = telepath::buffer_descriptor_state::BuildFrameReservation(12, descriptor);
@@ -67,10 +63,9 @@ void AssertBuildFrameReservationReflectsEvictedPageMetadata() {
   assert(!reservation.had_evicted_page);
 }
 
-void AssertStateTransitionsResetAndRestoreDescriptorFields() {
+void AssertStateTransitionsResetDescriptorFields() {
   telepath::BufferDescriptor descriptor;
   const telepath::BufferTag loading_tag{8, 21};
-  const telepath::BufferTag restored_tag{9, 31};
   telepath::buffer_descriptor_state::EnterLoadingState(&descriptor, {8, 21});
   assert(descriptor.state == telepath::BufferFrameState::kLoading);
   assert(descriptor.tag == loading_tag);
@@ -89,15 +84,6 @@ void AssertStateTransitionsResetAndRestoreDescriptorFields() {
   assert(descriptor.pin_count == 0);
   assert(!descriptor.is_valid);
   assert(descriptor.last_io_status.code() == telepath::StatusCode::kIoError);
-
-  telepath::buffer_descriptor_state::RestoreEvictedFrameDescriptor(&descriptor, restored_tag, true, 14);
-  assert(descriptor.state == telepath::BufferFrameState::kResident);
-  assert(descriptor.tag == restored_tag);
-  assert(descriptor.pin_count == 0);
-  assert(descriptor.is_valid);
-  assert(descriptor.is_dirty);
-  assert(descriptor.dirty_generation == 14);
-  assert(descriptor.last_io_status.code() == telepath::StatusCode::kIoError);
 }
 
 }  // namespace
@@ -106,6 +92,6 @@ int main() {
   AssertReserveFlushSlotCapturesMetadataAndMarksQueued();
   AssertCanClearDirtyAfterFlushRequiresMatchingResidentState();
   AssertBuildFrameReservationReflectsEvictedPageMetadata();
-  AssertStateTransitionsResetAndRestoreDescriptorFields();
+  AssertStateTransitionsResetDescriptorFields();
   return 0;
 }
