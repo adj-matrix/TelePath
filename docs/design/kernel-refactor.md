@@ -116,7 +116,7 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 
 ## 6. Phases
 
-**Progress:** phases 0 and 1a–1e are implemented; see section 7.
+**Progress:** phases 0, 1a–1e, and 2 are implemented; see section 7.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
@@ -158,3 +158,37 @@ Hit-path throughput after phase 1 (16384-frame pool, every access a hit, release
 | 16 | 0.11 → 0.11 | 0.73 → 0.77 |
 
 Multi-thread scaling is still bounded by the replacer's global lock (two calls per hit) and the shared telemetry counter line, which phases 2 and 4 address.
+
+### Phase 2
+
+- **Replacer contract** (`telepath/replacer/replacer.h`): `SetEvictable()` and `Size()` are removed; evictability comes from the frame control word through an `EvictionProbe` passed to `Victim()`. `Victim()` nominates without untracking; `RecordLoad()` resets a reused frame's policy state. See `docs/concurrency.md`, section 6.
+- **Policies** (all pluggable, factories in `replacer.h`):
+
+| Policy | Hit path | Victim path |
+| --- | --- | --- |
+| Clock | lock-free reference bit | lock-free hand |
+| Clock-sweep (PostgreSQL) | lock-free saturating usage count (max 5) | lock-free hand, decrement per pass |
+| SIEVE | lock-free visited bit | queue mutex, hand from oldest toward newest |
+| LRU, LRU-K, 2Q | per-thread batch of 64 accesses, applied under the policy latch | policy latch, all batches applied first |
+
+  Clock and clock-sweep are separate algorithms (one reference bit versus a usage count), so both are kept. Hit paths read before writing, so already-referenced or saturated frames cause no cache-line traffic.
+- **Access strategies** (`telepath/buffer/buffer_access_strategy.h`): `BufferAccessStrategy` with `kNormal` and `kBulkRead`, modeled after PostgreSQL. Bulk-read hits skip `RecordAccess()`; misses recycle a ring of frames (default 32). Optional parameter on `ReadBuffer()`/`ReadBufferExclusive()`; benchmark flag `--bulk-read-scans`.
+- **Telemetry**: `TelemetryCounters` is split into 64 cache-line-aligned `TelemetryCounterShard`s; each thread increments its own shard and snapshots sum them.
+- **Reserved, not implemented**: admission control and per-tenant victim selection. The tenant id stays reserved in `BufferDescriptor`; the extension point is the probe/nomination split in `Victim()`.
+
+Hit-path throughput after phase 2 (same setup as the phase 1 table, Mops/s):
+
+| Policy | 1 thread | 4 threads | 16 threads | 16T / 1T | p99 at 16T |
+| --- | --- | --- | --- | --- | --- |
+| Clock-sweep | 3.51 | 9.61 | 33.63 | 9.6x | 0.7 µs |
+| SIEVE | 2.81 | 9.69 | 18.67 | 6.6x | 0.7 µs |
+| Clock | 3.68 | 8.76 | 16.78 | 4.6x | 0.7 µs |
+| 2Q | 3.51 | 8.46 | 13.38 | 3.8x | 16 µs |
+| LRU | 3.48 | 7.53 | 9.94 | 2.9x | 19 µs |
+| LRU-K | 0.91 | 0.82 | 0.56 | 0.6x | 1.6 ms |
+
+The benchmark itself had a global mutex on every operation in JSON mode (`BenchmarkSnapshotSampler::TryCapture` locked before checking whether sampling was finished), which capped every earlier multi-thread number, including the phase 0 baseline and the phase 1 table. It was fixed in phase 2. Rerunning the phase 0 code with the fixed sampler gives Clock 2.26 / 1.45 / 1.10 Mops/s and LRU-K 0.75 / 0.13 / 0.10 Mops/s at 1 / 4 / 16 threads, so against that fair baseline phase 2 is 15x (Clock) to 30x (clock-sweep) faster at 16 threads.
+
+LRU-K still scales negatively: batching cuts lock acquisitions, but every batched access performs ordered-set updates and history-deque work under the single policy latch, so the policy saturates at roughly 0.9 M accesses/s regardless of thread count.
+
+Scan pollution (`scan_pollution`, 4 threads, pool 2048, dataset 16384, hot set 1024): `--bulk-read-scans true` raises the hit rate from 17.1% to 22.8% for LRU and clock-sweep (disk reads -7%); SIEVE and LRU-K, which already resist scans, go from 18.3% to 22.8%.

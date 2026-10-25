@@ -89,6 +89,7 @@
     "queue_depth": "Queue Depth",
     "max_open_files": "Max Open Files",
     "sync_on_write": "Sync On Write",
+    "bulk_read_scans": "Bulk-Read Scans",
     "thread_candidates": "Thread Candidates",
     "thread_candidates_placeholder": "1,2,4,8"
   },
@@ -243,6 +244,8 @@
   "replacers": {
     "lru_k": "LRU-K",
     "clock": "Clock",
+    "clock_sweep": "Clock-sweep",
+    "sieve": "SIEVE",
     "lru": "LRU",
     "two_queue": "2Q"
   }

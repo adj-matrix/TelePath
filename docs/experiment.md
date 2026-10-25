@@ -79,6 +79,12 @@ selected backend, but it does not call `fsync()` / `fdatasync()` after every
 page write. Treat those runs as performance and behavior experiments, not crash
 durability evidence.
 
+## Replacement Policies and Scan Strategy
+
+Six policies are available through `--replacer` (Web console and `REPLACER`/`REPLACERS` script variables accept the same names): `clock_sweep` (default, PostgreSQL-style), `clock`, `sieve`, `lru`, `lru_k`, and `two_queue`. `clock_sweep`, `clock`, and `sieve` have lock-free hit paths; `lru`, `lru_k`, and `two_queue` batch accesses per thread, and `lru_k` remains serialized on its policy latch.
+
+`--bulk-read-scans true` (`BULK_READ_SCANS=true`, or the Web console checkbox) makes the scan phase of `scan_pollution` read through a bulk-read `BufferAccessStrategy`: scanned pages recycle a small ring of frames and do not raise replacement priority. Compare runs with and without it to measure scan pollution.
+
 ## Local Collection
 
 Single focused run:
@@ -113,7 +119,7 @@ Multi-dimensional matrix:
 ```bash
 THREADS="1 2 4" \
 WORKLOADS="hotspot uniform sequential_shared sequential_disjoint" \
-REPLACERS="lru_k clock lru two_queue" \
+REPLACERS="clock_sweep clock sieve lru lru_k two_queue" \
 DISK_BACKENDS="posix" \
 WRITE_PERCENTS="0 25" \
 ./scripts/bench/matrix.sh > /tmp/telepath_matrix.csv

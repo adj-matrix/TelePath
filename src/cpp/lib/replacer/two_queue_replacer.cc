@@ -1,110 +1,74 @@
 #include "telepath/replacer/two_queue_replacer.h"
 
-#include <memory>
+#include <mutex>
+
+#include "access_batcher.h"
+#include "frame_list.h"
 
 namespace telepath {
 
-TwoQueueReplacer::TwoQueueReplacer(std::size_t capacity) : capacity_(capacity) {}
+struct TwoQueueReplacer::State {
+  explicit State(std::size_t capacity) : capacity(capacity), history(capacity), cache(capacity) {}
+
+  void Touch(FrameId frame_id) {
+    if (frame_id >= capacity) return;
+    if (history.Contains(frame_id)) {
+      history.Unlink(frame_id);
+      cache.PushFront(frame_id);
+      return;
+    }
+    if (cache.Contains(frame_id)) cache.MoveToFront(frame_id);
+  }
+
+  void Untrack(FrameId frame_id) {
+    if (history.Contains(frame_id)) history.Unlink(frame_id);
+    if (cache.Contains(frame_id)) cache.Unlink(frame_id);
+  }
+
+  static bool PickFrom(const FrameList &segment, const EvictionProbe &probe, FrameId *frame_id) {
+    for (FrameId candidate = segment.back(); candidate != FrameList::kNone; candidate = segment.TowardFront(candidate)) {
+      if (!probe.IsEvictable(candidate)) continue;
+      *frame_id = candidate;
+      return true;
+    }
+    return false;
+  }
+
+  const std::size_t capacity;
+  std::mutex latch;
+  AccessBatcher batcher;
+  FrameList history;
+  FrameList cache;
+};
+
+TwoQueueReplacer::TwoQueueReplacer(std::size_t capacity) : state_(std::make_unique<State>(capacity)) {}
+
+TwoQueueReplacer::~TwoQueueReplacer() = default;
 
 void TwoQueueReplacer::RecordAccess(FrameId frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  if (!IsValidFrame(frame_id)) return;
-
-  auto [it, inserted] = entries_.try_emplace(frame_id);
-  if (inserted && entries_.size() > capacity_) {
-    entries_.erase(it);
-    return;
-  }
-  if (inserted) return;
-  if (IsInCache(it->second)) {
-    if (!it->second.evictable) return;
-    cache_.erase(it->second.position);
-    cache_.push_front(frame_id);
-    it->second.position = cache_.begin();
-    return;
-  }
-  PromoteToCache(frame_id, &it->second);
+  state_->batcher.Record(frame_id, state_->latch, [this](FrameId frame) { state_->Touch(frame); });
 }
 
-void TwoQueueReplacer::SetEvictable(FrameId frame_id, bool evictable) {
-  std::lock_guard<std::mutex> guard(latch_);
-  auto it = entries_.find(frame_id);
-  if (it == entries_.end()) return;
-  if (it->second.evictable == evictable) return;
-
-  it->second.evictable = evictable;
-  if (evictable) {
-    InsertIntoSegment(frame_id, &it->second);
-    ++evictable_size_;
-    return;
-  }
-  RemoveFromSegment(&it->second);
-  if (evictable_size_ > 0) --evictable_size_;
+void TwoQueueReplacer::RecordLoad(FrameId frame_id) {
+  if (frame_id >= state_->capacity) return;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
+  state_->Untrack(frame_id);
+  state_->history.PushFront(frame_id);
 }
 
-bool TwoQueueReplacer::Victim(FrameId *frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  if (frame_id == nullptr || evictable_size_ == 0) return false;
-  if (EvictFromSegment(&history_, frame_id)) return true;
-  return EvictFromSegment(&cache_, frame_id);
+bool TwoQueueReplacer::Victim(const EvictionProbe &probe, FrameId *frame_id) {
+  if (frame_id == nullptr) return false;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainAll([this](FrameId frame) { state_->Touch(frame); });
+  return State::PickFrom(state_->history, probe, frame_id) || State::PickFrom(state_->cache, probe, frame_id);
 }
 
 void TwoQueueReplacer::Remove(FrameId frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  auto it = entries_.find(frame_id);
-  if (it == entries_.end()) return;
-  if (it->second.evictable) {
-    RemoveFromSegment(&it->second);
-    if (evictable_size_ > 0) --evictable_size_;
-  }
-  entries_.erase(it);
-}
-
-auto TwoQueueReplacer::Size() const -> std::size_t {
-  std::lock_guard<std::mutex> guard(latch_);
-  return evictable_size_;
-}
-
-bool TwoQueueReplacer::IsValidFrame(FrameId frame_id) const {
-  return frame_id < capacity_;
-}
-
-bool TwoQueueReplacer::IsInCache(const Entry &entry) const {
-  return entry.segment == Segment::kCache;
-}
-
-void TwoQueueReplacer::InsertIntoSegment(FrameId frame_id, Entry *entry) {
-  if (entry == nullptr) return;
-  auto *segment = IsInCache(*entry) ? &cache_ : &history_;
-  segment->push_front(frame_id);
-  entry->position = segment->begin();
-}
-
-void TwoQueueReplacer::RemoveFromSegment(Entry *entry) {
-  if (entry == nullptr) return;
-  auto *segment = IsInCache(*entry) ? &cache_ : &history_;
-  segment->erase(entry->position);
-}
-
-void TwoQueueReplacer::PromoteToCache(FrameId frame_id, Entry *entry) {
-  if (entry == nullptr) return;
-  if (entry->evictable) {
-    history_.erase(entry->position);
-    cache_.push_front(frame_id);
-    entry->position = cache_.begin();
-  }
-  entry->segment = Segment::kCache;
-}
-
-bool TwoQueueReplacer::EvictFromSegment(std::list<FrameId> *segment, FrameId *frame_id) {
-  if (segment == nullptr || segment->empty()) return false;
-
-  const FrameId victim = segment->back();
-  segment->pop_back();
-  entries_.erase(victim);
-  --evictable_size_;
-  *frame_id = victim;
-  return true;
+  if (frame_id >= state_->capacity) return;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
+  state_->Untrack(frame_id);
 }
 
 auto MakeTwoQueueReplacer(std::size_t capacity) -> std::unique_ptr<Replacer> {

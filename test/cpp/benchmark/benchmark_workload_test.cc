@@ -1,4 +1,6 @@
 #include <cassert>
+#include <string>
+#include <utility>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -119,6 +121,16 @@ void ExpectDirtyAliasNormalizesToHotspotWithWrites() {
   assert(options.snapshot_sample_limit == 6);
 }
 
+void ExpectReplacerNamesAndAliasesAreAccepted() {
+  for (const auto &[input, expected] : {std::pair{"clock_sweep", "clock_sweep"}, std::pair{"gclock", "clock_sweep"},
+                                        std::pair{"clocksweep", "clock_sweep"}, std::pair{"sieve", "sieve"},
+                                        std::pair{"clock", "clock"}, std::pair{"lru", "lru"}}) {
+    const char *argv[] = {"telepath_benchmark", "--replacer", input};
+    auto options = telepath::benchmark_support::ParseArgs(3, const_cast<char **>(argv));
+    assert(options.replacer == expected);
+  }
+}
+
 void ExpectInvalidExperimentKnobsFallBackToDefaults() {
   const char *argv[] = {
     "telepath_benchmark",
@@ -134,7 +146,7 @@ void ExpectInvalidExperimentKnobsFallBackToDefaults() {
   auto options = telepath::benchmark_support::ParseArgs(
     static_cast<int>(sizeof(argv) / sizeof(argv[0])),
     const_cast<char **>(argv));
-  assert(options.replacer == "lru_k");
+  assert(options.replacer == "clock_sweep");
   assert(options.disk_backend == "auto");
   assert(options.write_percent == 100);
   assert(options.hot_access_percent == 80);
@@ -178,6 +190,7 @@ int main() {
   ExpectHotspotUsesHotsetWhenConfiguredForOneHundredPercent();
   ExpectScanPollutionWarmsHotsetThenScansColdRange();
   ExpectDirtyAliasNormalizesToHotspotWithWrites();
+  ExpectReplacerNamesAndAliasesAreAccepted();
   ExpectInvalidExperimentKnobsFallBackToDefaults();
   ExpectWriteOperationHonorsZeroAndHundredPercent();
   ExpectLatencySummaryUsesNearestRankPercentiles();

@@ -1,47 +1,40 @@
 #ifndef TELEPATH_REPLACER_CLOCK_REPLACER_H_
 #define TELEPATH_REPLACER_CLOCK_REPLACER_H_
 
-#include <mutex>
-#include <vector>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 
 #include "telepath/replacer/replacer.h"
 
 namespace telepath {
 
-// Array-backed Clock/Second-Chance replacer.
+// Clock (second-chance) replacer with one reference bit per frame. Accesses
+// and the sweeping hand are lock-free.
 class ClockReplacer : public Replacer {
  public:
-  // Creates a replacer that can track up to `capacity` frame ids.
+  // Creates a replacer for frame ids in [0, capacity).
   explicit ClockReplacer(std::size_t capacity);
 
-  // Sets the reference bit for the accessed frame, inserting tracking state on
-  // first use when the frame id is valid.
+  // Sets the frame's reference bit.
   void RecordAccess(FrameId frame_id) override;
-  // Toggles whether the frame may currently be chosen as a victim.
-  void SetEvictable(FrameId frame_id, bool evictable) override;
-  // Advances the clock hand until it finds and removes one evictable victim.
-  bool Victim(FrameId *frame_id) override;
-  // Stops tracking the given frame if it is present.
+  // Tracks the frame with its reference bit set.
+  void RecordLoad(FrameId frame_id) override;
+  // Sweeps the hand, clearing set reference bits, until it reaches a tracked
+  // evictable frame whose bit is clear.
+  bool Victim(const EvictionProbe &probe, FrameId *frame_id) override;
+  // Stops tracking the frame.
   void Remove(FrameId frame_id) override;
-  // Returns the current number of evictable tracked frames.
-  auto Size() const -> std::size_t override;
 
  private:
-  struct Entry {
-    bool referenced{false};
-    bool evictable{false};
-    bool present{false};
-  };
-
-  bool IsValidFrame(FrameId frame_id) const;
-  bool TryVictimAtHand(FrameId *frame_id);
-  void AdvanceHand();
+  static constexpr std::uint8_t kUntracked = 0;
+  static constexpr std::uint8_t kClear = 1;
+  static constexpr std::uint8_t kReferenced = 2;
 
   const std::size_t capacity_;
-  mutable std::mutex latch_;
-  std::vector<Entry> entries_;
-  std::size_t hand_{0};
-  std::size_t size_{0};
+  std::unique_ptr<std::atomic<std::uint8_t>[]> state_;
+  std::atomic<std::size_t> hand_{0};
 };
 
 }  // namespace telepath

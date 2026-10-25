@@ -2,59 +2,36 @@
 #define TELEPATH_REPLACER_LRU_K_REPLACER_H_
 
 #include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <mutex>
-#include <set>
-#include <unordered_map>
+#include <memory>
 
 #include "telepath/replacer/replacer.h"
 
 namespace telepath {
 
-// LRU-K replacer that chooses victims using bounded access history per frame.
+// LRU-K replacer. Frames with fewer than K recorded accesses are evicted
+// first, least recently accessed first; among the rest, the frame whose K-th
+// most recent access is oldest is evicted. Accesses are buffered per thread
+// and applied in batches; Victim() applies all pending accesses before
+// choosing.
 class LruKReplacer : public Replacer {
  public:
-  // Creates a replacer that can track up to `capacity` frame ids and compares
-  // frames using access history of length `history_length`.
+  // Creates a replacer for frame ids in [0, capacity) with history length K
+  // (`history_length`, minimum 1).
   LruKReplacer(std::size_t capacity, std::size_t history_length);
+  ~LruKReplacer() override;
 
-  // Appends a timestamped access for the given frame, inserting it on first
-  // use if capacity permits.
+  // Appends a timestamped access to the frame's history.
   void RecordAccess(FrameId frame_id) override;
-  // Toggles whether the frame may currently be chosen as a victim.
-  void SetEvictable(FrameId frame_id, bool evictable) override;
-  // Removes and returns the best current LRU-K victim among evictable frames.
-  bool Victim(FrameId *frame_id) override;
-  // Stops tracking the given frame if it is present.
+  // Tracks the frame with a fresh history holding one access.
+  void RecordLoad(FrameId frame_id) override;
+  // Nominates the evictable frame with the largest backward K-distance.
+  bool Victim(const EvictionProbe &probe, FrameId *frame_id) override;
+  // Stops tracking the frame.
   void Remove(FrameId frame_id) override;
-  // Returns the current number of evictable tracked frames.
-  auto Size() const -> std::size_t override;
 
  private:
-  using QueueKey = std::pair<uint64_t, FrameId>;
-
-  struct Entry {
-    bool evictable{false};
-    std::deque<uint64_t> access_history;
-  };
-
-  bool IsValidFrame(FrameId frame_id) const;
-  bool HasIncompleteHistory(const Entry &entry) const;
-  auto HistoryQueueKey(const Entry &entry, FrameId frame_id) const -> QueueKey;
-  auto CacheQueueKey(const Entry &entry, FrameId frame_id) const -> QueueKey;
-  void InsertEvictableEntry(FrameId frame_id, const Entry &entry);
-  void EraseEvictableEntry(FrameId frame_id, const Entry &entry);
-  bool TakeVictimFromQueue(std::set<QueueKey> *queue, FrameId *frame_id);
-
-  const std::size_t capacity_;
-  const std::size_t history_length_;
-  mutable std::mutex latch_;
-  std::unordered_map<FrameId, Entry> entries_;
-  std::set<QueueKey> history_queue_;
-  std::set<QueueKey> cache_queue_;
-  uint64_t current_timestamp_{0};
-  std::size_t evictable_size_{0};
+  struct State;
+  std::unique_ptr<State> state_;
 };
 
 }  // namespace telepath

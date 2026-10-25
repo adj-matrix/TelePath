@@ -7,6 +7,7 @@
 #include <memory>
 #include <random>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -29,7 +30,18 @@ struct StressConfig {
   std::size_t threads;
   std::size_t ops_per_thread;
   bool background_cleaner;
+  const char *replacer;
 };
+
+auto MakeReplacer(const StressConfig &config) -> std::unique_ptr<telepath::Replacer> {
+  const std::string name = config.replacer;
+  if (name == "clock") return telepath::MakeClockReplacer(config.pool_size);
+  if (name == "clock_sweep") return telepath::MakeClockSweepReplacer(config.pool_size);
+  if (name == "sieve") return telepath::MakeSieveReplacer(config.pool_size);
+  if (name == "lru") return telepath::MakeLruReplacer(config.pool_size);
+  if (name == "two_queue") return telepath::MakeTwoQueueReplacer(config.pool_size);
+  return telepath::MakeLruKReplacer(config.pool_size, 2);
+}
 
 // Page layout: an 8-byte write counter followed by its low byte repeated, so
 // a reader can detect a torn page.
@@ -60,7 +72,7 @@ auto CreateManager(const std::filesystem::path &root, const StressConfig &config
   auto manager = telepath::BufferManager::Create(
     options,
     std::make_unique<telepath::PosixDiskBackend>(root.string(), telepath::BlockGeometry::Of<kPageSize>(), false, 64, false),
-    telepath::MakeLruKReplacer(config.pool_size, 2),
+    MakeReplacer(config),
     telepath::MakeNoOpTelemetrySink());
   assert(manager.has_value());
   return std::move(manager.value());
@@ -102,7 +114,7 @@ void RunWorker(telepath::BufferManager *manager, const StressConfig &config, std
 }
 
 void RunStress(const StressConfig &config) {
-  telepath::buffer_test_support::TestRootGuard root(std::string("telepath_stress_") + config.name);
+  telepath::buffer_test_support::TestRootGuard root(std::string("telepath_stress_") + config.name + "_" + config.replacer);
   std::vector<std::atomic<std::uint64_t>> expected(config.block_count);
   {
     auto manager = CreateManager(root.path(), config);
@@ -146,8 +158,10 @@ void RunStress(const StressConfig &config) {
 }  // namespace
 
 int main() {
-  RunStress({"eviction_heavy", 8, 64, 8, 4000, false});
-  RunStress({"cleaner", 16, 48, 8, 4000, true});
-  RunStress({"hot_pages", 32, 8, 12, 4000, true});
+  for (const char *replacer : {"lru_k", "clock", "clock_sweep", "sieve", "lru", "two_queue"}) {
+    RunStress({"eviction_heavy", 8, 64, 8, 4000, false, replacer});
+  }
+  RunStress({"cleaner", 16, 48, 8, 4000, true, "clock_sweep"});
+  RunStress({"hot_pages", 32, 8, 12, 4000, true, "sieve"});
   return 0;
 }

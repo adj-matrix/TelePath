@@ -1,5 +1,7 @@
 #include "telepath/buffer/buffer_manager.h"
 
+#include <vector>
+
 #include "buffer_manager_observer.h"
 #include "frame_control.h"
 #include "page_table.h"
@@ -7,8 +9,28 @@
 
 namespace telepath {
 
+namespace {
+
+class FrameEvictionProbe final : public EvictionProbe {
+ public:
+  explicit FrameEvictionProbe(const std::vector<BufferDescriptor> &descriptors) : descriptors_(descriptors) {}
+
+  bool IsEvictable(FrameId frame_id) const override {
+    if (frame_id >= descriptors_.size()) return false;
+    const std::uint32_t word = descriptors_[frame_id].control.load(std::memory_order_acquire);
+    if (!frame_control::IsResident(word) || frame_control::Pins(word) != 0) return false;
+    return (word & (frame_control::kLatchMask | frame_control::kWritebackMask)) == 0;
+  }
+
+ private:
+  const std::vector<BufferDescriptor> &descriptors_;
+};
+
+}  // namespace
+
 auto BufferManager::AbortLoadReservation(FrameId frame_id, const BufferTag &tag, const Status &status) -> Status {
   page_table_->Remove(tag, frame_id);
+  replacer_->Remove(frame_id);
   StoreTag(&descriptors_[frame_id], BufferTag{});
   frame_control::ReleaseToFree(descriptors_[frame_id].control);
   ReleaseFreeFrame(frame_id);
@@ -32,8 +54,17 @@ auto BufferManager::AcquireReservationFrame() -> Result<FrameId> {
   }
 
   FrameId frame_id = kInvalidFrameId;
-  if (replacer_->Victim(&frame_id)) return frame_id;
+  if (replacer_->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return frame_id;
   return ResourceExhausted("no evictable frame available");
+}
+
+bool BufferManager::HasTransientlyBusyFrame() const {
+  for (const BufferDescriptor &descriptor : descriptors_) {
+    const std::uint32_t word = descriptor.control.load(std::memory_order_acquire);
+    if (!frame_control::IsResident(word) || frame_control::Pins(word) != 0) continue;
+    if ((word & (frame_control::kLatchMask | frame_control::kWritebackMask)) != 0) return true;
+  }
+  return false;
 }
 
 void BufferManager::InstallReservationEntry(const BufferTag &tag, const FrameReservation &reservation) {
@@ -48,14 +79,9 @@ auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag
   BufferDescriptor &descriptor = descriptors_[frame_id];
   std::uint32_t observed = 0;
   const frame_control::ReserveOutcome outcome = frame_control::TryReserve(descriptor.control, &observed);
-  if (outcome == frame_control::ReserveOutcome::kRejected) {
-    ReturnUnreservedVictim(frame_id);
-    return FrameReservationOutcome::kRejected;
-  }
+  if (outcome == frame_control::ReserveOutcome::kRejected) return FrameReservationOutcome::kRejected;
   if (outcome == frame_control::ReserveOutcome::kNeedsFlush) {
-    if (allow_victim_flush) return FrameReservationOutcome::kNeedsFlush;
-    ReturnUnreservedVictim(frame_id);
-    return FrameReservationOutcome::kRejected;
+    return allow_victim_flush ? FrameReservationOutcome::kNeedsFlush : FrameReservationOutcome::kRejected;
   }
 
   const bool had_evicted_page = frame_control::IsResident(observed);
@@ -67,17 +93,10 @@ auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag
   return FrameReservationOutcome::kReserved;
 }
 
-void BufferManager::ReturnUnreservedVictim(FrameId frame_id) {
-  replacer_->RecordAccess(frame_id);
-  const std::uint32_t word = descriptors_[frame_id].control.load(std::memory_order_acquire);
-  if (frame_control::Pins(word) == 0) replacer_->SetEvictable(frame_id, true);
-}
-
 auto BufferManager::FlushVictimBeforeReuse(FrameId frame_id) -> Status {
   Status flush_status = FlushFrame(frame_id);
   if (flush_status.has_value()) return Ok();
 
-  ReturnUnreservedVictim(frame_id);
   observer_->RecordEvictionFailure(LoadTag(descriptors_[frame_id]));
   return flush_status;
 }

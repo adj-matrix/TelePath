@@ -12,6 +12,7 @@ Regression coverage:
 - `test/cpp/buffer/eviction_race_test.cc`: eviction/writeback interleavings and the replacer contract.
 - `test/cpp/buffer/stress_integrity_test.cc`: sustained mixed load with torn-page and lost-update detection after a reopen.
 - `test/cpp/buffer/page_table_test.cc`: conditional remap and newest-mapping-first lookups.
+- `test/cpp/replacer/replacer_concurrency_test.cc`: every policy under concurrent access, nomination, and reload.
 
 ## 1. Synchronization Inventory
 
@@ -116,15 +117,20 @@ When a victim writeback fails, the frame keeps its tag, data, and dirty state, r
 
 ## 6. Replacer Contract
 
-`Replacer::Victim()` stops tracking the frame it returns. The LRU, LRU-K, and 2Q policies drop the entry; Clock re-registers on `SetEvictable()`, but callers must not rely on that.
+Evictability lives only in the frame's control word. Replacement policies order frames by coldness and never learn about pins, latches, or writebacks:
 
-A victim that is not reused (pinned, latched, busy with a writeback, or still dirty) must be handed back through `ReturnUnreservedVictim()`: it calls `RecordAccess()` first and only then reads the pin count, calling `SetEvictable(true)` if the frame is unpinned. Reading the pin count before `RecordAccess()` would lose the frame if its last holder unpinned in between, because that holder's `SetEvictable(true)` hit a missing entry.
+- `RecordAccess()` is called on every pin of a resident frame, outside any frame lock. Policies must keep it lock-free (Clock, clock-sweep, SIEVE) or batch it (LRU, LRU-K, 2Q).
+- `RecordLoad()` is called after a frame is reused for a newly loaded page; `Remove()` when a frame returns to the free list.
+- `Victim()` asks the buffer manager's `EvictionProbe` for each candidate (resident, unpinned, unlatched, no writeback) and nominates the first that passes. The frame **stays tracked**. The manager then claims it with `TryReserve`; if the claim fails because the frame changed in between, the manager simply asks for another victim. Nothing has to be handed back, so no frame can drop out of the evictable set.
+- If no candidate passes the probe but some unpinned frame is only transiently busy (latched or under writeback), `ReserveFrameForTag()` yields and retries; it returns `kResourceExhausted` only when every frame is pinned.
 
-Pin and unpin call the replacer outside any frame lock. A late `SetEvictable(false)` can leave a pinned frame marked evictable; eviction still fails the reservation CAS and returns the frame through `ReturnUnreservedVictim()`. Phase 2 of the refactor removes evictability from the replacer.
+Batched policies buffer accesses in per-thread slots (`AccessBatcher`) and apply a full slot under the policy latch. Lock order is policy latch, then slot latch; recording never holds a slot latch while taking the policy latch. `RecordLoad()` and `Remove()` first apply the calling thread's own slot, so a thread's accesses and loads keep their program order; accesses from different threads have no order to preserve. `Victim()` applies every slot before choosing.
+
+Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`, and misses first try to reclaim the strategy's ring frame through the same `TryReserve` CAS (clean frames only), falling back to `Victim()`.
 
 ## 7. Known Limits
 
-- If the only evictable frame is busy with a writeback, `ReserveFrameForTag()` spins on `Victim()` until the writeback completes.
+- If every unpinned frame is busy with a writeback, `ReserveFrameForTag()` yields and retries until one completes instead of sleeping on it.
 - A thread that holds an `ExclusiveBufferHandle` must not call `FlushAll()` or `FlushBuffer(file, block)` for that page: the blocking path would wait for the shared latch the thread blocks itself.
 - A thread must not hold two handles on the same page; `ReadBuffer` followed by `ReadBufferExclusive` on the same page in one thread deadlocks. Debug detection is not implemented yet.
 - There is no in-place upgrade: release the `SharedBufferHandle`, acquire an `ExclusiveBufferHandle`, and re-check.

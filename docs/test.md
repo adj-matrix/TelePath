@@ -60,7 +60,8 @@ The current behavior-oriented coverage map is:
 | Async flush scheduler | `async_flush_scheduler_test` | Covers worker-owned flushes, batching, foreground/background interaction, cleaner ownership, retries, and in-flight `FlushAll()`. |
 | Completion dispatch | `completion_dispatcher_test`, `completion_dispatcher_idle_test`, `completion_order_test` | Covers request-id routing, out-of-order completion, early completion before registration, backend failure, idle shutdown, and reordered read completions. |
 | Disk backends | `disk_backend_test`, `disk_backend_factory_test`, `read_zero_fill_test`, `io_uring_*` | Covers POSIX fallback behavior, factory policy, zero-fill reads, and native/stub `io_uring` paths. |
-| Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test` | Covers shared interface expectations and policy-specific behavior. |
+| Replacement policy | `replacer_test`, `lru_k_behavior_test`, `two_queue_behavior_test`, `clock_family_behavior_test`, `replacer_concurrency_test` | Covers probe-filtered nomination for all six policies (Clock, clock-sweep, SIEVE, LRU, LRU-K, 2Q), policy-specific ordering, and concurrent access/nomination/reload. |
+| Access strategies | `buffer_access_strategy_test` | Covers bulk-read scans keeping the hot set resident within the ring bound, and that plain LRU is polluted without a strategy. |
 | Telemetry/options/benchmark/Web | `telemetry_test`, `options_test`, `benchmark_*`, `web_*` | Covers counter snapshots, JSONL telemetry export, POSIX shared-memory telemetry snapshot export, malformed shared-memory headers/bounds, flush/cleaner/eviction telemetry, option resolution, workload selection, experiment knob parsing, operation-latency summaries, final and sampled runtime snapshots, selectable Web snapshot views, snapshot aggregates, and JSON output shape. |
 
 The remaining intentional gaps are larger-scale rather than unit-test-sized:

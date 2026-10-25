@@ -33,8 +33,10 @@ WORKLOADS = [
 ]
 
 REPLACERS = [
+    "clock_sweep",
     "lru_k",
     "clock",
+    "sieve",
     "lru",
     "two_queue",
 ]
@@ -47,7 +49,7 @@ DISK_BACKENDS = [
 
 DEFAULTS = {
     "workload": "hotspot",
-    "replacer": "lru_k",
+    "replacer": "clock_sweep",
     "disk_backend": "auto",
     "pool_size": 256,
     "block_count": 1024,
@@ -67,11 +69,12 @@ DEFAULTS = {
     "queue_depth": 0,
     "max_open_files": 0,
     "sync_on_write": True,
+    "bulk_read_scans": False,
 }
 
 DEFAULT_SWEEP = {
     "workload": "hotspot",
-    "replacer": "lru_k",
+    "replacer": "clock_sweep",
     "disk_backend": "auto",
     "thread_candidates": [1, 2, 4, 8],
     "pool_size": 256,
@@ -91,6 +94,7 @@ DEFAULT_SWEEP = {
     "queue_depth": 0,
     "max_open_files": 0,
     "sync_on_write": True,
+    "bulk_read_scans": False,
 }
 
 SUPPORTED_LANGUAGES = [
@@ -128,6 +132,7 @@ class BenchmarkRequest:
     queue_depth: int
     max_open_files: int
     sync_on_write: bool
+    bulk_read_scans: bool
 
 
 @dataclass(frozen=True)
@@ -153,6 +158,7 @@ class SweepRequest:
     queue_depth: int
     max_open_files: int
     sync_on_write: bool
+    bulk_read_scans: bool
 
 
 def now_epoch_ms() -> int:
@@ -326,6 +332,9 @@ def parse_common_options(payload: dict[str, Any], defaults: dict[str, Any]) -> d
         "sync_on_write": bool_from_payload(
             payload, "sync_on_write", defaults["sync_on_write"]
         ),
+        "bulk_read_scans": bool_from_payload(
+            payload, "bulk_read_scans", defaults["bulk_read_scans"]
+        ),
     }
 
 
@@ -377,6 +386,7 @@ def parse_benchmark_request(payload: dict[str, Any]) -> BenchmarkRequest:
         queue_depth=options["queue_depth"],
         max_open_files=options["max_open_files"],
         sync_on_write=options["sync_on_write"],
+        bulk_read_scans=options["bulk_read_scans"],
     )
 
 
@@ -429,6 +439,7 @@ def parse_sweep_request(payload: dict[str, Any]) -> SweepRequest:
         queue_depth=options["queue_depth"],
         max_open_files=options["max_open_files"],
         sync_on_write=options["sync_on_write"],
+        bulk_read_scans=options["bulk_read_scans"],
     )
 
 
@@ -574,6 +585,8 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         str(request.queue_depth),
         "--sync-on-write",
         "true" if request.sync_on_write else "false",
+        "--bulk-read-scans",
+        "true" if request.bulk_read_scans else "false",
         "--max-open-files",
         str(request.max_open_files),
     ]
@@ -637,6 +650,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
             queue_depth=request.queue_depth,
             max_open_files=request.max_open_files,
             sync_on_write=request.sync_on_write,
+            bulk_read_scans=request.bulk_read_scans,
         )
         samples.append(run_benchmark_once(sample_request, "csv"))
 

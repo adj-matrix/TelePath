@@ -1,119 +1,104 @@
 #include "telepath/replacer/lru_k_replacer.h"
 
-#include <memory>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include "access_batcher.h"
 
 namespace telepath {
 
-LruKReplacer::LruKReplacer(
-  std::size_t capacity,
-  std::size_t history_length
-) : capacity_(capacity),
-    history_length_(history_length == 0 ? 1 : history_length) {}
+struct LruKReplacer::State {
+  using QueueKey = std::pair<std::uint64_t, FrameId>;
+
+  struct Entry {
+    bool tracked{false};
+    std::deque<std::uint64_t> history;
+  };
+
+  State(std::size_t capacity, std::size_t history_length)
+    : capacity(capacity), history_length(history_length == 0 ? 1 : history_length), entries(capacity) {}
+
+  bool HasIncompleteHistory(const Entry &entry) const { return entry.history.size() < history_length; }
+
+  auto QueueFor(const Entry &entry) -> std::set<QueueKey> & {
+    return HasIncompleteHistory(entry) ? incomplete_queue : complete_queue;
+  }
+
+  auto KeyFor(const Entry &entry, FrameId frame_id) const -> QueueKey {
+    return HasIncompleteHistory(entry) ? QueueKey{entry.history.back(), frame_id} : QueueKey{entry.history.front(), frame_id};
+  }
+
+  void Enqueue(FrameId frame_id) { QueueFor(entries[frame_id]).insert(KeyFor(entries[frame_id], frame_id)); }
+  void Dequeue(FrameId frame_id) { QueueFor(entries[frame_id]).erase(KeyFor(entries[frame_id], frame_id)); }
+
+  void Touch(FrameId frame_id) {
+    if (frame_id >= capacity || !entries[frame_id].tracked) return;
+    Dequeue(frame_id);
+    Entry &entry = entries[frame_id];
+    entry.history.push_back(++clock);
+    while (entry.history.size() > history_length) entry.history.pop_front();
+    Enqueue(frame_id);
+  }
+
+  static bool PickFrom(const std::set<QueueKey> &queue, const EvictionProbe &probe, FrameId *frame_id) {
+    for (const auto &[timestamp, candidate] : queue) {
+      if (!probe.IsEvictable(candidate)) continue;
+      *frame_id = candidate;
+      return true;
+    }
+    return false;
+  }
+
+  const std::size_t capacity;
+  const std::size_t history_length;
+  std::mutex latch;
+  AccessBatcher batcher;
+  std::vector<Entry> entries;
+  std::set<QueueKey> incomplete_queue;
+  std::set<QueueKey> complete_queue;
+  std::uint64_t clock{0};
+};
+
+LruKReplacer::LruKReplacer(std::size_t capacity, std::size_t history_length)
+  : state_(std::make_unique<State>(capacity, history_length)) {}
+
+LruKReplacer::~LruKReplacer() = default;
 
 void LruKReplacer::RecordAccess(FrameId frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  if (!IsValidFrame(frame_id)) return;
-
-  auto [it, inserted] = entries_.try_emplace(frame_id);
-  if (inserted && entries_.size() > capacity_) {
-    entries_.erase(it);
-    return;
-  }
-
-  if (it->second.evictable) EraseEvictableEntry(frame_id, it->second);
-
-  ++current_timestamp_;
-  it->second.access_history.push_back(current_timestamp_);
-  while (it->second.access_history.size() > history_length_) {
-    it->second.access_history.pop_front();
-  }
-
-  if (it->second.evictable) InsertEvictableEntry(frame_id, it->second);
+  state_->batcher.Record(frame_id, state_->latch, [this](FrameId frame) { state_->Touch(frame); });
 }
 
-void LruKReplacer::SetEvictable(FrameId frame_id, bool evictable) {
-  std::lock_guard<std::mutex> guard(latch_);
-  auto it = entries_.find(frame_id);
-  if (it == entries_.end()) return;
-  if (it->second.evictable == evictable) return;
-
-  if (evictable) {
-    it->second.evictable = true;
-    InsertEvictableEntry(frame_id, it->second);
-    ++evictable_size_;
-  } else {
-    EraseEvictableEntry(frame_id, it->second);
-    it->second.evictable = false;
-    if (evictable_size_ > 0) --evictable_size_;
-  }
+void LruKReplacer::RecordLoad(FrameId frame_id) {
+  if (frame_id >= state_->capacity) return;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
+  State::Entry &entry = state_->entries[frame_id];
+  if (entry.tracked) state_->Dequeue(frame_id);
+  entry.tracked = true;
+  entry.history.assign(1, ++state_->clock);
+  state_->Enqueue(frame_id);
 }
 
-bool LruKReplacer::Victim(FrameId *frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  if (frame_id == nullptr || evictable_size_ == 0) return false;
-  if (TakeVictimFromQueue(&history_queue_, frame_id)) return true;
-  return TakeVictimFromQueue(&cache_queue_, frame_id);
+bool LruKReplacer::Victim(const EvictionProbe &probe, FrameId *frame_id) {
+  if (frame_id == nullptr) return false;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainAll([this](FrameId frame) { state_->Touch(frame); });
+  return State::PickFrom(state_->incomplete_queue, probe, frame_id) || State::PickFrom(state_->complete_queue, probe, frame_id);
 }
 
 void LruKReplacer::Remove(FrameId frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  auto it = entries_.find(frame_id);
-  if (it == entries_.end()) return;
-  if (it->second.evictable && evictable_size_ > 0) {
-    EraseEvictableEntry(frame_id, it->second);
-    --evictable_size_;
-  } else if (it->second.evictable) {
-    EraseEvictableEntry(frame_id, it->second);
-  }
-  entries_.erase(it);
-}
-
-auto LruKReplacer::Size() const -> std::size_t {
-  std::lock_guard<std::mutex> guard(latch_);
-  return evictable_size_;
-}
-
-bool LruKReplacer::IsValidFrame(FrameId frame_id) const {
-  return frame_id < capacity_;
-}
-
-bool LruKReplacer::HasIncompleteHistory(const Entry &entry) const {
-  return entry.access_history.size() < history_length_;
-}
-
-auto LruKReplacer::HistoryQueueKey(const Entry &entry, FrameId frame_id) const -> QueueKey {
-  return {entry.access_history.back(), frame_id};
-}
-
-auto LruKReplacer::CacheQueueKey(const Entry &entry, FrameId frame_id) const -> QueueKey {
-  return {entry.access_history.front(), frame_id};
-}
-
-void LruKReplacer::InsertEvictableEntry(FrameId frame_id, const Entry &entry) {
-  if (HasIncompleteHistory(entry)) {
-    history_queue_.emplace(HistoryQueueKey(entry, frame_id));
-    return;
-  }
-  cache_queue_.emplace(CacheQueueKey(entry, frame_id));
-}
-
-void LruKReplacer::EraseEvictableEntry(FrameId frame_id, const Entry &entry) {
-  if (HasIncompleteHistory(entry)) {
-    history_queue_.erase(HistoryQueueKey(entry, frame_id));
-    return;
-  }
-  cache_queue_.erase(CacheQueueKey(entry, frame_id));
-}
-
-bool LruKReplacer::TakeVictimFromQueue(std::set<QueueKey> *queue, FrameId *frame_id) {
-  if (queue == nullptr || queue->empty()) return false;
-
-  const FrameId victim = queue->begin()->second;
-  queue->erase(queue->begin());
-  entries_.erase(victim);
-  --evictable_size_;
-  *frame_id = victim;
-  return true;
+  if (frame_id >= state_->capacity) return;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
+  State::Entry &entry = state_->entries[frame_id];
+  if (!entry.tracked) return;
+  state_->Dequeue(frame_id);
+  entry.tracked = false;
+  entry.history.clear();
 }
 
 auto MakeLruKReplacer(std::size_t capacity, std::size_t history_length) -> std::unique_ptr<Replacer> {

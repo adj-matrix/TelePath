@@ -74,16 +74,16 @@ BufferManager::~BufferManager() {
   disk_backend_.reset();
 }
 
-auto BufferManager::ReadBuffer(FileId file_id, BlockId block_id) -> Result<SharedBufferHandle> {
+auto BufferManager::ReadBuffer(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy) -> Result<SharedBufferHandle> {
   const BufferTag tag{file_id, block_id};
-  Result<FrameId> frame = PinPage(tag);
+  Result<FrameId> frame = PinPage(tag, strategy);
   if (!frame.has_value()) return PropagateError(frame);
   return MakeSharedHandle(frame.value(), tag);
 }
 
-auto BufferManager::ReadBufferExclusive(FileId file_id, BlockId block_id) -> Result<ExclusiveBufferHandle> {
+auto BufferManager::ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy) -> Result<ExclusiveBufferHandle> {
   const BufferTag tag{file_id, block_id};
-  Result<FrameId> frame = PinPage(tag);
+  Result<FrameId> frame = PinPage(tag, strategy);
   if (!frame.has_value()) return PropagateError(frame);
   return MakeExclusiveHandle(frame.value(), tag);
 }
@@ -112,7 +112,7 @@ auto BufferManager::FlushBuffer(FileId file_id, BlockId block_id) -> Status {
   if (Status usable = CheckUsable(); !usable.has_value()) return usable;
   const BufferTag tag{file_id, block_id};
   std::optional<FrameId> frame_id = page_table_->LookupFrameId(tag);
-  if (!frame_id.has_value() || !TryPinResidentFrame(frame_id.value(), tag)) return Ok();
+  if (!frame_id.has_value() || !TryPinResidentFrame(frame_id.value(), tag, false)) return Ok();
   Status flush_status = FlushFrame(frame_id.value());
   ReleaseFrame(frame_id.value());
   return flush_status;

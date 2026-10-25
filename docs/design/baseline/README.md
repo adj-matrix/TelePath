@@ -4,6 +4,8 @@ Reference numbers for the kernel refactor, measured on the code as it stood afte
 
 The raw CSV files named below are kept locally and are not tracked (`.gitignore`); rerun the listed commands to regenerate them.
 
+**Caveat:** these numbers were taken with a benchmark whose JSON-mode snapshot sampler took a global mutex on every operation, which depressed all multi-thread results. With the sampler fixed (phase 2), the same code measures Clock 2.26 / 1.45 / 1.10 Mops/s and LRU-K 0.75 / 0.13 / 0.10 Mops/s at 1 / 4 / 16 threads; the conclusion (throughput falls as threads are added) is unchanged. See `docs/design/kernel-refactor.md`, section 7.
+
 ## Environment
 
 | Item | Value |

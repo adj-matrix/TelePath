@@ -81,16 +81,19 @@ def main() -> int:
             "thread_candidates": [1, 2],
             "flush_all_after_run": True,
             "sync_on_write": False,
+            "bulk_read_scans": True,
         }
     )
     captured_flush_flags = []
     captured_sync_flags = []
+    captured_bulk_flags = []
     original_run_benchmark_once = server.run_benchmark_once
 
     def fake_run_benchmark_once(request, output_format="csv"):
         assert output_format == "csv"
         captured_flush_flags.append(request.flush_all_after_run)
         captured_sync_flags.append(request.sync_on_write)
+        captured_bulk_flags.append(request.bulk_read_scans)
         return {
             "threads": request.threads,
             "throughput_ops_per_sec": float(request.threads),
@@ -105,9 +108,13 @@ def main() -> int:
 
     assert captured_flush_flags == [True, True]
     assert captured_sync_flags == [False, False]
+    assert captured_bulk_flags == [True, True]
     assert sweep_result["request"]["flush_all_after_run"] is True
     assert sweep_result["request"]["sync_on_write"] is False
     assert len(sweep_result["samples"]) == 2
+    default_request = server.parse_sweep_request({})
+    assert default_request.bulk_read_scans is False
+    assert default_request.replacer == "clock_sweep"
     return 0
 
 

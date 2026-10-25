@@ -1,76 +1,58 @@
 #include "telepath/replacer/lru_replacer.h"
 
-#include <memory>
+#include <mutex>
+
+#include "access_batcher.h"
+#include "frame_list.h"
 
 namespace telepath {
 
-LruReplacer::LruReplacer(std::size_t capacity) : capacity_(capacity) {}
+struct LruReplacer::State {
+  explicit State(std::size_t capacity) : capacity(capacity), recency(capacity) {}
 
-void LruReplacer::RecordAccess(FrameId frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  if (!IsValidFrame(frame_id)) return;
-
-  auto it = entries_.find(frame_id);
-  if (it != entries_.end()) {
-    lru_list_.erase(it->second.position);
-    lru_list_.push_front(frame_id);
-    it->second.position = lru_list_.begin();
-    return;
+  void Touch(FrameId frame_id) {
+    if (frame_id < capacity && recency.Contains(frame_id)) recency.MoveToFront(frame_id);
   }
 
-  if (entries_.size() >= capacity_) return;
+  const std::size_t capacity;
+  std::mutex latch;
+  AccessBatcher batcher;
+  FrameList recency;
+};
 
-  lru_list_.push_front(frame_id);
-  entries_.emplace(frame_id, Entry{false, lru_list_.begin()});
+LruReplacer::LruReplacer(std::size_t capacity) : state_(std::make_unique<State>(capacity)) {}
+
+LruReplacer::~LruReplacer() = default;
+
+void LruReplacer::RecordAccess(FrameId frame_id) {
+  state_->batcher.Record(frame_id, state_->latch, [this](FrameId frame) { state_->Touch(frame); });
 }
 
-void LruReplacer::SetEvictable(FrameId frame_id, bool evictable) {
-  std::lock_guard<std::mutex> guard(latch_);
-  auto it = entries_.find(frame_id);
-  if (it == entries_.end()) return;
-  if (it->second.evictable == evictable) return;
-  it->second.evictable = evictable;
-  if (evictable) ++evictable_size_;
-  else if (evictable_size_ > 0) --evictable_size_;
+void LruReplacer::RecordLoad(FrameId frame_id) {
+  if (frame_id >= state_->capacity) return;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
+  if (state_->recency.Contains(frame_id)) state_->recency.MoveToFront(frame_id);
+  else state_->recency.PushFront(frame_id);
 }
 
-bool LruReplacer::Victim(FrameId *frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  if (frame_id == nullptr || evictable_size_ == 0) return false;
-
-  for (auto it = lru_list_.rbegin(); it != lru_list_.rend(); ++it) {
-    if (TryEvictFrame(*it, frame_id)) return true;
+bool LruReplacer::Victim(const EvictionProbe &probe, FrameId *frame_id) {
+  if (frame_id == nullptr) return false;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainAll([this](FrameId frame) { state_->Touch(frame); });
+  for (FrameId candidate = state_->recency.back(); candidate != FrameList::kNone; candidate = state_->recency.TowardFront(candidate)) {
+    if (!probe.IsEvictable(candidate)) continue;
+    *frame_id = candidate;
+    return true;
   }
   return false;
 }
 
 void LruReplacer::Remove(FrameId frame_id) {
-  std::lock_guard<std::mutex> guard(latch_);
-  auto it = entries_.find(frame_id);
-  if (it == entries_.end()) return;
-  if (it->second.evictable && evictable_size_ > 0) --evictable_size_;
-  lru_list_.erase(it->second.position);
-  entries_.erase(it);
-}
-
-auto LruReplacer::Size() const -> std::size_t {
-  std::lock_guard<std::mutex> guard(latch_);
-  return evictable_size_;
-}
-
-bool LruReplacer::IsValidFrame(FrameId frame_id) const {
-  return frame_id < capacity_;
-}
-
-bool LruReplacer::TryEvictFrame(FrameId candidate, FrameId *frame_id) {
-  auto entry_it = entries_.find(candidate);
-  if (entry_it == entries_.end() || !entry_it->second.evictable) return false;
-
-  *frame_id = candidate;
-  lru_list_.erase(entry_it->second.position);
-  entries_.erase(entry_it);
-  --evictable_size_;
-  return true;
+  if (frame_id >= state_->capacity) return;
+  std::lock_guard<std::mutex> guard(state_->latch);
+  state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
+  if (state_->recency.Contains(frame_id)) state_->recency.Unlink(frame_id);
 }
 
 auto MakeLruReplacer(std::size_t capacity) -> std::unique_ptr<Replacer> {

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "benchmark_support.h"
+#include "telepath/buffer/buffer_access_strategy.h"
 #include "telepath/buffer/buffer_manager.h"
 #include "telepath/io/disk_backend_factory.h"
 #include "telepath/options/buffer_manager_options.h"
@@ -31,6 +32,7 @@ using telepath::benchmark_support::LatencySummary;
 using telepath::benchmark_support::LoadMetadata;
 using telepath::benchmark_support::NormalizeWorkloadName;
 using telepath::benchmark_support::ParseArgs;
+using telepath::benchmark_support::IsScanOperation;
 using telepath::benchmark_support::ShouldWriteOperation;
 using telepath::benchmark_support::SummarizeLatencySamples;
 
@@ -78,33 +80,33 @@ bool HasRuntimeIoState(const telepath::BufferPoolSnapshot &snapshot) {
 
 class BenchmarkSnapshotSampler {
  public:
-  explicit BenchmarkSnapshotSampler(std::size_t max_samples) : max_samples_(max_samples) {}
+  explicit BenchmarkSnapshotSampler(std::size_t max_samples) : max_samples_(max_samples), full_(max_samples == 0) {}
 
   void TryCapture(
-    const std::string &reason,
+    std::string_view reason,
     std::size_t thread_index,
     std::size_t operation_index,
     const telepath::BufferManager &manager
   ) {
-    std::lock_guard<std::mutex> handle(latch_);
-    if (max_samples_ == 0 || samples_.size() >= max_samples_) return;
-    if (reason == "after_read" && captured_after_read_) return;
-    if (reason == "after_mark_dirty" && captured_after_mark_dirty_) return;
+    std::atomic<bool> *captured = reason == "after_read" ? &captured_after_read_ : &captured_after_mark_dirty_;
+    if (full_.load(std::memory_order_relaxed) || captured->load(std::memory_order_relaxed)) return;
 
-    if (reason == "after_read") captured_after_read_ = true;
-    if (reason == "after_mark_dirty") captured_after_mark_dirty_ = true;
+    std::lock_guard<std::mutex> handle(latch_);
+    if (samples_.size() >= max_samples_ || captured->load(std::memory_order_relaxed)) return;
+    captured->store(true, std::memory_order_relaxed);
     samples_.push_back(BenchmarkSnapshotSample{
       samples_.size(),
       thread_index,
       operation_index,
-      reason,
+      std::string(reason),
       manager.ExportSnapshot(),
     });
+    if (samples_.size() >= max_samples_) full_.store(true, std::memory_order_relaxed);
   }
 
   void TryCaptureRuntimeIo(const telepath::BufferManager &manager) {
     std::lock_guard<std::mutex> handle(latch_);
-    if (max_samples_ == 0 || samples_.size() >= max_samples_ || captured_runtime_io_) return;
+    if (samples_.size() >= max_samples_ || captured_runtime_io_) return;
 
     telepath::BufferPoolSnapshot snapshot = manager.ExportSnapshot();
     if (!HasRuntimeIoState(snapshot)) return;
@@ -116,6 +118,7 @@ class BenchmarkSnapshotSampler {
       "runtime_io",
       std::move(snapshot),
     });
+    if (samples_.size() >= max_samples_) full_.store(true, std::memory_order_relaxed);
   }
 
   auto samples() const -> std::vector<BenchmarkSnapshotSample> {
@@ -126,8 +129,9 @@ class BenchmarkSnapshotSampler {
  private:
   std::size_t max_samples_{0};
   mutable std::mutex latch_;
-  bool captured_after_read_{false};
-  bool captured_after_mark_dirty_{false};
+  std::atomic<bool> full_;
+  std::atomic<bool> captured_after_read_{false};
+  std::atomic<bool> captured_after_mark_dirty_{false};
   bool captured_runtime_io_{false};
   std::vector<BenchmarkSnapshotSample> samples_;
 };
@@ -237,6 +241,8 @@ auto BuildDiskBackendOptions(const BenchmarkOptions &options) -> telepath::DiskB
 
 auto BuildReplacer(const BenchmarkOptions &options) -> std::unique_ptr<telepath::Replacer> {
   if (options.replacer == "clock") return telepath::MakeClockReplacer(options.pool_size);
+  if (options.replacer == "clock_sweep") return telepath::MakeClockSweepReplacer(options.pool_size);
+  if (options.replacer == "sieve") return telepath::MakeSieveReplacer(options.pool_size);
   if (options.replacer == "lru") return telepath::MakeLruReplacer(options.pool_size);
   if (options.replacer == "two_queue") return telepath::MakeTwoQueueReplacer(options.pool_size);
   return telepath::MakeLruKReplacer(options.pool_size, 2);
@@ -290,9 +296,10 @@ auto RunReadOperation(
   telepath::BlockId block_id,
   std::size_t op,
   std::size_t thread_index,
+  telepath::BufferAccessStrategy *strategy,
   BenchmarkSnapshotSampler *snapshot_sampler
 ) -> bool {
-  auto handle = manager->ReadBuffer(1, block_id);
+  auto handle = manager->ReadBuffer(1, block_id, strategy);
   if (!handle.has_value()) return false;
   if (snapshot_sampler != nullptr) snapshot_sampler->TryCapture("after_read", thread_index, op, *manager);
   volatile std::byte sink = handle->data()[0];
@@ -329,6 +336,7 @@ void RunWorker(
 ) {
   std::mt19937_64 rng(0xBADC0FFEEULL + thread_index);
   latency_samples_ns->reserve(options.ops_per_thread);
+  telepath::BufferAccessStrategy bulk_read(telepath::BufferAccessStrategyType::kBulkRead);
   for (std::size_t op = 0; op < options.ops_per_thread; ++op) {
     const auto operation_start = std::chrono::steady_clock::now();
     const telepath::BlockId block_id = ChooseBlock(&rng, op, thread_index, options);
@@ -337,7 +345,7 @@ void RunWorker(
     const bool write = ShouldWriteOperation(&rng, op, options);
     const bool acquired = write
       ? RunWriteOperation(manager, block_id, op, thread_index, writes_marked_dirty, snapshot_sampler)
-      : RunReadOperation(manager, block_id, op, thread_index, snapshot_sampler);
+      : RunReadOperation(manager, block_id, op, thread_index, options.bulk_read_scans && IsScanOperation(op, options) ? &bulk_read : nullptr, snapshot_sampler);
     if (acquired && options.flush_every_ops != 0 && (op + 1) % options.flush_every_ops == 0) {
       auto flush_status = manager->FlushBuffer(1, block_id);
       if (flush_status.has_value()) foreground_flushes_requested->fetch_add(1, std::memory_order_relaxed);
@@ -597,6 +605,7 @@ void PrintTextSummary(
   std::cout << "queue_depth=" << options.queue_depth << "\n";
   std::cout << "max_open_files=" << options.max_open_files << "\n";
   std::cout << "sync_on_write=" << (options.sync_on_write ? "true" : "false") << "\n";
+  std::cout << "bulk_read_scans=" << (options.bulk_read_scans ? "true" : "false") << "\n";
   std::cout << "snapshot_sample_limit=" << options.snapshot_sample_limit << "\n";
   if (!options.telemetry_export_path.empty()) std::cout << "telemetry_export_path=" << options.telemetry_export_path << "\n";
   if (!options.telemetry_shm_name.empty()) {
@@ -645,7 +654,7 @@ void PrintCsvSummary(
          "requested_disk_backend,write_percent,flush_every_ops,flush_workers,"
          "flush_submit_batch_size,flush_foreground_burst_limit,flush_all_after_run,background_cleaner,"
          "dirty_page_high_watermark,dirty_page_low_watermark,queue_depth,max_open_files,"
-         "sync_on_write,telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
+         "sync_on_write,bulk_read_scans,telemetry_export_enabled,telemetry_shm_enabled,telemetry_shm_name,telemetry_shm_capacity,total_ops,"
          "seconds,throughput_ops_per_sec,operation_latency_min_ns,"
          "operation_latency_avg_ns,operation_latency_p50_ns,operation_latency_p95_ns,"
          "operation_latency_p99_ns,operation_latency_max_ns,buffer_hits,buffer_misses,hit_rate,"
@@ -670,6 +679,7 @@ void PrintCsvSummary(
             << options.dirty_page_low_watermark << "," << options.queue_depth << ","
             << options.max_open_files << ","
             << (options.sync_on_write ? "true" : "false") << ","
+            << (options.bulk_read_scans ? "true" : "false") << ","
             << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ","
             << (options.telemetry_shm_name.empty() ? "false" : "true") << ","
             << options.telemetry_shm_name << ","
@@ -731,6 +741,7 @@ void PrintJsonMetrics(
   std::cout << "    \"queue_depth\": " << options.queue_depth << ",\n";
   std::cout << "    \"max_open_files\": " << options.max_open_files << ",\n";
   std::cout << "    \"sync_on_write\": " << (options.sync_on_write ? "true" : "false") << ",\n";
+  std::cout << "    \"bulk_read_scans\": " << (options.bulk_read_scans ? "true" : "false") << ",\n";
   std::cout << "    \"snapshot_sample_limit\": " << options.snapshot_sample_limit << ",\n";
   std::cout << "    \"telemetry_export_enabled\": " << (options.telemetry_export_path.empty() && options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";
   std::cout << "    \"telemetry_shm_enabled\": " << (options.telemetry_shm_name.empty() ? "false" : "true") << ",\n";

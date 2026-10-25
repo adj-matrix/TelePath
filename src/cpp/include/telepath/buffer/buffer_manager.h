@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "telepath/buffer/buffer_access_strategy.h"
 #include "telepath/buffer/buffer_descriptor.h"
 #include "telepath/buffer/buffer_handle.h"
 #include "telepath/common/block_geometry.h"
@@ -101,10 +102,11 @@ class BufferManager {
 
   // Pins the requested page with shared access, loading it from the backing
   // store on a miss. Blocks while another thread holds the page exclusively.
-  auto ReadBuffer(FileId file_id, BlockId block_id) -> Result<SharedBufferHandle>;
+  // An optional access strategy changes how the access affects replacement.
+  auto ReadBuffer(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy = nullptr) -> Result<SharedBufferHandle>;
   // Pins the requested page with exclusive access, loading it from the backing
   // store on a miss. Blocks while any other handle on the page exists.
-  auto ReadBufferExclusive(FileId file_id, BlockId block_id) -> Result<ExclusiveBufferHandle>;
+  auto ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy = nullptr) -> Result<ExclusiveBufferHandle>;
   // Explicitly releases a handle before it goes out of scope. Returns
   // kInvalidArgument for an empty handle or one owned by another manager.
   auto ReleaseBuffer(SharedBufferHandle &&handle) -> Status;
@@ -148,18 +150,21 @@ class BufferManager {
     std::shared_ptr<TelemetrySink> telemetry_sink);
 
   // buffer_manager_read.cc
-  auto PinPage(const BufferTag &tag) -> Result<FrameId>;
-  auto TryReadResidentHit(const BufferTag &tag) -> std::optional<FrameId>;
+  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameId>;
+  auto TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId>;
   auto AwaitJoinedMiss(
     const BufferTag &tag,
-    const std::shared_ptr<BufferManagerMissState> &state
+    const std::shared_ptr<BufferManagerMissState> &state,
+    BufferAccessStrategy *strategy
   ) -> Result<FrameId>;
   auto LoadMissOwnerBuffer(
     const BufferTag &tag,
-    const std::shared_ptr<BufferManagerMissState> &state
+    const std::shared_ptr<BufferManagerMissState> &state,
+    BufferAccessStrategy *strategy
   ) -> Result<FrameId>;
-  bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag);
-  auto ReserveFrameForTag(const BufferTag &tag) -> Result<FrameReservation>;
+  bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access);
+  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameReservation>;
+  auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy) -> std::optional<FrameReservation>;
   auto CompleteReservation(
     const BufferTag &tag,
     const FrameReservation &reservation
@@ -233,7 +238,7 @@ class BufferManager {
     bool allow_victim_flush,
     FrameReservation *reservation
   ) -> FrameReservationOutcome;
-  void ReturnUnreservedVictim(FrameId frame_id);
+  bool HasTransientlyBusyFrame() const;
   auto FlushVictimBeforeReuse(FrameId frame_id) -> Status;
 
   // buffer_manager_handle.cc

@@ -12,7 +12,7 @@ BLOCK_COUNT="${BLOCK_COUNT:-1024}"
 OPS_PER_THREAD="${OPS_PER_THREAD:-10000}"
 HOTSET_SIZE="${HOTSET_SIZE:-64}"
 HOT_ACCESS_PERCENT="${HOT_ACCESS_PERCENT:-80}"
-REPLACER="${REPLACER:-lru_k}"
+REPLACER="${REPLACER:-clock_sweep}"
 DISK_BACKEND="${DISK_BACKEND:-posix}"
 WRITE_PERCENT="${WRITE_PERCENT:-0}"
 FLUSH_EVERY_OPS="${FLUSH_EVERY_OPS:-0}"
@@ -26,6 +26,7 @@ FLUSH_ALL_AFTER_RUN="${FLUSH_ALL_AFTER_RUN:-false}"
 QUEUE_DEPTH="${QUEUE_DEPTH:-0}"
 MAX_OPEN_FILES="${MAX_OPEN_FILES:-0}"
 SYNC_ON_WRITE="${SYNC_ON_WRITE:-true}"
+BULK_READ_SCANS="${BULK_READ_SCANS:-false}"
 
 first=1
 for t in ${THREADS}; do
@@ -51,6 +52,7 @@ for t in ${THREADS}; do
     --flush-all-after-run "${FLUSH_ALL_AFTER_RUN}" \
     --queue-depth "${QUEUE_DEPTH}" \
     --sync-on-write "${SYNC_ON_WRITE}" \
+    --bulk-read-scans "${BULK_READ_SCANS}" \
     --max-open-files "${MAX_OPEN_FILES}")"
 
   if [[ ${first} -eq 1 ]]; then

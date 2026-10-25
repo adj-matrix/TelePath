@@ -25,6 +25,22 @@ target_link_libraries(telepath_replacer_test PRIVATE telepath)
 
 add_test(NAME telepath_replacer_test COMMAND telepath_replacer_test)
 
+add_executable(telepath_clock_family_behavior_test
+  cpp/replacer/clock_family_behavior_test.cc
+)
+
+target_link_libraries(telepath_clock_family_behavior_test PRIVATE telepath)
+
+add_test(NAME telepath_clock_family_behavior_test COMMAND telepath_clock_family_behavior_test)
+
+add_executable(telepath_replacer_concurrency_test
+  cpp/replacer/replacer_concurrency_test.cc
+)
+
+target_link_libraries(telepath_replacer_concurrency_test PRIVATE telepath)
+
+add_test(NAME telepath_replacer_concurrency_test COMMAND telepath_replacer_concurrency_test)
+
 add_executable(telepath_handle_test
   cpp/buffer/handle_test.cc
 )
@@ -335,6 +351,14 @@ target_link_libraries(telepath_stress_integrity_test PRIVATE telepath)
 
 add_test(NAME telepath_stress_integrity_test COMMAND telepath_stress_integrity_test)
 set_tests_properties(telepath_stress_integrity_test PROPERTIES TIMEOUT 300)
+
+add_executable(telepath_buffer_access_strategy_test
+  cpp/buffer/buffer_access_strategy_test.cc
+)
+
+target_link_libraries(telepath_buffer_access_strategy_test PRIVATE telepath)
+
+add_test(NAME telepath_buffer_access_strategy_test COMMAND telepath_buffer_access_strategy_test)
 
 add_executable(telepath_eviction_race_test
   cpp/buffer/eviction_race_test.cc

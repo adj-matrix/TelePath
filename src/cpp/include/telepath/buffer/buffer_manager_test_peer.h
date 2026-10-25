@@ -19,7 +19,7 @@ class BufferManagerTestPeer {
     const BufferTag &tag,
     const std::shared_ptr<BufferManagerMissState> &state
   ) -> Result<SharedBufferHandle> {
-    Result<FrameId> frame_id = manager.AwaitJoinedMiss(tag, state);
+    Result<FrameId> frame_id = manager.AwaitJoinedMiss(tag, state, nullptr);
     if (!frame_id.has_value()) return PropagateError(frame_id);
     return manager.MakeSharedHandle(frame_id.value(), tag);
   }

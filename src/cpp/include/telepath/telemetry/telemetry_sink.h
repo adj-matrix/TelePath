@@ -69,9 +69,8 @@ struct TelemetrySharedMemoryHeader {
   uint64_t payload_capacity{0};
 };
 
-// Fast-path counters used by in-process telemetry implementations that want to
-// avoid virtual dispatch on the cache hot path.
-struct TelemetryCounters {
+// One cache-line-aligned set of fast-path counters.
+struct alignas(kCacheLineSize) TelemetryCounterShard {
   std::atomic<uint64_t> buffer_hits{0};
   std::atomic<uint64_t> buffer_misses{0};
   std::atomic<uint64_t> disk_reads{0};
@@ -87,78 +86,87 @@ struct TelemetryCounters {
   std::atomic<uint64_t> eviction_failures{0};
 };
 
+// Fast-path counters used by in-process telemetry implementations that want to
+// avoid virtual dispatch on the cache hot path. Each thread increments its own
+// shard, so recording never contends on a shared cache line; snapshots sum all
+// shards and are therefore not atomic across counters.
+struct TelemetryCounters {
+  static constexpr std::size_t kShardCount = 64;
+  TelemetryCounterShard shards[kShardCount];
+};
+
 class TelemetrySink {
  public:
   virtual ~TelemetrySink() = default;
 
   // Records a cache hit for the given page access.
   void RecordHit(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::buffer_hits)) return;
+    if (RecordFastPath(&TelemetryCounterShard::buffer_hits)) return;
     DoRecordHit(tag);
   }
 
   // Records a cache miss for the given page access.
   void RecordMiss(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::buffer_misses)) return;
+    if (RecordFastPath(&TelemetryCounterShard::buffer_misses)) return;
     DoRecordMiss(tag);
   }
 
   // Records a completed disk read.
   void RecordDiskRead(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::disk_reads)) return;
+    if (RecordFastPath(&TelemetryCounterShard::disk_reads)) return;
     DoRecordDiskRead(tag);
   }
 
   // Records a completed disk write.
   void RecordDiskWrite(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::disk_writes)) return;
+    if (RecordFastPath(&TelemetryCounterShard::disk_writes)) return;
     DoRecordDiskWrite(tag);
   }
 
   // Records an eviction of a resident page.
   void RecordEviction(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::evictions)) return;
+    if (RecordFastPath(&TelemetryCounterShard::evictions)) return;
     DoRecordEviction(tag);
   }
 
   // Records a dirty-page flush event.
   void RecordDirtyFlush(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::dirty_flushes)) return;
+    if (RecordFastPath(&TelemetryCounterShard::dirty_flushes)) return;
     DoRecordDirtyFlush(tag);
   }
 
   void RecordFlushTaskScheduled(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::flush_tasks_scheduled)) return;
+    if (RecordFastPath(&TelemetryCounterShard::flush_tasks_scheduled)) return;
     DoRecordFlushTaskScheduled(tag);
   }
 
   void RecordFlushTaskCompleted(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::flush_tasks_completed)) return;
+    if (RecordFastPath(&TelemetryCounterShard::flush_tasks_completed)) return;
     DoRecordFlushTaskCompleted(tag);
   }
 
   void RecordFlushFailure(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::flush_failures)) return;
+    if (RecordFastPath(&TelemetryCounterShard::flush_failures)) return;
     DoRecordFlushFailure(tag);
   }
 
   void RecordCleanerFlushScheduled(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::cleaner_flushes_scheduled)) return;
+    if (RecordFastPath(&TelemetryCounterShard::cleaner_flushes_scheduled)) return;
     DoRecordCleanerFlushScheduled(tag);
   }
 
   void RecordCleanerFlushFinished(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::cleaner_flushes_finished)) return;
+    if (RecordFastPath(&TelemetryCounterShard::cleaner_flushes_finished)) return;
     DoRecordCleanerFlushFinished(tag);
   }
 
   void RecordCleanerFlushSkipped() {
-    if (RecordFastPath(&TelemetryCounters::cleaner_flushes_skipped)) return;
+    if (RecordFastPath(&TelemetryCounterShard::cleaner_flushes_skipped)) return;
     DoRecordCleanerFlushSkipped();
   }
 
   void RecordEvictionFailure(const BufferTag &tag) {
-    if (RecordFastPath(&TelemetryCounters::eviction_failures)) return;
+    if (RecordFastPath(&TelemetryCounterShard::eviction_failures)) return;
     DoRecordEvictionFailure(tag);
   }
 
@@ -174,21 +182,23 @@ class TelemetrySink {
 
   static auto ReadCountersSnapshot(const TelemetryCounters &counters)
       -> TelemetrySnapshot {
-    return TelemetrySnapshot{
-      counters.buffer_hits.load(std::memory_order_relaxed),
-      counters.buffer_misses.load(std::memory_order_relaxed),
-      counters.disk_reads.load(std::memory_order_relaxed),
-      counters.disk_writes.load(std::memory_order_relaxed),
-      counters.evictions.load(std::memory_order_relaxed),
-      counters.dirty_flushes.load(std::memory_order_relaxed),
-      counters.flush_tasks_scheduled.load(std::memory_order_relaxed),
-      counters.flush_tasks_completed.load(std::memory_order_relaxed),
-      counters.flush_failures.load(std::memory_order_relaxed),
-      counters.cleaner_flushes_scheduled.load(std::memory_order_relaxed),
-      counters.cleaner_flushes_finished.load(std::memory_order_relaxed),
-      counters.cleaner_flushes_skipped.load(std::memory_order_relaxed),
-      counters.eviction_failures.load(std::memory_order_relaxed),
-    };
+    TelemetrySnapshot snapshot;
+    for (const TelemetryCounterShard &shard : counters.shards) {
+      snapshot.buffer_hits += shard.buffer_hits.load(std::memory_order_relaxed);
+      snapshot.buffer_misses += shard.buffer_misses.load(std::memory_order_relaxed);
+      snapshot.disk_reads += shard.disk_reads.load(std::memory_order_relaxed);
+      snapshot.disk_writes += shard.disk_writes.load(std::memory_order_relaxed);
+      snapshot.evictions += shard.evictions.load(std::memory_order_relaxed);
+      snapshot.dirty_flushes += shard.dirty_flushes.load(std::memory_order_relaxed);
+      snapshot.flush_tasks_scheduled += shard.flush_tasks_scheduled.load(std::memory_order_relaxed);
+      snapshot.flush_tasks_completed += shard.flush_tasks_completed.load(std::memory_order_relaxed);
+      snapshot.flush_failures += shard.flush_failures.load(std::memory_order_relaxed);
+      snapshot.cleaner_flushes_scheduled += shard.cleaner_flushes_scheduled.load(std::memory_order_relaxed);
+      snapshot.cleaner_flushes_finished += shard.cleaner_flushes_finished.load(std::memory_order_relaxed);
+      snapshot.cleaner_flushes_skipped += shard.cleaner_flushes_skipped.load(std::memory_order_relaxed);
+      snapshot.eviction_failures += shard.eviction_failures.load(std::memory_order_relaxed);
+    }
+    return snapshot;
   }
 
   virtual void DoRecordHit(const BufferTag &tag) = 0;
@@ -207,10 +217,16 @@ class TelemetrySink {
   virtual TelemetrySnapshot DoSnapshot() const = 0;
 
  private:
-  bool RecordFastPath(std::atomic<uint64_t> TelemetryCounters::*counter) {
+  bool RecordFastPath(std::atomic<uint64_t> TelemetryCounterShard::*counter) {
     if (fast_path_counters_ == nullptr) return false;
-    (fast_path_counters_->*counter).fetch_add(1, std::memory_order_relaxed);
+    (fast_path_counters_->shards[CurrentShard()].*counter).fetch_add(1, std::memory_order_relaxed);
     return true;
+  }
+
+  static auto CurrentShard() -> std::size_t {
+    static std::atomic<std::size_t> next_shard{0};
+    thread_local const std::size_t shard = next_shard.fetch_add(1, std::memory_order_relaxed) % TelemetryCounters::kShardCount;
+    return shard;
   }
 
   TelemetryCounters *fast_path_counters_{nullptr};

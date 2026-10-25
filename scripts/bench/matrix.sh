@@ -12,7 +12,7 @@ BENCH="${BUILD_DIR}/test/telepath_benchmark"
 
 THREADS="${THREADS:-1 2 4 8}"
 WORKLOADS="${WORKLOADS:-hotspot uniform sequential_shared sequential_disjoint scan_pollution}"
-REPLACERS="${REPLACERS:-lru_k clock lru two_queue}"
+REPLACERS="${REPLACERS:-lru_k clock clock_sweep sieve lru two_queue}"
 DISK_BACKENDS="${DISK_BACKENDS:-posix}"
 WRITE_PERCENTS="${WRITE_PERCENTS:-0 25}"
 POOL_SIZE="${POOL_SIZE:-256}"
@@ -31,6 +31,7 @@ FLUSH_ALL_AFTER_RUN="${FLUSH_ALL_AFTER_RUN:-false}"
 QUEUE_DEPTH="${QUEUE_DEPTH:-0}"
 MAX_OPEN_FILES="${MAX_OPEN_FILES:-0}"
 SYNC_ON_WRITE="${SYNC_ON_WRITE:-true}"
+BULK_READ_SCANS="${BULK_READ_SCANS:-false}"
 
 telepath_configure_and_build "${BENCHMARK_PRESET}" >&2
 
@@ -62,6 +63,7 @@ for workload in ${WORKLOADS}; do
             --flush-all-after-run "${FLUSH_ALL_AFTER_RUN}" \
             --queue-depth "${QUEUE_DEPTH}" \
             --sync-on-write "${SYNC_ON_WRITE}" \
+            --bulk-read-scans "${BULK_READ_SCANS}" \
             --max-open-files "${MAX_OPEN_FILES}")"
 
           if [[ ${first} -eq 1 ]]; then

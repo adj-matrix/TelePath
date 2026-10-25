@@ -2,7 +2,6 @@
 
 #include "frame_control.h"
 #include "frame_memory_pool.h"
-#include "telepath/replacer/replacer.h"
 
 namespace telepath {
 
@@ -37,8 +36,6 @@ void BufferManager::MarkHandleDirty(FrameId frame_id) noexcept {
 void BufferManager::ReleaseFrame(FrameId frame_id) noexcept {
   const std::optional<std::uint32_t> previous = frame_control::Unpin(descriptors_[frame_id].control);
   if (!previous.has_value() || frame_control::Pins(*previous) != 1) return;
-
-  replacer_->SetEvictable(frame_id, true);
   if (!frame_control::IsDirty(*previous)) return;
   MaybeEnqueueCleanerCandidate(frame_id);
   NotifyCleaner();

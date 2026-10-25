@@ -26,7 +26,7 @@ inline auto NormalizeWorkloadName(const std::string &workload) -> std::string {
 struct BenchmarkOptions {
   std::string workload{"hotspot"};
   std::string output_format{"text"};
-  std::string replacer{"lru_k"};
+  std::string replacer{"clock_sweep"};
   std::string disk_backend{"auto"};
   std::string telemetry_export_path{};
   std::string telemetry_shm_name{};
@@ -49,6 +49,7 @@ struct BenchmarkOptions {
   std::size_t queue_depth{0};
   std::size_t max_open_files{0};
   bool sync_on_write{true};
+  bool bulk_read_scans{false};
   std::size_t telemetry_shm_capacity{telepath::kDefaultTelemetrySharedMemoryPayloadCapacity};
   std::size_t snapshot_sample_limit{4};
 };
@@ -169,13 +170,16 @@ inline void NormalizeBenchmarkOptions(BenchmarkOptions *options) {
   options->workload = NormalizeWorkloadName(options->workload);
   if (options->replacer == "lruk") options->replacer = "lru_k";
   if (options->replacer == "2q") options->replacer = "two_queue";
+  if (options->replacer == "clocksweep" || options->replacer == "gclock") options->replacer = "clock_sweep";
   if (
     options->replacer != "clock" &&
+    options->replacer != "clock_sweep" &&
+    options->replacer != "sieve" &&
     options->replacer != "lru" &&
     options->replacer != "lru_k" &&
     options->replacer != "two_queue"
   ) {
-    options->replacer = "lru_k";
+    options->replacer = "clock_sweep";
   }
   if (options->disk_backend == "uring") options->disk_backend = "io_uring";
   if (
@@ -217,6 +221,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseNonNegativeArg(arg, "--dirty-page-low-watermark", argc, argv, &i, &options.dirty_page_low_watermark)) continue;
     if (TryParseNonNegativeArg(arg, "--queue-depth", argc, argv, &i, &options.queue_depth)) continue;
     if (TryParseBoolArg(arg, "--sync-on-write", argc, argv, &i, &options.sync_on_write)) continue;
+    if (TryParseBoolArg(arg, "--bulk-read-scans", argc, argv, &i, &options.bulk_read_scans)) continue;
     if (TryParsePositiveArg(arg, "--telemetry-shm-capacity", argc, argv, &i, &options.telemetry_shm_capacity)) continue;
     if (TryParseNonNegativeArg(arg, "--snapshot-sample-limit", argc, argv, &i, &options.snapshot_sample_limit)) continue;
     if (!TryParseNonNegativeArg(arg, "--max-open-files", argc, argv, &i, &options.max_open_files)) continue;
@@ -286,6 +291,17 @@ inline bool ShouldWriteOperation(
 
   std::uniform_int_distribution<std::size_t> percent_dist(0, 99);
   return percent_dist(*rng) < options.write_percent;
+}
+
+inline bool IsScanOperation(std::size_t op_index, const BenchmarkOptions &options) {
+  if (NormalizeWorkloadName(options.workload) != "scan_pollution") return false;
+  const std::size_t hotset_size = std::max<std::size_t>(1, std::min(options.hotset_size, options.block_count));
+  const std::size_t cold_count = options.block_count > hotset_size ? options.block_count - hotset_size : 0;
+  if (cold_count == 0) return false;
+  const std::size_t warm_hot_ops = hotset_size * 2;
+  const std::size_t scan_ops = std::max(cold_count, options.pool_size);
+  const std::size_t phase = op_index % (warm_hot_ops + scan_ops + hotset_size);
+  return phase >= warm_hot_ops && phase < warm_hot_ops + scan_ops;
 }
 
 inline auto ChooseBlock(
