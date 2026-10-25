@@ -24,6 +24,8 @@
     elements.sweepReplacerSelect.innerHTML = "";
     elements.diskBackendSelect.innerHTML = "";
     elements.sweepDiskBackendSelect.innerHTML = "";
+    elements.foregroundWritebackSelect.innerHTML = "";
+    elements.sweepForegroundWritebackSelect.innerHTML = "";
     for (const workload of config.workloads) {
       const firstOption = document.createElement("option");
       firstOption.value = workload;
@@ -57,6 +59,17 @@
       secondOption.textContent = app.backendLabel(backend);
       elements.sweepDiskBackendSelect.appendChild(secondOption);
     }
+    for (const mode of config.foreground_writebacks) {
+      const firstOption = document.createElement("option");
+      firstOption.value = mode;
+      firstOption.textContent = app.foregroundWritebackLabel(mode);
+      elements.foregroundWritebackSelect.appendChild(firstOption);
+
+      const secondOption = document.createElement("option");
+      secondOption.value = mode;
+      secondOption.textContent = app.foregroundWritebackLabel(mode);
+      elements.sweepForegroundWritebackSelect.appendChild(secondOption);
+    }
 
     elements.workloadSelect.value = config.defaults.workload;
     elements.sweepWorkloadSelect.value = config.defaults.workload;
@@ -64,6 +77,8 @@
     elements.sweepReplacerSelect.value = config.sweep_defaults.replacer;
     elements.diskBackendSelect.value = config.defaults.disk_backend;
     elements.sweepDiskBackendSelect.value = config.sweep_defaults.disk_backend;
+    elements.foregroundWritebackSelect.value = config.defaults.foreground_writeback;
+    elements.sweepForegroundWritebackSelect.value = config.sweep_defaults.foreground_writeback;
     for (const field of singleFields) {
       document.getElementById(field).value = config.defaults[field];
     }
@@ -96,6 +111,7 @@
     elements.workloadSelect.value = request.workload;
     elements.replacerSelect.value = request.replacer;
     elements.diskBackendSelect.value = request.disk_backend;
+    elements.foregroundWritebackSelect.value = request.foreground_writeback || "direct";
     for (const field of singleFields) {
       document.getElementById(field).value = request[field];
     }
@@ -113,6 +129,7 @@
     elements.sweepWorkloadSelect.value = request.workload;
     elements.sweepReplacerSelect.value = request.replacer;
     elements.sweepDiskBackendSelect.value = request.disk_backend;
+    elements.sweepForegroundWritebackSelect.value = request.foreground_writeback || "direct";
     document.getElementById("thread_candidates").value =
       request.thread_candidates.join(",");
     for (const field of sweepFields) {

@@ -138,6 +138,19 @@ void AssertPersistedPagesMatch(
   AssertReadPagesMatch(verify_a, verify_b);
 }
 
+void AssertSyncRequestCompletes(telepath::DiskBackend &backend) {
+  telepath::DiskRequest sync;
+  sync.token = 501;
+  sync.operation = telepath::DiskOperation::kSync;
+  sync.tag = {19, 0};
+  sync.block_count = 0;
+  assert(telepath::test_support::SubmitOne(backend, sync).has_value());
+  auto completion = telepath::test_support::ReapOne(backend);
+  assert(completion.has_value());
+  assert(completion.value().token == 501);
+  assert(completion.value().status.has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -156,6 +169,7 @@ int main() {
   AssertConcurrentReads(&backend, tag_a, &read_a, tag_b, &read_b);
   AssertReadPagesMatch(read_a, read_b);
   AssertMultiBlockRead(&backend, tag_a);
+  AssertSyncRequestCompletes(backend);
   AssertPersistedPagesMatch(root_guard.path(), tag_a, tag_b);
   backend.Shutdown();
   return 0;

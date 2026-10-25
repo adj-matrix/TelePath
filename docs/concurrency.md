@@ -24,10 +24,9 @@ Regression coverage:
 | `BufferDescriptor::version` (64-bit atomic) | per frame | write/reuse counter (reserved for optimistic reads) |
 | `BufferDescriptor::tag_file_id` / `tag_block_id` (atomics) | per frame | current tag; written only while the frame is `Loading` and owned by its loader |
 | page table stripe spinlock + sequence counter | per stripe | `BufferTag -> FrameId` chains; writers lock, lookups validate the sequence without locking |
-| miss coordinator stripe latches, `BufferManagerMissState::latch` | per stripe / per miss | same-page miss ownership and outcome |
 | replacer `latch_` | global | replacement-policy state |
 | cleaner controller `latch_` | global | cleaner candidate queue and in-flight count |
-| `free_list_latch_` | global | free frame list |
+| `FrameFreeList` head (64-bit atomic: index and version) | global | lock-free stack of free frames |
 | flush scheduler `latch_`, `BufferManagerFlushTask::latch` | global / per task | flush queues and task completion |
 | `IoWaiter::pending_` (32-bit atomic, futex word) | per wait | outstanding requests of one waiter; the first error is written before the count drops |
 | `IoEngine::demand_` (32-bit atomic, futex word) | global | outstanding asynchronous requests plus sleeping waiters; the reaper thread sleeps on it |
@@ -39,7 +38,7 @@ The control-word bit layout is specified in `docs/design/kernel-refactor.md` (se
 
 - No mutex is ever held while blocking on a frame's control word, except the waits listed in section 3.
 - The content latch (shared or exclusive) is the only control-word "lock" a thread holds across other operations; a `SharedBufferHandle` or `ExclusiveBufferHandle` holds it for its whole lifetime. Handle holders mark the page dirty (`ExclusiveBufferHandle::mutable_data()`) and call `FlushBuffer(handle)` while holding it; those calls only perform CAS transitions on the same word and never wait for the latch.
-- Page table, replacer, cleaner, and free-list mutexes are leaf locks: no other lock is acquired while holding one, and none is held while waiting on a control word.
+- Page table, replacer, and cleaner locks are leaf locks: no other lock is acquired while holding one, and none is held while waiting on a control word.
 - Cross-stripe page table updates lock the lower stripe address first.
 - Backend latches are leaf locks private to the backend; `Submit()` and `Reap()` return with none held. The io engine therefore runs completion handlers and the fatal callback with no lock held; the fatal callback only takes `BufferManager::failure_latch_`.
 
@@ -54,8 +53,9 @@ Current waits:
 | `AcquireShared` | exclusive held, or 255 readers | nothing |
 | `AcquireExclusive` | any latch holder | nothing |
 | `WaitForPendingFlush` | `writeback_queued` or `writeback_active` | the frame's shared latch, or the caller's own handle latch |
+| `WaitForLoad` | frame is `Loading` with the wanted tag | nothing |
 
-A pending writeback never needs the content latch to finish: its snapshot is copied before the writeback becomes visible (4.1), and the flush worker only performs `BeginWriteback`/`CompleteWriteback` CAS transitions. That is why waiting for a writeback while holding a latch is safe. Any new wait must keep the property that its condition does not depend on a latch the waiter holds.
+A pending writeback never needs the content latch to finish: its snapshot is copied before the writeback becomes visible (4.1), and the writer only performs `BeginWriteback`/`CompleteWriteback` CAS transitions. The writer is a flush worker, or with `ForegroundWriteback::kDirect` the thread that requested a single-page flush; either way it holds no latch while the write is in flight. That is why waiting for a writeback while holding a latch is safe. Any new wait must keep the property that its condition does not depend on a latch the waiter holds.
 
 The content latch prefers readers, like the glibc rwlock it replaced: a steady stream of readers can delay a writer.
 
@@ -115,7 +115,15 @@ The page table's chains are intrusive (frames are the nodes) and `Link` always i
 
 Lookups are lock-free: a reader samples the stripe's sequence counter, walks the chain with relaxed loads (bounded by the frame count, so a chain rewritten mid-walk cannot loop forever), and retries if the counter changed or was odd. The table keeps its own copy of each frame's key, written only under the stripe lock, so a validated walk sees a consistent snapshot; the descriptor's tag is updated separately and is not used for lookups.
 
-### 5.5 Writeback Failure
+### 5.5 One Load per Page
+
+There is no separate miss table. A thread that misses reserves a frame and, in the same page table operation that remaps it (`ReplaceUnlessLive`, under the stripe lock), checks whether another frame already maps the tag and is *live* for it: not `Free` and carrying that tag in its descriptor. If one is, the thread drops its reservation (the victim's old mapping is already gone, so the frame goes back to the free list) and retries. A stale entry from the window of 5.3 is not live, so it never blocks the install.
+
+A reader that finds a frame `Loading` with its tag sleeps on that frame's control word until the state changes, then retries the lookup. If the load failed, the loader releases the frame to `Free`, the waiters wake, and one of them loads the page itself, so each waiter sees its own read result rather than another thread's error.
+
+`ReleaseToFree` keeps the latch bits: `FlushAll()` may hold the shared latch of any frame, including one whose load is being abandoned, and clearing that count would make the later release underflow.
+
+### 5.6 Writeback Failure
 
 When a victim writeback fails, the frame keeps its tag, data, and dirty state, returns to the replacer, and the failing `ReadBuffer()`/`ReadBufferExclusive()` returns the I/O error. Eviction failures are counted in telemetry (`eviction_failures`).
 
@@ -126,7 +134,7 @@ Evictability lives only in the frame's control word. Replacement policies order 
 - `RecordAccess()` is called on every pin of a resident frame, outside any frame lock. Policies must keep it lock-free (Clock, clock-sweep, SIEVE) or batch it (LRU, LRU-K, 2Q).
 - `RecordLoad()` is called after a frame is reused for a newly loaded page; `Remove()` when a frame returns to the free list.
 - `Victim()` asks the buffer manager's `EvictionProbe` for each candidate (resident, unpinned, unlatched, no writeback) and nominates the first that passes. The frame **stays tracked**. The manager then claims it with `TryReserve`; if the claim fails because the frame changed in between, the manager simply asks for another victim. Nothing has to be handed back, so no frame can drop out of the evictable set.
-- If `Victim()` nominates nothing while some frame is unpinned, `ReserveFrameForTag()` yields and retries; it returns `kResourceExhausted` only when every frame is pinned. The unpinned frame may be latched, under writeback, or simply missed: concurrent callers advance a shared clock hand, so one caller's bounded scan does not visit every frame, and an unpinned frame between `ReleaseToFree` and the free list is invisible to the replacer.
+- If `Victim()` nominates nothing while some frame is unpinned or `Loading`, `ReserveFrameForTag()` yields and retries; it returns `kResourceExhausted` only when every frame is pinned by a resident page. An unpinned frame may be latched, under writeback, or simply missed: concurrent callers advance a shared clock hand, so one caller's bounded scan does not visit every frame, and a frame between `ReleaseToFree` and the free list is invisible to the replacer. A `Loading` frame is pinned only until its load publishes it or, for a reservation that lost the install race (5.5), until it returns to the free list: concurrent misses on one page each reserve a frame before learning they lost, which can briefly pin a small pool completely.
 
 Batched policies buffer accesses in per-thread slots (`AccessBatcher`) and apply a full slot under the policy latch. Lock order is policy latch, then slot latch; recording never holds a slot latch while taking the policy latch. `RecordLoad()` and `Remove()` first apply the calling thread's own slot, so a thread's accesses and loads keep their program order; accesses from different threads have no order to preserve. `Victim()` applies every slot before choosing.
 
@@ -135,15 +143,14 @@ Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`,
 ## 7. I/O Completion
 
 - Every submitted request completes exactly once. A request the backend rejects is completed by `IoEngine::Submit()` on the submitting thread; the others by whichever thread reaps them: a waiter reaping its own completions, another waiter, or the reaper thread.
-- `IoCompletion::Complete()` runs with no lock held and must not block. Completing an asynchronous load publishes each frame (`Loading` → `Resident`), records the load in the replacer, completes the miss for followers, and for a prefetch drops the loader's pin; a failed load aborts the reservation instead. These only take leaf locks.
-- A frame being loaded asynchronously stays `Loading` and pinned by the load, exactly like a synchronous miss, so eviction, lookups, and followers treat both alike. Followers still wait on the miss state, never on the I/O.
-- A miss owner that gives up without loading completes the miss with `Ok` and `kInvalidFrameId`; followers then retry the lookup instead of failing.
+- `IoCompletion::Complete()` runs with no lock held and must not block. Completing an asynchronous load publishes each frame (`Loading` → `Resident`, which wakes waiting readers), records the load in the replacer, and for a prefetch drops the loader's pin; a failed load aborts the reservation instead. These only take leaf locks.
+- A frame being loaded asynchronously stays `Loading` and pinned by the load, exactly like a synchronous miss, so eviction, lookups, and waiting readers treat both alike (5.5).
 - The reaper sleeps on `demand_` while it is zero. `Submit(kAsync)` raises it per request before submitting, and a waiter raises it before its first futex sleep; the transition from zero wakes the reaper. Completions of asynchronous requests carry a tag bit in the token and lower `demand_` when delivered. A waiter sleeps on its own `pending_` with the value it observed, so a completion between the check and the sleep is not lost; the sleep is bounded (10 ms) only to notice an engine stop.
 - `WaitReadBuffers()` waits for every read of the operation before touching its frames. If the engine stops with reads in flight (fatal error or shutdown), the operation's state is leaked on purpose, because pending completions still reference it.
 
 ## 8. Known Limits
 
-- While no frame can be nominated but some frame is unpinned (busy with a writeback, or missed by a concurrent scan), `ReserveFrameForTag()` yields and retries instead of sleeping.
+- While no frame can be nominated but some frame is unpinned or `Loading`, `ReserveFrameForTag()` yields and retries instead of sleeping.
 - A thread that holds an `ExclusiveBufferHandle` must not call `FlushAll()` or `FlushBuffer(file, block)` for that page: the blocking path would wait for the shared latch the thread blocks itself.
 - A thread must not hold two handles on the same page; `ReadBuffer` followed by `ReadBufferExclusive` on the same page in one thread deadlocks. Debug detection is not implemented yet.
 - There is no in-place upgrade: release the `SharedBufferHandle`, acquire an `ExclusiveBufferHandle`, and re-check.

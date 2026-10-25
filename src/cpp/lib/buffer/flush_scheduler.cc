@@ -1,10 +1,12 @@
 #include "flush_scheduler.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "io_engine.h"
 
 namespace telepath {
+
 
 auto BufferManagerFlushTask::Wait() -> Status {
   std::unique_lock<std::mutex> lock(latch);

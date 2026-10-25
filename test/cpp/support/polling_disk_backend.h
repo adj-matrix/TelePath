@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -33,7 +34,7 @@ struct LegacyDiskCompletion {
 // the batch DiskBackend interface. Non-blocking reaps never return anything,
 // so every completion comes from a blocking Reap() (the engine's reaper
 // thread) and the fake fully controls completion timing. PollCompletion() is
-// only called while a request is outstanding.
+// only called while a request is outstanding. Sync requests succeed at once.
 class PollingDiskBackend : public DiskBackend {
  public:
   explicit PollingDiskBackend(std::size_t block_size = 4096, std::size_t queue_depth = 1) : block_size_(block_size), queue_depth_(queue_depth) {}
@@ -61,6 +62,12 @@ class PollingDiskBackend : public DiskBackend {
       std::unique_lock<std::mutex> lock(outstanding_latch_);
       outstanding_cv_.wait(lock, [this]() { return outstanding_ > 0 || shutdown_; });
       if (outstanding_ == 0) return Unavailable("backend shutting down");
+      if (!synced_.empty()) {
+        out[0] = synced_.front();
+        synced_.pop_front();
+        --outstanding_;
+        return std::size_t{1};
+      }
     }
     Result<LegacyDiskCompletion> completion = PollCompletion();
     if (!completion.has_value()) return std::unexpected(completion.error());
@@ -77,6 +84,15 @@ class PollingDiskBackend : public DiskBackend {
   }
 
   auto SubmitLegacy(const DiskRequest &request) -> Result<uint64_t> {
+    if (request.operation == DiskOperation::kSync) {
+      {
+        std::lock_guard<std::mutex> guard(outstanding_latch_);
+        synced_.push_back(DiskCompletion{request.token, Ok()});
+        ++outstanding_;
+      }
+      outstanding_cv_.notify_all();
+      return uint64_t{0};
+    }
     std::lock_guard<std::mutex> guard(token_latch_);
     if (auto deferred = deferred_errors_.find(request.token); deferred != deferred_errors_.end()) {
       Error error = deferred->second;
@@ -126,6 +142,7 @@ class PollingDiskBackend : public DiskBackend {
   std::mutex outstanding_latch_;
   std::condition_variable outstanding_cv_;
   std::size_t outstanding_{0};
+  std::deque<DiskCompletion> synced_;
   bool shutdown_{false};
   std::unordered_map<uint64_t, uint64_t> tokens_;
   std::unordered_map<uint64_t, Error> deferred_errors_;

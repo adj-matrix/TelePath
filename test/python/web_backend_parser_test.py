@@ -83,12 +83,14 @@ def main() -> int:
             "sync_on_write": False,
             "bulk_read_scans": True,
             "prefetch_distance": 16,
+            "foreground_writeback": "queued",
         }
     )
     captured_flush_flags = []
     captured_sync_flags = []
     captured_bulk_flags = []
     captured_prefetch_distances = []
+    captured_writebacks = []
     original_run_benchmark_once = server.run_benchmark_once
 
     def fake_run_benchmark_once(request, output_format="csv"):
@@ -97,6 +99,7 @@ def main() -> int:
         captured_sync_flags.append(request.sync_on_write)
         captured_bulk_flags.append(request.bulk_read_scans)
         captured_prefetch_distances.append(request.prefetch_distance)
+        captured_writebacks.append(request.foreground_writeback)
         return {
             "threads": request.threads,
             "throughput_ops_per_sec": float(request.threads),
@@ -113,12 +116,14 @@ def main() -> int:
     assert captured_sync_flags == [False, False]
     assert captured_bulk_flags == [True, True]
     assert captured_prefetch_distances == [16, 16]
+    assert captured_writebacks == ["queued", "queued"]
     assert sweep_result["request"]["flush_all_after_run"] is True
     assert sweep_result["request"]["sync_on_write"] is False
     assert len(sweep_result["samples"]) == 2
     default_request = server.parse_sweep_request({})
     assert default_request.bulk_read_scans is False
     assert default_request.prefetch_distance == 0
+    assert default_request.foreground_writeback == "direct"
     assert default_request.replacer == "clock_sweep"
     return 0
 

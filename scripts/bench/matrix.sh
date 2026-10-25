@@ -30,9 +30,10 @@ FLUSH_FOREGROUND_BURST_LIMIT="${FLUSH_FOREGROUND_BURST_LIMIT:-0}"
 FLUSH_ALL_AFTER_RUN="${FLUSH_ALL_AFTER_RUN:-false}"
 QUEUE_DEPTH="${QUEUE_DEPTH:-0}"
 MAX_OPEN_FILES="${MAX_OPEN_FILES:-0}"
-SYNC_ON_WRITE="${SYNC_ON_WRITE:-true}"
+SYNC_ON_WRITE="${SYNC_ON_WRITE:-false}"
 BULK_READ_SCANS="${BULK_READ_SCANS:-false}"
 PREFETCH_DISTANCE="${PREFETCH_DISTANCE:-0}"
+FOREGROUND_WRITEBACK="${FOREGROUND_WRITEBACK:-direct}"
 
 telepath_configure_and_build "${BENCHMARK_PRESET}" >&2
 
@@ -66,6 +67,7 @@ for workload in ${WORKLOADS}; do
             --sync-on-write "${SYNC_ON_WRITE}" \
             --bulk-read-scans "${BULK_READ_SCANS}" \
             --prefetch-distance "${PREFETCH_DISTANCE}" \
+            --foreground-writeback "${FOREGROUND_WRITEBACK}" \
             --max-open-files "${MAX_OPEN_FILES}")"
 
           if [[ ${first} -eq 1 ]]; then

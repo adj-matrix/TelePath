@@ -127,11 +127,12 @@ inline void PublishResident(std::atomic<std::uint32_t> &control) {
     [](std::uint32_t, std::uint32_t) { return true; });
 }
 
-// Loading -> Free after a failed load; drops the loader's pin.
+// Loading -> Free after an abandoned load; drops the loader's pin. Latch
+// holders are kept: a flusher may hold the shared latch on any frame.
 inline void ReleaseToFree(std::atomic<std::uint32_t> &control) {
   UpdateAndWake(
     control,
-    [](std::uint32_t word) { return word & kWaiters; },
+    [](std::uint32_t word) { return word & (kWaiters | kLatchMask); },
     [](std::uint32_t, std::uint32_t) { return true; });
 }
 

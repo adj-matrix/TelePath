@@ -40,7 +40,7 @@ void AssertDefaultOptions() {
   assert(defaults.ResolvePageTableStripeCount() <= defaults.pool_size);
   assert(defaults.disk_backend.ResolveQueueDepth() == 32);
   assert(defaults.disk_backend.ResolveMaxOpenFiles() == 64);
-  assert(defaults.disk_backend.sync_on_write);
+  assert(!defaults.disk_backend.sync_on_write);
   assert(defaults.flush_worker_count == 0);
   assert(defaults.flush_submit_batch_size == 0);
   assert(defaults.flush_foreground_burst_limit == 0);

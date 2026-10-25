@@ -34,7 +34,7 @@ class IoUringDiskBackend : public DiskBackend {
     BlockGeometry geometry,
     std::size_t queue_depth,
     std::size_t max_open_files = 64,
-    bool sync_on_write = true,
+    bool sync_on_write = false,
     std::size_t ring_count = 0
   ) -> Result<std::unique_ptr<IoUringDiskBackend>>;
 

@@ -15,6 +15,9 @@ namespace telepath {
 enum class DiskOperation {
   kRead = 0,
   kWrite,
+  // Makes the completed writes to `tag.file_id` durable; `tag.block_id`,
+  // `block_count`, and `buffers` are ignored.
+  kSync,
 };
 
 // How the submitter consumes the completions of one Submit() call.

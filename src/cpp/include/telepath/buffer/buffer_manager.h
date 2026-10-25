@@ -28,12 +28,10 @@ class Replacer;
 class TelemetrySink;
 class BufferManagerObserver;
 class IoEngine;
-class BufferManagerMissCoordinator;
+class FrameFreeList;
 class BufferManagerFlushScheduler;
 class BufferManagerCleanerController;
 class BufferManagerPageTable;
-class BufferManagerTestPeer;
-struct BufferManagerMissState;
 struct BufferManagerFlushTask;
 struct ReadBuffersState;
 
@@ -49,6 +47,8 @@ enum class FrameReservationOutcome {
   kReserved = 0,
   kNeedsFlush,
   kRejected,
+  // Another frame already holds or is loading the requested tag.
+  kTagExists,
 };
 
 struct FrameSnapshot {
@@ -133,6 +133,12 @@ class BufferManager {
   // kInvalidArgument for an empty handle or one owned by another manager.
   auto ReleaseBuffer(SharedBufferHandle &&handle) -> Status;
   auto ReleaseBuffer(ExclusiveBufferHandle &&handle) -> Status;
+  // Durability: a writeback completes once the backend has the bytes, which is
+  // durable only with DiskBackendOptions::sync_on_write. FlushAll() and Close()
+  // make every completed writeback durable. Writes to different pages have no
+  // relative order. Dirty pages are not written when the manager is destroyed;
+  // call Close() first.
+  //
   // Writes the page back and waits until it is clean on the backing store.
   auto FlushBuffer(const SharedBufferHandle &handle) -> Status;
   // Writes the page's current bytes back once and waits for completion. The
@@ -145,9 +151,16 @@ class BufferManager {
   // Ok when the page is not resident. Must not be called by a thread that holds
   // an ExclusiveBufferHandle on the page.
   auto FlushBuffer(FileId file_id, BlockId block_id) -> Status;
-  // Flushes every currently resident dirty page. Must not be called by a thread
-  // that holds an ExclusiveBufferHandle.
+  // Flushes every currently resident dirty page, then makes every completed
+  // writeback durable. Must not be called by a thread that holds an
+  // ExclusiveBufferHandle.
   auto FlushAll() -> Status;
+  // Runs FlushAll(), stops background work, and closes the manager: afterwards
+  // every operation returns ErrorCode::kUnavailable. Returns kInvalidArgument
+  // without closing while a handle or read operation still pins a page.
+  // Closing a closed manager returns Ok; closing a failed one stops it and
+  // returns kFailed.
+  auto Close() -> Status;
   // Returns a point-in-time view of frame metadata for observability and debug
   // tooling. This does not expose direct page memory access.
   auto ExportSnapshot() const -> BufferPoolSnapshot;
@@ -163,9 +176,14 @@ class BufferManager {
   friend class SharedBufferHandle;
   friend class ExclusiveBufferHandle;
   friend class ReadBuffersOperation;
-  friend class BufferManagerTestPeer;
 
   struct AsyncLoad;
+
+  enum class ResidentProbe {
+    kPinned,
+    kLoading,
+    kAbsent,
+  };
 
   BufferManager(
     const BufferManagerOptions &options,
@@ -177,19 +195,20 @@ class BufferManager {
   // buffer_manager_read.cc
   auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameId>;
   auto TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId>;
-  auto AwaitJoinedMiss(
-    const BufferTag &tag,
-    const std::shared_ptr<BufferManagerMissState> &state,
-    BufferAccessStrategy *strategy
-  ) -> Result<FrameId>;
-  auto LoadMissOwnerBuffer(
-    const BufferTag &tag,
-    const std::shared_ptr<BufferManagerMissState> &state,
-    BufferAccessStrategy *strategy
-  ) -> Result<FrameId>;
+  auto ProbeResident(const BufferTag &tag, bool record_access, FrameId *frame_id) -> ResidentProbe;
   bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access);
-  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameReservation>;
-  auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy) -> std::optional<FrameReservation>;
+  bool IsLoadingTag(FrameId frame_id, const BufferTag &tag) const;
+  void WaitForLoad(FrameId frame_id, const BufferTag &tag);
+  bool IsLiveFor(FrameId frame_id, const BufferTag &tag) const;
+  // Loads `tag` into a newly reserved frame and returns it pinned; nullopt
+  // means another thread installed the tag first and the caller must retry.
+  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameId>>;
+  // Reserves a frame for `tag`; nullopt means another frame already holds or
+  // is loading the tag.
+  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameReservation>>;
+  auto AcquireVictimFrame() -> Result<FrameId>;
+  auto ReserveVictim(FrameId frame_id, const BufferTag &tag, FrameReservation *reservation) -> Result<FrameReservationOutcome>;
+  auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy, FrameReservation *reservation) -> FrameReservationOutcome;
   auto CompleteReservation(
     const BufferTag &tag,
     const FrameReservation &reservation
@@ -204,7 +223,6 @@ class BufferManager {
     ReadBuffersState *operation,
     const BufferTag &tag,
     const FrameReservation &reservation,
-    std::shared_ptr<BufferManagerMissState> miss_state,
     std::size_t slot);
   void SubmitAsyncLoads(std::vector<std::unique_ptr<AsyncLoad>> *loads);
   void FinishAsyncLoad(AsyncLoad &load, const Status &status);
@@ -230,6 +248,14 @@ class BufferManager {
   auto FlushFrame(FrameId frame_id) -> Status;
   auto RunForegroundFlush(FrameId frame_id, const std::byte *stable_data) -> Status;
   auto FlushFrameOnce(FrameId frame_id, const std::byte *stable_data) -> Status;
+  auto ForegroundFlushRound(FrameId frame_id, const std::byte *stable_data) -> Result<bool>;
+  auto WriteFlushTaskDirect(const std::shared_ptr<BufferManagerFlushTask> &task) -> Status;
+  auto CreateFlushTask(
+    FrameId frame_id,
+    const std::byte *stable_data,
+    bool *was_busy,
+    bool cleaner_owned
+  ) -> Result<std::shared_ptr<BufferManagerFlushTask>>;
   auto WaitForScheduledFlushes(const std::vector<std::shared_ptr<BufferManagerFlushTask>> &tasks) -> Status;
   auto FlushBusyFrames(const std::vector<FrameId> &frame_ids) -> Status;
   auto TryScheduleFlushTask(
@@ -267,16 +293,17 @@ class BufferManager {
   ) -> Status;
   void ReleaseFreeFrame(FrameId frame_id);
   auto AcquireReservationFrame() -> Result<FrameId>;
-  void InstallReservationEntry(
+  auto InstallReservationEntry(
     const BufferTag &tag,
-    const FrameReservation &reservation);
+    const FrameReservation &reservation) -> std::optional<FrameId>;
   auto TryReserveFrameForTag(
     FrameId frame_id,
     const BufferTag &tag,
     bool allow_victim_flush,
     FrameReservation *reservation
   ) -> FrameReservationOutcome;
-  bool HasUnpinnedFrame() const;
+  bool HasTransientFrame() const;
+  bool HasPinnedFrame() const;
   auto FlushVictimBeforeReuse(FrameId frame_id) -> Status;
 
   // buffer_manager_handle.cc
@@ -304,6 +331,8 @@ class BufferManager {
   auto StartFlushScheduler() -> Status;
   void StopFlushPipeline(const Status &reason);
   auto StartIoEngine() -> Status;
+  void NoteWrittenFile(FileId file_id);
+  auto SyncWrittenFiles() -> Status;
 
   std::size_t pool_size_{0};
   BlockGeometry geometry_;
@@ -312,20 +341,21 @@ class BufferManager {
   std::unique_ptr<Replacer> replacer_;
   std::unique_ptr<BufferManagerObserver> observer_;
   std::atomic<bool> failed_{false};
+  std::atomic<bool> closed_{false};
   mutable std::mutex failure_latch_;
   std::optional<Error> failure_;
 
   std::unique_ptr<FrameMemoryPool> frame_pool_;
-  std::unique_ptr<BufferManagerMissCoordinator> miss_coordinator_;
   std::unique_ptr<IoEngine> io_engine_;
   std::unique_ptr<BufferManagerFlushScheduler> flush_scheduler_;
   std::unique_ptr<BufferManagerCleanerController> cleaner_controller_;
   std::unique_ptr<BufferManagerPageTable> page_table_;
   std::vector<BufferDescriptor> descriptors_;
 
-  std::mutex free_list_latch_;
+  std::unique_ptr<FrameFreeList> free_list_;
+  std::mutex written_files_latch_;
+  std::vector<FileId> written_files_;
   std::atomic<std::size_t> dirty_page_count_{0};
-  std::vector<FrameId> free_list_;
 };
 
 }  // namespace telepath

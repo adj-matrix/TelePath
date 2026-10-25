@@ -45,6 +45,10 @@
     return t(`replacers.${replacer}`);
   }
 
+  function foregroundWritebackLabel(mode) {
+    return t(`foreground_writebacks.${mode}`);
+  }
+
   function applyTranslations() {
     document.documentElement.lang = app.state.currentLanguage;
     document.title = t("meta.title");
@@ -87,6 +91,7 @@
     workloadLabel,
     backendLabel,
     replacerLabel,
+    foregroundWritebackLabel,
     applyTranslations,
     preferredLanguage,
     loadLanguage,

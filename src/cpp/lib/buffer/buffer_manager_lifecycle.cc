@@ -6,7 +6,7 @@
 #include "frame_memory_pool.h"
 #include "io_engine.h"
 #include "flush_scheduler.h"
-#include "miss_coordinator.h"
+#include "frame_free_list.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -39,8 +39,9 @@ auto BufferManager::Initialize() -> Status {
 }
 
 auto BufferManager::CheckUsable() const -> Status {
-  if (!failed_.load(std::memory_order_acquire)) return Ok();
-  return Failed("buffer manager is in the failed state");
+  if (failed_.load(std::memory_order_acquire)) return Failed("buffer manager is in the failed state");
+  if (closed_.load(std::memory_order_acquire)) return Unavailable("buffer manager is closed");
+  return Ok();
 }
 
 void BufferManager::EnterFailedState(const Error &cause) {
@@ -62,17 +63,15 @@ auto BufferManager::InitializeFramePool() -> Status {
 }
 
 void BufferManager::SeedFreeFrames() {
-  free_list_.reserve(pool_size_);
   for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
     descriptors_[frame_id].frame_id = frame_id;
-    free_list_.push_back(frame_id);
+    free_list_->Push(frame_id);
   }
 }
 
 auto BufferManager::ValidateRuntimeDependencies() const -> Status {
   if (disk_backend_ == nullptr) return InvalidArgument("disk backend must not be null");
   if (replacer_ == nullptr) return InvalidArgument("replacer must not be null");
-  if (miss_coordinator_ == nullptr) return InvalidArgument("miss coordinator must not be null");
   if (io_engine_ == nullptr) return InvalidArgument("io engine must not be null");
   if (page_table_ == nullptr) return InvalidArgument("page table must not be null");
   return Ok();
@@ -123,6 +122,34 @@ void BufferManager::StopFlushPipeline(const Status &reason) {
   if (cleaner_controller_ != nullptr) cleaner_controller_->Shutdown();
   if (flush_scheduler_ != nullptr) flush_scheduler_->Shutdown();
   if (io_engine_ != nullptr) io_engine_->Shutdown(reason);
+}
+
+void BufferManager::NoteWrittenFile(FileId file_id) {
+  std::lock_guard<std::mutex> guard(written_files_latch_);
+  if (std::find(written_files_.begin(), written_files_.end(), file_id) == written_files_.end()) written_files_.push_back(file_id);
+}
+
+auto BufferManager::SyncWrittenFiles() -> Status {
+  std::vector<FileId> files;
+  {
+    std::lock_guard<std::mutex> guard(written_files_latch_);
+    files.swap(written_files_);
+  }
+  if (files.empty()) return Ok();
+
+  IoWaiter waiter(static_cast<std::uint32_t>(files.size()));
+  std::vector<DiskRequest> requests(files.size());
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    requests[i].token = reinterpret_cast<uint64_t>(static_cast<IoCompletion *>(&waiter));
+    requests[i].operation = DiskOperation::kSync;
+    requests[i].tag = BufferTag{files[i], 0};
+  }
+  io_engine_->Submit(requests, DiskSubmitMode::kWait);
+  Status status = io_engine_->Wait(waiter);
+  if (!status.has_value()) {
+    for (FileId file_id : files) NoteWrittenFile(file_id);
+  }
+  return status;
 }
 
 auto BufferManager::StartIoEngine() -> Status {

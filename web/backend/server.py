@@ -41,6 +41,11 @@ REPLACERS = [
     "two_queue",
 ]
 
+FOREGROUND_WRITEBACKS = [
+    "direct",
+    "queued",
+]
+
 DISK_BACKENDS = [
     "auto",
     "posix",
@@ -68,9 +73,10 @@ DEFAULTS = {
     "flush_all_after_run": False,
     "queue_depth": 0,
     "max_open_files": 0,
-    "sync_on_write": True,
+    "sync_on_write": False,
     "bulk_read_scans": False,
     "prefetch_distance": 0,
+    "foreground_writeback": "direct",
 }
 
 DEFAULT_SWEEP = {
@@ -94,9 +100,10 @@ DEFAULT_SWEEP = {
     "flush_all_after_run": False,
     "queue_depth": 0,
     "max_open_files": 0,
-    "sync_on_write": True,
+    "sync_on_write": False,
     "bulk_read_scans": False,
     "prefetch_distance": 0,
+    "foreground_writeback": "direct",
 }
 
 SUPPORTED_LANGUAGES = [
@@ -136,6 +143,7 @@ class BenchmarkRequest:
     sync_on_write: bool
     bulk_read_scans: bool
     prefetch_distance: int
+    foreground_writeback: str
 
 
 @dataclass(frozen=True)
@@ -163,6 +171,7 @@ class SweepRequest:
     sync_on_write: bool
     bulk_read_scans: bool
     prefetch_distance: int
+    foreground_writeback: str
 
 
 def now_epoch_ms() -> int:
@@ -342,6 +351,9 @@ def parse_common_options(payload: dict[str, Any], defaults: dict[str, Any]) -> d
         "prefetch_distance": non_negative_int_from_payload(
             payload, "prefetch_distance", defaults["prefetch_distance"]
         ),
+        "foreground_writeback": enum_from_payload(
+            payload, "foreground_writeback", defaults["foreground_writeback"], FOREGROUND_WRITEBACKS
+        ),
     }
 
 
@@ -395,6 +407,7 @@ def parse_benchmark_request(payload: dict[str, Any]) -> BenchmarkRequest:
         sync_on_write=options["sync_on_write"],
         bulk_read_scans=options["bulk_read_scans"],
         prefetch_distance=options["prefetch_distance"],
+        foreground_writeback=options["foreground_writeback"],
     )
 
 
@@ -449,6 +462,7 @@ def parse_sweep_request(payload: dict[str, Any]) -> SweepRequest:
         sync_on_write=options["sync_on_write"],
         bulk_read_scans=options["bulk_read_scans"],
         prefetch_distance=options["prefetch_distance"],
+        foreground_writeback=options["foreground_writeback"],
     )
 
 
@@ -599,6 +613,8 @@ def run_benchmark_once(request: BenchmarkRequest, output_format: str = "csv") ->
         "true" if request.bulk_read_scans else "false",
         "--prefetch-distance",
         str(request.prefetch_distance),
+        "--foreground-writeback",
+        request.foreground_writeback,
         "--max-open-files",
         str(request.max_open_files),
     ]
@@ -664,6 +680,7 @@ def run_sweep(request: SweepRequest) -> dict[str, Any]:
             sync_on_write=request.sync_on_write,
             bulk_read_scans=request.bulk_read_scans,
             prefetch_distance=request.prefetch_distance,
+            foreground_writeback=request.foreground_writeback,
         )
         samples.append(run_benchmark_once(sample_request, "csv"))
 
@@ -735,6 +752,7 @@ class TelePathDemoHandler(BaseHTTPRequestHandler):
                     "workloads": WORKLOADS,
                     "replacers": REPLACERS,
                     "disk_backends": DISK_BACKENDS,
+                    "foreground_writebacks": FOREGROUND_WRITEBACKS,
                     "defaults": DEFAULTS,
                     "sweep_defaults": DEFAULT_SWEEP,
                     "default_language": "en",

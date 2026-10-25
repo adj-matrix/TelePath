@@ -59,15 +59,6 @@ target_link_libraries(telepath_page_table_test PRIVATE telepath)
 
 add_test(NAME telepath_page_table_test COMMAND telepath_page_table_test)
 
-add_executable(telepath_miss_coordinator_test
-  cpp/buffer/miss_coordinator_test.cc
-)
-
-target_include_directories(telepath_miss_coordinator_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
-target_link_libraries(telepath_miss_coordinator_test PRIVATE telepath)
-
-add_test(NAME telepath_miss_coordinator_test COMMAND telepath_miss_coordinator_test)
-
 add_executable(telepath_frame_control_test
   cpp/buffer/frame_control_test.cc
 )
@@ -258,16 +249,6 @@ target_link_libraries(telepath_same_page_miss_failure_recovery_test PRIVATE tele
 add_test(NAME telepath_same_page_miss_failure_recovery_test
          COMMAND telepath_same_page_miss_failure_recovery_test)
 
-add_executable(telepath_same_page_miss_retry_test
-  cpp/buffer/same_page_miss_retry_test.cc
-)
-
-target_include_directories(telepath_same_page_miss_retry_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
-target_link_libraries(telepath_same_page_miss_retry_test PRIVATE telepath)
-
-add_test(NAME telepath_same_page_miss_retry_test
-         COMMAND telepath_same_page_miss_retry_test)
-
 add_executable(telepath_different_page_parallel_miss_test
   cpp/buffer/different_page_parallel_miss_test.cc
 )
@@ -351,6 +332,22 @@ add_executable(telepath_buffer_access_strategy_test
 target_link_libraries(telepath_buffer_access_strategy_test PRIVATE telepath)
 
 add_test(NAME telepath_buffer_access_strategy_test COMMAND telepath_buffer_access_strategy_test)
+
+add_executable(telepath_foreground_writeback_test
+  cpp/buffer/foreground_writeback_test.cc
+)
+
+target_link_libraries(telepath_foreground_writeback_test PRIVATE telepath)
+
+add_test(NAME telepath_foreground_writeback_test COMMAND telepath_foreground_writeback_test)
+
+add_executable(telepath_durability_test
+  cpp/buffer/durability_test.cc
+)
+
+target_link_libraries(telepath_durability_test PRIVATE telepath)
+
+add_test(NAME telepath_durability_test COMMAND telepath_durability_test)
 
 add_executable(telepath_async_read_test
   cpp/buffer/async_read_test.cc

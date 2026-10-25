@@ -22,6 +22,16 @@
 
 namespace {
 
+// Every manager here routes foreground flushes through the flush workers,
+// which is the behavior under test.
+auto QueuedOptions(std::size_t pool_size = 0) -> telepath::BufferManagerOptions {
+  telepath::BufferManagerOptions options;
+  options.pool_size = pool_size;
+  options.page_size = 4096;
+  options.foreground_writeback = telepath::ForegroundWriteback::kQueued;
+  return options;
+}
+
 class CoordinatedWriteBackend : public telepath::test_support::PollingDiskBackend {
  public:
   explicit CoordinatedWriteBackend(std::size_t page_size) : PollingDiskBackend(page_size, 4), page_size_(page_size) {}
@@ -276,8 +286,7 @@ void ExpectForegroundFlushUsesFlushWorkerAndPersistsLatestDirtyVersion() {
 
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeCounterTelemetrySink();
-  auto manager_owner = telepath::BufferManager::Create(
-      2, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(QueuedOptions(2), std::move(backend), std::move(replacer), telemetry);
   assert(manager_owner.has_value());
   telepath::BufferManager &manager = *manager_owner.value();
 
@@ -317,7 +326,7 @@ void ExpectEvictionUsesFlushWorkerForWriteback() {
 
   auto replacer = telepath::MakeClockReplacer(1);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto manager_owner = telepath::BufferManager::Create(1, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(QueuedOptions(1), std::move(backend), std::move(replacer), telemetry);
   assert(manager_owner.has_value());
   telepath::BufferManager &manager = *manager_owner.value();
 
@@ -353,7 +362,7 @@ void ExpectForegroundBurstLimitLetsForegroundFlushesCutAhead() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 4;
   options.page_size = 4096;
   options.flush_worker_count = 1;
@@ -433,7 +442,7 @@ void ExpectForegroundFlushSubmitsAfterOlderBackgroundWrite() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 3;
   options.page_size = 4096;
   options.flush_worker_count = 1;
@@ -499,7 +508,7 @@ void ExpectCleanerBacklogDoesNotPreventFlushAllProgress() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 4;
   options.page_size = 4096;
   options.enable_background_cleaner = true;
@@ -535,7 +544,7 @@ void ExpectSerializedFlushWorkerCompletesIndependentFlushes() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 4;
   options.page_size = 4096;
   options.flush_worker_count = 1;
@@ -571,7 +580,7 @@ void ExpectFlushAllSubmitsSecondBatchAfterFirstBatchCompletes() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 4;
   options.page_size = 4096;
   options.flush_worker_count = 1;
@@ -612,7 +621,7 @@ void ExpectFlushAllWaitsForAllBlockedWrites() {
 
   auto replacer = telepath::MakeClockReplacer(4);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto manager_owner = telepath::BufferManager::Create(4, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(QueuedOptions(4), std::move(backend), std::move(replacer), telemetry);
   assert(manager_owner.has_value());
   telepath::BufferManager &manager = *manager_owner.value();
 
@@ -643,7 +652,7 @@ void ExpectFailedFlushAllLeavesHealthyPagePersistedAndAllowsRetry() {
   auto *backend_ptr = backend.get();
   auto replacer = telepath::MakeClockReplacer(2);
   auto telemetry = telepath::MakeNoOpTelemetrySink();
-  auto manager_owner = telepath::BufferManager::Create(2, 4096, std::move(backend), std::move(replacer), telemetry);
+  auto manager_owner = telepath::BufferManager::Create(QueuedOptions(2), std::move(backend), std::move(replacer), telemetry);
   assert(manager_owner.has_value());
   telepath::BufferManager &manager = *manager_owner.value();
 
@@ -684,7 +693,7 @@ void ExpectFlushAllReportsSubmitFailureAndAllowsRetry() {
   auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
   auto *backend_ptr = backend.get();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 2;
   options.page_size = 4096;
   options.flush_worker_count = 1;
@@ -721,7 +730,7 @@ void ExpectBackgroundCleanerPersistsAtLeastOneDirtyPage() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 4;
   options.page_size = 4096;
   options.enable_background_cleaner = true;
@@ -752,7 +761,7 @@ void ExpectCleanerFlushFailureRequeuesAndRetries() {
   auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
   auto *backend_ptr = backend.get();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 1;
   options.page_size = 4096;
   options.enable_background_cleaner = true;
@@ -788,7 +797,7 @@ void ExpectSnapshotAggregatesQueuedAndInFlightFlushes() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 2;
   options.page_size = 4096;
   options.flush_worker_count = 1;
@@ -838,7 +847,7 @@ void ExpectPinnedDirtyPageDoesNotFlushUntilReleased() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 2;
   options.page_size = 4096;
   options.enable_background_cleaner = true;
@@ -865,7 +874,7 @@ void ExpectFlushAllWaitsForInFlightBackgroundFlush() {
   auto *backend_ptr = backend.get();
   backend_ptr->BlockAllWriteCompletions();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 1;
   options.page_size = 4096;
   options.enable_background_cleaner = true;
@@ -905,7 +914,7 @@ void ExpectEvictionAfterCleanerFlushDoesNotDuplicateWriteback() {
   auto backend = std::make_unique<CoordinatedWriteBackend>(4096);
   auto *backend_ptr = backend.get();
 
-  telepath::BufferManagerOptions options;
+  telepath::BufferManagerOptions options = QueuedOptions();
   options.pool_size = 1;
   options.page_size = 4096;
   options.enable_background_cleaner = true;

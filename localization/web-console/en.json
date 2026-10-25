@@ -92,7 +92,8 @@
     "bulk_read_scans": "Bulk-Read Scans",
     "prefetch_distance": "Prefetch Distance",
     "thread_candidates": "Thread Candidates",
-    "thread_candidates_placeholder": "1,2,4,8"
+    "thread_candidates_placeholder": "1,2,4,8",
+    "foreground_writeback": "Foreground Writeback"
   },
   "buttons": {
     "run_idle": "Run Benchmark",
@@ -249,5 +250,9 @@
     "sieve": "SIEVE",
     "lru": "LRU",
     "two_queue": "2Q"
+  },
+  "foreground_writebacks": {
+    "direct": "Direct (caller writes)",
+    "queued": "Queued (flush workers)"
   }
 }

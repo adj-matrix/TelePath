@@ -29,6 +29,12 @@ class BufferManagerPageTable {
   // Maps `new_tag` to `frame_id`; unmaps `old_tag` only if it currently maps
   // to `frame_id`.
   void Replace(const BufferTag &old_tag, const BufferTag &new_tag, FrameId frame_id);
+  // Like Replace(), but if another frame mapped under `new_tag` satisfies
+  // `live(frame)`, leaves `new_tag` alone and returns that frame. `frame_id`'s
+  // old mapping is dropped either way. `old_tag` is null for a frame that has
+  // no mapping. `live` runs under the stripe lock.
+  template <typename Live>
+  auto ReplaceUnlessLive(const BufferTag *old_tag, const BufferTag &new_tag, FrameId frame_id, Live live) -> std::optional<FrameId>;
 
  private:
   static constexpr std::uint32_t kNone = UINT32_MAX;
@@ -67,6 +73,27 @@ class BufferManagerPageTable {
   std::unique_ptr<std::atomic<BlockId>[]> key_block_id_;
   std::unique_ptr<Stripe[]> stripes_;
 };
+
+template <typename Live>
+auto BufferManagerPageTable::ReplaceUnlessLive(const BufferTag *old_tag, const BufferTag &new_tag, FrameId frame_id, Live live) -> std::optional<FrameId> {
+  const std::uint32_t old_bucket = bucket_of_[frame_id].load(std::memory_order_relaxed);
+  const std::size_t new_bucket = BucketFor(new_tag);
+  StripeWriter writer(StripeFor(new_bucket), old_bucket == kNone ? nullptr : StripeFor(old_bucket));
+  std::optional<FrameId> existing;
+  std::uint32_t frame = heads_[new_bucket].load(std::memory_order_relaxed);
+  for (std::size_t steps = 0; frame != kNone && steps < frame_capacity_; ++steps) {
+    if (frame != frame_id && MapsTo(frame, new_tag) && live(static_cast<FrameId>(frame))) {
+      existing = frame;
+      break;
+    }
+    frame = next_[frame].load(std::memory_order_relaxed);
+  }
+  const bool linked_under_new = old_bucket != kNone && MapsTo(frame_id, new_tag);
+  if (old_bucket != kNone && ((old_tag != nullptr && MapsTo(frame_id, *old_tag)) || !linked_under_new || existing.has_value())) Unlink(frame_id);
+  if (existing.has_value()) return existing;
+  if (bucket_of_[frame_id].load(std::memory_order_relaxed) == kNone) Link(new_bucket, new_tag, frame_id);
+  return std::nullopt;
+}
 
 }  // namespace telepath
 

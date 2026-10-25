@@ -48,9 +48,10 @@ struct BenchmarkOptions {
   std::size_t dirty_page_low_watermark{0};
   std::size_t queue_depth{0};
   std::size_t max_open_files{0};
-  bool sync_on_write{true};
+  bool sync_on_write{false};
   bool bulk_read_scans{false};
   std::size_t prefetch_distance{0};
+  std::string foreground_writeback{"direct"};
   std::size_t telemetry_shm_capacity{telepath::kDefaultTelemetrySharedMemoryPayloadCapacity};
   std::size_t snapshot_sample_limit{4};
 };
@@ -183,6 +184,7 @@ inline void NormalizeBenchmarkOptions(BenchmarkOptions *options) {
     options->replacer = "clock_sweep";
   }
   if (options->disk_backend == "uring") options->disk_backend = "io_uring";
+  if (options->foreground_writeback != "queued") options->foreground_writeback = "direct";
   if (
     options->disk_backend != "auto" &&
     options->disk_backend != "posix" &&
@@ -224,6 +226,7 @@ inline auto ParseArgs(int argc, char **argv) -> BenchmarkOptions {
     if (TryParseBoolArg(arg, "--sync-on-write", argc, argv, &i, &options.sync_on_write)) continue;
     if (TryParseBoolArg(arg, "--bulk-read-scans", argc, argv, &i, &options.bulk_read_scans)) continue;
     if (TryParseNonNegativeArg(arg, "--prefetch-distance", argc, argv, &i, &options.prefetch_distance)) continue;
+    if (TryParseStringArg(arg, "--foreground-writeback", argc, argv, &i, &options.foreground_writeback)) continue;
     if (TryParsePositiveArg(arg, "--telemetry-shm-capacity", argc, argv, &i, &options.telemetry_shm_capacity)) continue;
     if (TryParseNonNegativeArg(arg, "--snapshot-sample-limit", argc, argv, &i, &options.snapshot_sample_limit)) continue;
     if (!TryParseNonNegativeArg(arg, "--max-open-files", argc, argv, &i, &options.max_open_files)) continue;

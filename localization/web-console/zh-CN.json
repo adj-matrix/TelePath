@@ -92,7 +92,8 @@
     "bulk_read_scans": "扫描使用批量读策略",
     "prefetch_distance": "预读距离",
     "thread_candidates": "线程候选集",
-    "thread_candidates_placeholder": "1,2,4,8"
+    "thread_candidates_placeholder": "1,2,4,8",
+    "foreground_writeback": "前台写回"
   },
   "buttons": {
     "run_idle": "运行基准测试",
@@ -249,5 +250,9 @@
     "sieve": "SIEVE",
     "lru": "LRU",
     "two_queue": "2Q"
+  },
+  "foreground_writebacks": {
+    "direct": "直写（调用线程写）",
+    "queued": "排队（flush 线程写）"
   }
 }

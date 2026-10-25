@@ -18,7 +18,6 @@ add_library(telepath
   lib/buffer/cleaner_controller.cc
   lib/buffer/flush_scheduler.cc
   lib/buffer/io_engine.cc
-  lib/buffer/miss_coordinator.cc
   lib/io/disk_backend_factory.cc
   lib/io/file_descriptor_cache.cc
   lib/io/io_uring_disk_backend.cc

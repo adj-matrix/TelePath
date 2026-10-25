@@ -6,7 +6,6 @@
 #include "buffer_manager_observer.h"
 #include "frame_memory_pool.h"
 #include "io_engine.h"
-#include "miss_coordinator.h"
 
 namespace telepath {
 
@@ -29,7 +28,6 @@ struct BufferManager::AsyncLoad final : public IoCompletion {
   struct Entry {
     BufferTag tag{};
     FrameReservation reservation{};
-    std::shared_ptr<BufferManagerMissState> miss_state;
     std::size_t slot{0};
   };
 
@@ -59,20 +57,13 @@ auto BufferManager::PrefetchBuffer(FileId file_id, BlockId block_id, std::size_t
   for (std::size_t i = 0; i < block_count; ++i) {
     const BufferTag tag{file_id, block_id + i};
     if (IsResidentTag(tag)) continue;
-    auto registration = miss_coordinator_->RegisterOrJoin(tag);
-    if (!registration.is_owner) continue;
-    if (IsResidentTag(tag)) {
-      miss_coordinator_->Complete(tag, registration.state, Ok(), kInvalidFrameId);
-      continue;
-    }
-
-    Result<FrameReservation> reservation = ReserveFrameForTag(tag, nullptr);
+    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, nullptr);
     if (!reservation.has_value()) {
-      miss_coordinator_->Complete(tag, registration.state, Ok(), kInvalidFrameId);
       if (reservation.error().code() != ErrorCode::kResourceExhausted) status = PropagateError(reservation);
       break;
     }
-    AppendAsyncLoad(&loads, nullptr, tag, reservation.value(), std::move(registration.state), i);
+    if (!reservation->has_value()) continue;
+    AppendAsyncLoad(&loads, nullptr, tag, reservation->value(), i);
   }
   SubmitAsyncLoads(&loads);
   return status;
@@ -100,24 +91,13 @@ auto BufferManager::StartReadBuffers(ReadBuffersOperation &operation, FileId fil
       continue;
     }
 
-    auto registration = miss_coordinator_->RegisterOrJoin(tag);
-    if (!registration.is_owner) continue;
-    if (auto hit = TryReadResidentHit(tag, record_access); hit.has_value()) {
-      miss_coordinator_->Complete(tag, registration.state, Ok(), hit.value());
-      state->frames[i] = hit.value();
-      state->slots[i] = ReadBuffersState::Slot::kPinned;
-      continue;
-    }
-
+    if (IsResidentTag(tag)) continue;
+    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, strategy);
+    if (!reservation.has_value() || !reservation->has_value()) continue;
     observer_->RecordReadMiss(tag);
-    Result<FrameReservation> reservation = ReserveFrameForTag(tag, strategy);
-    if (!reservation.has_value()) {
-      miss_coordinator_->Complete(tag, registration.state, Ok(), kInvalidFrameId);
-      continue;
-    }
-    state->frames[i] = reservation->frame_id;
+    state->frames[i] = reservation->value().frame_id;
     state->slots[i] = ReadBuffersState::Slot::kLoading;
-    AppendAsyncLoad(&loads, state.get(), tag, reservation.value(), std::move(registration.state), i);
+    AppendAsyncLoad(&loads, state.get(), tag, reservation->value(), i);
   }
 
   operation.manager_ = this;
@@ -139,7 +119,6 @@ void BufferManager::AppendAsyncLoad(
   ReadBuffersState *operation,
   const BufferTag &tag,
   const FrameReservation &reservation,
-  std::shared_ptr<BufferManagerMissState> miss_state,
   std::size_t slot) {
   AsyncLoad *last = loads->empty() ? nullptr : loads->back().get();
   const bool extends_last = last != nullptr
@@ -152,7 +131,7 @@ void BufferManager::AppendAsyncLoad(
     load->operation = operation;
     loads->push_back(std::move(load));
   }
-  loads->back()->entries.push_back(AsyncLoad::Entry{tag, reservation, std::move(miss_state), slot});
+  loads->back()->entries.push_back(AsyncLoad::Entry{tag, reservation, slot});
 }
 
 void BufferManager::SubmitAsyncLoads(std::vector<std::unique_ptr<AsyncLoad>> *loads) {
@@ -176,12 +155,10 @@ void BufferManager::FinishAsyncLoad(AsyncLoad &load, const Status &status) {
     const FrameId frame_id = entry.reservation.frame_id;
     if (!status.has_value()) {
       AbortLoadReservation(frame_id, entry.tag, status);
-      miss_coordinator_->Complete(entry.tag, entry.miss_state, status, kInvalidFrameId);
       if (load.operation != nullptr) load.operation->slots[entry.slot] = ReadBuffersState::Slot::kFailed;
       continue;
     }
     PublishLoadedFrame(entry.tag, entry.reservation);
-    miss_coordinator_->Complete(entry.tag, entry.miss_state, Ok(), frame_id);
     if (load.operation == nullptr) ReleaseFrame(frame_id);
   }
   if (load.operation != nullptr) load.operation->waiter.Complete(status);

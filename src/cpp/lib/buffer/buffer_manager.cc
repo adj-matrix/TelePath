@@ -8,7 +8,7 @@
 #include "flush_scheduler.h"
 #include "frame_control.h"
 #include "io_engine.h"
-#include "miss_coordinator.h"
+#include "frame_free_list.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -23,6 +23,7 @@ auto BufferManager::Create(
   std::shared_ptr<TelemetrySink> telemetry_sink) -> Result<std::unique_ptr<BufferManager>> {
   auto geometry = BlockGeometry::Create(options.page_size);
   if (!geometry.has_value()) return PropagateError(geometry);
+  if (options.observation.enabled) return Unavailable("the observation plane is reserved and not implemented yet");
   if (disk_backend != nullptr) {
     const std::size_t backend_block_size = disk_backend->GetCapabilities().block_size;
     if (backend_block_size != 0 && backend_block_size != geometry->block_size()) return InvalidArgument("disk backend block size does not match the buffer manager page size");
@@ -55,10 +56,10 @@ BufferManager::BufferManager(
     replacer_(std::move(replacer)),
     observer_(std::make_unique<BufferManagerObserver>(std::move(telemetry_sink))),
     frame_pool_(std::make_unique<FrameMemoryPool>(options.pool_size, geometry)),
-    miss_coordinator_(std::make_unique<BufferManagerMissCoordinator>(options.ResolvePageTableStripeCount())),
     io_engine_(std::make_unique<IoEngine>(disk_backend_.get())),
     page_table_(std::make_unique<BufferManagerPageTable>(options.pool_size, options.ResolvePageTableStripeCount())),
-    descriptors_(options.pool_size) {
+    descriptors_(options.pool_size),
+    free_list_(std::make_unique<FrameFreeList>(options.pool_size)) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
 }
 
@@ -145,7 +146,18 @@ auto BufferManager::FlushAll() -> Status {
   Status wait_status = WaitForScheduledFlushes(queued_tasks);
   Status flush_status = FlushBusyFrames(busy_frames);
   if (!wait_status.has_value()) return wait_status;
-  return flush_status;
+  if (!flush_status.has_value()) return flush_status;
+  return SyncWrittenFiles();
+}
+
+auto BufferManager::Close() -> Status {
+  if (closed_.load(std::memory_order_acquire)) return Ok();
+  if (HasPinnedFrame()) return InvalidArgument("pages are still pinned by handles or read operations");
+  Status status = CheckUsable();
+  if (status.has_value()) status = FlushAll();
+  closed_.store(true, std::memory_order_release);
+  StopFlushPipeline(Unavailable("buffer manager is closed"));
+  return status;
 }
 
 auto BufferManager::ExportSnapshot() const -> BufferPoolSnapshot{

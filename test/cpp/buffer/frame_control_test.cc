@@ -180,7 +180,23 @@ void AssertWritebackErrorRoundTrip() {
 
 }  // namespace
 
+// A flusher may hold the shared latch on a frame whose load is abandoned.
+void AssertReleaseToFreeKeepsLatchHolders() {
+  std::atomic<std::uint32_t> control{0};
+  std::uint32_t observed = 0;
+  assert(fc::TryReserve(control, &observed) == fc::ReserveOutcome::kReserved);
+  assert(fc::TryAcquireShared(control));
+  fc::ReleaseToFree(control);
+  assert(fc::State(control.load()) == telepath::BufferFrameState::kFree);
+  assert(fc::Pins(control.load()) == 0);
+  assert(fc::SharedHolders(control.load()) == 1);
+  assert(fc::TryReserve(control, &observed) == fc::ReserveOutcome::kRejected);
+  fc::ReleaseShared(control);
+  assert(control.load() == 0);
+}
+
 int main() {
+  AssertReleaseToFreeKeepsLatchHolders();
   AssertPinRequiresResidentState();
   AssertReserveClaimsOnlyIdleFrames();
   AssertLatchModesExcludeEachOther();

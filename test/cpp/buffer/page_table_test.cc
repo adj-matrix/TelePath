@@ -76,9 +76,38 @@ void AssertCollidingTagsShareBucketsCorrectly() {
   assert(!page_table.LookupFrameId({41, 0}).has_value());
 }
 
+void AssertReplaceUnlessLiveReturnsLiveOwner() {
+  telepath::BufferManagerPageTable page_table(16, 4);
+  const telepath::BufferTag victim_tag{51, 0};
+  const telepath::BufferTag wanted_tag{51, 1};
+  page_table.Install(wanted_tag, 2);
+  page_table.Install(victim_tag, 5);
+
+  auto existing = page_table.ReplaceUnlessLive(&victim_tag, wanted_tag, 5, [](telepath::FrameId) { return true; });
+  assert(existing.has_value() && existing.value() == 2);
+  assert(page_table.LookupFrameId(wanted_tag).value() == 2);
+  assert(!page_table.LookupFrameId(victim_tag).has_value());
+}
+
+// A stale mapping (the frame was reserved for another tag but not remapped
+// yet) must not block the install.
+void AssertReplaceUnlessLiveIgnoresStaleMapping() {
+  telepath::BufferManagerPageTable page_table(16, 1);
+  const telepath::BufferTag wanted_tag{52, 1};
+  page_table.Install(wanted_tag, 3);
+
+  auto existing = page_table.ReplaceUnlessLive(nullptr, wanted_tag, 6, [](telepath::FrameId frame) { return frame != 3; });
+  assert(!existing.has_value());
+  assert(page_table.LookupFrameId(wanted_tag).value() == 6);
+  page_table.Replace(wanted_tag, {52, 2}, 3);
+  assert(page_table.LookupFrameId(wanted_tag).value() == 6);
+}
+
 }  // namespace
 
 int main() {
+  AssertReplaceUnlessLiveReturnsLiveOwner();
+  AssertReplaceUnlessLiveIgnoresStaleMapping();
   AssertInstallLookupAndRemoveRespectFrameId();
   AssertReplaceWithSingleStripeMovesMapping();
   AssertReplaceAcrossStripesMovesMapping();

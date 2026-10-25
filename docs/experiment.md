@@ -87,7 +87,11 @@ Six policies are available through `--replacer` (Web console and `REPLACER`/`REP
 
 ## Prefetching
 
-`--prefetch-distance N` (`PREFETCH_DISTANCE=N`, or the Web console field; 0 disables it) makes sequential reads (`sequential_shared`, `sequential_disjoint`, and the scan phase of `scan_pollution`) call `PrefetchBuffer()` for the next `N` blocks whenever a thread reaches a block that is a multiple of `N`. The window has to cover the asynchronous hand-off latency: with data in the OS page cache, distances of 128–256 blocks beat synchronous reads while 16–64 are slower, because the reader catches up with reads still in flight. To measure the miss path itself, use `uniform` with a dataset much larger than the pool and `--sync-on-write false`.
+`--prefetch-distance N` (`PREFETCH_DISTANCE=N`, or the Web console field; 0 disables it) makes sequential reads (`sequential_shared`, `sequential_disjoint`, and the scan phase of `scan_pollution`) call `PrefetchBuffer()` for the next `N` blocks whenever a thread reaches a block that is a multiple of `N`. The window has to cover the asynchronous hand-off latency: with data in the OS page cache, distances of 128–256 blocks beat synchronous reads while 16–64 are slower, because the reader catches up with reads still in flight. To measure the miss path itself, use `uniform` with a dataset much larger than the pool.
+
+`--foreground-writeback direct|queued` (`FOREGROUND_WRITEBACK`, Web console select; default `direct`) chooses who writes a dirty eviction victim or a `FlushBuffer()` page: the requesting thread, or a flush worker through the scheduler's foreground queue. Compare them under `--write-percent` to see the cost of the hand-off.
+
+`--sync-on-write` defaults to `false`, matching the library: writebacks reach the OS page cache and `--flush-all-after-run true` makes them durable at the end. Pass `true` to measure a sync per page write.
 
 ## Local Collection
 

@@ -99,7 +99,10 @@ auto PosixDiskBackend::GetCapabilities() const -> DiskBackendCapabilities {
 auto PosixDiskBackend::Execute(const DiskRequest &request) -> Status {
   Result<int> fd = files_->Acquire(request.tag.file_id);
   if (!fd.has_value()) return PropagateError(fd);
-  Status status = request.operation == DiskOperation::kRead ? ExecuteRead(fd.value(), request) : ExecuteWrite(fd.value(), request);
+  Status status = Ok();
+  if (request.operation == DiskOperation::kRead) status = ExecuteRead(fd.value(), request);
+  else if (request.operation == DiskOperation::kWrite) status = ExecuteWrite(fd.value(), request);
+  else if (fdatasync(fd.value()) != 0) status = IoError("fdatasync failed", errno);
   files_->Release(request.tag.file_id);
   return status;
 }

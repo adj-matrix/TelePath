@@ -116,7 +116,7 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 
 ## 6. Phases
 
-**Progress:** phases 0, 1a–1e, 2, and 3 are implemented; see section 7.
+**Progress:** phases 0, 1a–1e, 2, and 3 are implemented, and phase 4 except the observation plane, which is reserved; see section 7.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
@@ -224,4 +224,43 @@ Prefetching a sequential scan (`sequential_disjoint`, 1 thread, same dataset; da
 | io_uring | 355 K ops/s, p99 7.0 µs | 449 K ops/s, p99 2.4 µs | 554 K ops/s, p99 2.2 µs |
 
 Distances of 16–64 blocks are slower than no prefetch here: the reader catches up with reads still in flight and waits for them. The prefetch window must cover the asynchronous hand-off latency; with real device latency the gain is larger.
+
+### Phase 4
+
+- **Miss path without a miss table**: `BufferManagerMissCoordinator` (a mutex, a `shared_ptr` state, and a condition variable per miss) is gone. A thread that misses reserves a frame and installs the tag with `BufferManagerPageTable::ReplaceUnlessLive`, which, under the stripe lock, refuses when another frame is live for the tag (not `Free`, same tag in its descriptor); the loser returns its frame and retries. Readers that find a frame `Loading` with their tag sleep on its control word (`WaitForLoad`) and retry the lookup when it changes, as PostgreSQL's `WaitIO` does. After a failed load the waiters retry the read themselves instead of receiving the loader's error. See `docs/concurrency.md`, section 5.5.
+- **Transient exhaustion**: concurrent misses on one page each reserve a frame before learning at install time that they lost, so a small pool can be briefly all pinned (`same_page_miss_failure_recovery_test`, 6 threads on a 4-frame pool, failed 5 of 300 TSAN runs with `kResourceExhausted`). `ReserveFrameForTag()` now also retries while any frame is `Loading` and fails only when every frame is pinned by a resident page.
+- **Free list**: a lock-free stack of frame indices with a versioned head (`src/cpp/lib/buffer/frame_free_list.h`) replaces the mutex-protected vector.
+- **Fix**: `ReleaseToFree` used to clear the whole control word, including a shared latch that `FlushAll()` may hold on any frame, so the later release underflowed the word to `0xffffff00`. It now keeps the latch bits. The bug predates phase 4 (load failures), but the new install race made it reachable under `stress_integrity_test`.
+- **Durability contract**: `DiskBackendOptions::sync_on_write` now defaults to `false`, so a writeback completes once the OS has the bytes. `DiskOperation::kSync` makes a file's completed writes durable (POSIX `fdatasync`, io_uring `IORING_OP_FSYNC` with `IORING_FSYNC_DATASYNC`). The manager records files written since the last sync; `FlushAll()` writes every dirty page and then syncs those files, re-recording them if a sync fails. `Close()` refuses while any page is pinned, otherwise runs `FlushAll()`, stops background work, and moves the manager to a closed state where calls return `kUnavailable`. Destroying a manager does not write dirty pages. Writes to different pages have no relative order. Benchmark, Web console, and scripts default to `sync_on_write=false` as well.
+- **Pre-write hook**: `BufferManagerOptions::pre_write_hook(tag, page)` runs on the thread that schedules a writeback, with the stable snapshot, before submission; an error fails that writeback and keeps the page dirty. It is the place to enforce the WAL rule without the kernel knowing the page format.
+- **Observation plane (reserved)**: `BufferManagerOptions::observation` (`ObservationOptions{enabled, shared_memory_name}`) fixes the configuration surface; `Create()` rejects `enabled` with `kUnavailable` until it is implemented.
+- **Rejected: asynchronous writeback.** Flush workers that submit writes as `kAsync` and let completions finish the tasks were implemented and measured, and were slower: every write gained a hand-off to the backend's worker pool and to the single reaper thread, which became the serialization point. Flush workers keep submitting `kWait` batches and reaping them themselves.
+
+Write-heavy miss workload (`uniform`, 50% writes, pool 1024, dataset 32768 blocks, 4 flush workers, ops/s):
+
+| Backend | Threads | Workers wait (kept) | Asynchronous writeback (rejected) |
+| --- | --- | --- | --- |
+| POSIX | 1 | 28 K | 23 K |
+| POSIX | 4 | 76 K | 30 K |
+| POSIX | 16 | 293 K | 36 K |
+| io_uring | 1 | 23 K | 16 K |
+| io_uring | 4 | 48 K | 23 K |
+| io_uring | 16 | 146 K | 42 K |
+
+- **Foreground writeback modes** (`BufferManagerOptions::foreground_writeback`): single-page flushes, meaning dirty eviction victims and every `FlushBuffer()` overload, either go through the flush workers (`ForegroundWriteback::kQueued`, the previous behavior, sharing batching and the burst limit with background writeback) or are written by the requesting thread itself (`kDirect`, the default, as PostgreSQL does). Both paths share snapshotting, the pre-write hook, and the `BeginWriteback`/`CompleteWriteback` transitions; only who submits and reaps the write differs. `FlushAll()` and the background cleaner always use the workers. `async_flush_scheduler_test` runs in queued mode, which is what it specifies. Benchmark flag `--foreground-writeback`.
+
+Same write-heavy workload with the default worker count, ops/s:
+
+| Backend | Threads | `kQueued` | `kDirect` |
+| --- | --- | --- | --- |
+| POSIX | 1 | 39 K | 294 K |
+| POSIX | 4 | 75 K | 451 K |
+| POSIX | 16 | 224 K | 302 K |
+| io_uring | 1 | 24 K | 50 K |
+| io_uring | 4 | 51 K | 87 K |
+| io_uring | 16 | 129 K | 128 K |
+
+io_uring gains less because the kernel usually punts buffered writes to its io-wq workers, so a direct write still waits for a thread hand-off inside the kernel.
+
+Read-only miss path (same setup as the phase 3 table, ops/s, phase 3 → phase 4): POSIX 442 K → 555 K (1 thread), 766 K → 861 K (4), 759 K → 748 K (16); io_uring 383 K → 456 K, 835 K → 1006 K, 990 K → 1067 K. The 16-thread plateau remains and has not been located yet.
 

@@ -1,13 +1,13 @@
 #include "telepath/buffer/buffer_manager.h"
 
 #include <thread>
+#include <tuple>
 #include <utility>
 
 #include "buffer_manager_observer.h"
 #include "frame_control.h"
 #include "frame_memory_pool.h"
 #include "io_engine.h"
-#include "miss_coordinator.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -18,67 +18,41 @@ auto BufferManager::PinPage(const BufferTag &tag, BufferAccessStrategy *strategy
   if (Status usable = CheckUsable(); !usable.has_value()) return PropagateError(usable);
   const bool record_access = strategy == nullptr || strategy->RecordsAccesses();
 
-  if (auto resident_hit = TryReadResidentHit(tag, record_access); resident_hit.has_value()) return resident_hit.value();
-
-  auto registration = miss_coordinator_->RegisterOrJoin(tag);
-  if (!registration.is_owner) return AwaitJoinedMiss(tag, registration.state, strategy);
-
-  if (auto owner_hit = TryReadResidentHit(tag, record_access); owner_hit.has_value()) {
-    miss_coordinator_->Complete(tag, registration.state, Ok(), owner_hit.value());
-    return owner_hit.value();
-  }
-  return LoadMissOwnerBuffer(tag, registration.state, strategy);
-}
-
-auto BufferManager::TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId> {
-  auto frame_id = page_table_->LookupFrameId(tag);
-  if (!frame_id.has_value()) return std::nullopt;
-  if (!TryPinResidentFrame(frame_id.value(), tag, record_access)) return std::nullopt;
-
-  observer_->RecordResidentHit(tag);
-  return frame_id.value();
-}
-
-auto BufferManager::AwaitJoinedMiss(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state, BufferAccessStrategy *strategy) -> Result<FrameId> {
-  const bool record_access = strategy == nullptr || strategy->RecordsAccesses();
-  auto joined_state = state;
+  bool waited = false;
   while (true) {
-    Result<FrameId> wait_result = miss_coordinator_->Wait(joined_state);
-    if (!wait_result.has_value()) return PropagateError(wait_result);
-
-    if (wait_result.value() != kInvalidFrameId && TryPinResidentFrame(wait_result.value(), tag, record_access)) {
-      observer_->RecordJoinedMissHit(tag);
-      return wait_result.value();
+    FrameId frame_id = kInvalidFrameId;
+    const ResidentProbe probe = ProbeResident(tag, record_access, &frame_id);
+    if (probe == ResidentProbe::kPinned) {
+      if (waited) observer_->RecordJoinedMissHit(tag);
+      else observer_->RecordResidentHit(tag);
+      return frame_id;
     }
-
-    if (auto resident_hit = TryReadResidentHit(tag, record_access); resident_hit.has_value()) return resident_hit.value();
-
-    auto registration = miss_coordinator_->RegisterOrJoin(tag);
-    if (!registration.is_owner) {
-      joined_state = registration.state;
+    if (probe == ResidentProbe::kLoading) {
+      WaitForLoad(frame_id, tag);
+      waited = true;
       continue;
     }
 
-    if (auto owner_hit = TryReadResidentHit(tag, record_access); owner_hit.has_value()) {
-      miss_coordinator_->Complete(tag, registration.state, Ok(), owner_hit.value());
-      return owner_hit.value();
-    }
-    return LoadMissOwnerBuffer(tag, registration.state, strategy);
+    Result<std::optional<FrameId>> loaded = LoadPage(tag, strategy);
+    if (!loaded.has_value()) return PropagateError(loaded);
+    if (loaded->has_value()) return loaded->value();
   }
 }
 
-auto BufferManager::LoadMissOwnerBuffer(const BufferTag &tag, const std::shared_ptr<BufferManagerMissState> &state, BufferAccessStrategy *strategy) -> Result<FrameId> {
-  observer_->RecordReadMiss(tag);
+auto BufferManager::ProbeResident(const BufferTag &tag, bool record_access, FrameId *frame_id) -> ResidentProbe {
+  const std::optional<FrameId> mapped = page_table_->LookupFrameId(tag);
+  if (!mapped.has_value()) return ResidentProbe::kAbsent;
+  *frame_id = mapped.value();
+  if (TryPinResidentFrame(*frame_id, tag, record_access)) return ResidentProbe::kPinned;
+  if (IsLoadingTag(*frame_id, tag)) return ResidentProbe::kLoading;
+  return ResidentProbe::kAbsent;
+}
 
-  Result<FrameReservation> reserve_result = ReserveFrameForTag(tag, strategy);
-  if (!reserve_result.has_value()) {
-    miss_coordinator_->Complete(tag, state, PropagateError(reserve_result), kInvalidFrameId);
-    return PropagateError(reserve_result);
-  }
-
-  Result<FrameId> frame_result = CompleteReservation(tag, reserve_result.value());
-  miss_coordinator_->Complete(tag, state, frame_result.has_value() ? Ok() : PropagateError(frame_result), frame_result.value_or(kInvalidFrameId));
-  return frame_result;
+auto BufferManager::TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId> {
+  FrameId frame_id = kInvalidFrameId;
+  if (ProbeResident(tag, record_access, &frame_id) != ResidentProbe::kPinned) return std::nullopt;
+  observer_->RecordResidentHit(tag);
+  return frame_id;
 }
 
 bool BufferManager::TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access) {
@@ -93,38 +67,70 @@ bool BufferManager::TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, 
   return true;
 }
 
-auto BufferManager::ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameReservation> {
-  if (auto ring_reservation = TryReserveRingFrame(tag, strategy); ring_reservation.has_value()) return ring_reservation.value();
+bool BufferManager::IsLoadingTag(FrameId frame_id, const BufferTag &tag) const {
+  const BufferDescriptor &descriptor = descriptors_[frame_id];
+  return frame_control::State(descriptor.control.load(std::memory_order_acquire)) == BufferFrameState::kLoading && LoadTag(descriptor) == tag;
+}
+
+void BufferManager::WaitForLoad(FrameId frame_id, const BufferTag &tag) {
+  frame_control::WaitWhile(descriptors_[frame_id].control, [&](std::uint32_t) { return IsLoadingTag(frame_id, tag); });
+}
+
+bool BufferManager::IsLiveFor(FrameId frame_id, const BufferTag &tag) const {
+  const BufferDescriptor &descriptor = descriptors_[frame_id];
+  return frame_control::State(descriptor.control.load(std::memory_order_acquire)) != BufferFrameState::kFree && LoadTag(descriptor) == tag;
+}
+
+auto BufferManager::LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameId>> {
+  Result<std::optional<FrameReservation>> reserved = ReserveFrameForTag(tag, strategy);
+  if (!reserved.has_value()) return PropagateError(reserved);
+  if (!reserved->has_value()) return std::optional<FrameId>{};
+
+  observer_->RecordReadMiss(tag);
+  Result<FrameId> frame = CompleteReservation(tag, reserved->value());
+  if (!frame.has_value()) return PropagateError(frame);
+  return std::optional<FrameId>{frame.value()};
+}
+
+auto BufferManager::ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameReservation>> {
+  FrameReservation reservation;
+  const FrameReservationOutcome ring_outcome = TryReserveRingFrame(tag, strategy, &reservation);
+  if (ring_outcome == FrameReservationOutcome::kReserved) return std::optional<FrameReservation>{reservation};
+  if (ring_outcome == FrameReservationOutcome::kTagExists) return std::optional<FrameReservation>{};
 
   while (true) {
-    Result<FrameId> frame_result = AcquireReservationFrame();
-    if (!frame_result.has_value()) {
-      if (frame_result.error().code() != ErrorCode::kResourceExhausted || !HasUnpinnedFrame()) return PropagateError(frame_result);
-      std::this_thread::yield();
-      continue;
-    }
-    const FrameId frame_id = frame_result.value();
+    Result<FrameId> victim = AcquireVictimFrame();
+    if (!victim.has_value()) return PropagateError(victim);
+    Result<FrameReservationOutcome> outcome = ReserveVictim(victim.value(), tag, &reservation);
+    if (!outcome.has_value()) return PropagateError(outcome);
 
-    FrameReservation reservation;
-    FrameReservationOutcome outcome = TryReserveFrameForTag(frame_id, tag, true, &reservation);
-    if (outcome == FrameReservationOutcome::kNeedsFlush) {
-      Status flush_status = FlushVictimBeforeReuse(frame_id);
-      if (!flush_status.has_value()) return PropagateError(flush_status);
-      outcome = TryReserveFrameForTag(frame_id, tag, false, &reservation);
-    }
-    if (outcome != FrameReservationOutcome::kReserved) continue;
-    if (strategy != nullptr) strategy->RememberRingFrame(frame_id);
-    return reservation;
+    if (outcome.value() == FrameReservationOutcome::kTagExists) return std::optional<FrameReservation>{};
+    if (outcome.value() != FrameReservationOutcome::kReserved) continue;
+    if (strategy != nullptr) strategy->RememberRingFrame(victim.value());
+    return std::optional<FrameReservation>{reservation};
   }
 }
 
-auto BufferManager::TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy) -> std::optional<FrameReservation> {
-  if (strategy == nullptr) return std::nullopt;
+auto BufferManager::AcquireVictimFrame() -> Result<FrameId> {
+  while (true) {
+    Result<FrameId> frame = AcquireReservationFrame();
+    if (frame.has_value() || frame.error().code() != ErrorCode::kResourceExhausted || !HasTransientFrame()) return frame;
+    std::this_thread::yield();
+  }
+}
+
+auto BufferManager::ReserveVictim(FrameId frame_id, const BufferTag &tag, FrameReservation *reservation) -> Result<FrameReservationOutcome> {
+  const FrameReservationOutcome outcome = TryReserveFrameForTag(frame_id, tag, true, reservation);
+  if (outcome != FrameReservationOutcome::kNeedsFlush) return outcome;
+  if (Status flushed = FlushVictimBeforeReuse(frame_id); !flushed.has_value()) return PropagateError(flushed);
+  return TryReserveFrameForTag(frame_id, tag, false, reservation);
+}
+
+auto BufferManager::TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy, FrameReservation *reservation) -> FrameReservationOutcome {
+  if (strategy == nullptr) return FrameReservationOutcome::kRejected;
   const FrameId ring_frame = strategy->NextRingFrame();
-  if (ring_frame == kInvalidFrameId || ring_frame >= pool_size_) return std::nullopt;
-  FrameReservation reservation;
-  if (TryReserveFrameForTag(ring_frame, tag, false, &reservation) != FrameReservationOutcome::kReserved) return std::nullopt;
-  return reservation;
+  if (ring_frame == kInvalidFrameId || ring_frame >= pool_size_) return FrameReservationOutcome::kRejected;
+  return TryReserveFrameForTag(ring_frame, tag, false, reservation);
 }
 
 auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReservation &reservation) -> Result<FrameId>{

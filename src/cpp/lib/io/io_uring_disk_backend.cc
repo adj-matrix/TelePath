@@ -229,9 +229,16 @@ auto IoUringDiskBackend::PrepareLocked(Ring &ring, std::size_t ring_index, const
   context->request = request;
   context->ring = ring_index;
   context->fd = fd.value();
-  context->total_bytes = request.block_count * geometry_.block_size();
   context->sync = sync;
   context->pending_cqes = sync ? 2 : 1;
+  if (request.operation == DiskOperation::kSync) {
+    io_uring_sqe *sync_sqe = io_uring_get_sqe(&ring.ring);
+    io_uring_prep_fsync(sync_sqe, context->fd, IORING_FSYNC_DATASYNC);
+    io_uring_sqe_set_data(sync_sqe, context);
+    in_flight_.fetch_add(1);
+    return context;
+  }
+  context->total_bytes = request.block_count * geometry_.block_size();
   for (std::uint32_t i = 0; i < request.block_count; ++i) context->iov[i] = iovec{request.buffers[i], geometry_.block_size()};
 
   const off_t offset = static_cast<off_t>(geometry_.BlockOffset(request.tag.block_id));
@@ -355,7 +362,9 @@ auto IoUringDiskBackend::FinishContext(RequestContext *context) -> DiskCompletio
   const DiskRequest &request = context->request;
   const int result = context->transfer_result;
   Status status = Ok();
-  if (result < 0) {
+  if (request.operation == DiskOperation::kSync) {
+    if (result < 0) status = IoError("fdatasync failed", -result);
+  } else if (result < 0) {
     status = IoError(request.operation == DiskOperation::kRead ? "io_uring read failed" : "io_uring write failed", -result);
   } else if (request.operation == DiskOperation::kRead) {
     ZeroFillReadTail(request, geometry_.block_size(), context->done_bytes + static_cast<std::size_t>(result));

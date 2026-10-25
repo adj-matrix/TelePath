@@ -28,7 +28,7 @@ class PosixDiskBackend : public DiskBackend {
     BlockGeometry geometry,
     bool is_fallback_backend = false,
     std::size_t max_open_files = 64,
-    bool sync_on_write = true,
+    bool sync_on_write = false,
     std::size_t io_worker_count = 4
   );
   ~PosixDiskBackend() override;

@@ -201,6 +201,19 @@ void AssertFileDescriptorCacheEvictsLeastRecentlyUsedFile(const std::filesystem:
 #endif
 }
 
+void AssertSyncRequestCompletes(telepath::DiskBackend &backend) {
+  telepath::DiskRequest sync;
+  sync.token = 501;
+  sync.operation = telepath::DiskOperation::kSync;
+  sync.tag = {19, 0};
+  sync.block_count = 0;
+  assert(telepath::test_support::SubmitOne(backend, sync).has_value());
+  auto completion = telepath::test_support::ReapOne(backend);
+  assert(completion.has_value());
+  assert(completion.value().token == 501);
+  assert(completion.value().status.has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +222,10 @@ int main() {
   AssertMalformedRequestsRejected(root_guard.path());
   AssertWaitModeCompletesOnCallingThread(root_guard.path());
   AssertMultiBlockRequestsRoundTrip(root_guard.path());
+  {
+    telepath::PosixDiskBackend sync_backend(root_guard.path().string(), telepath::BlockGeometry::Of<4096>());
+    AssertSyncRequestCompletes(sync_backend);
+  }
   AssertShutdownDrainsPendingWrites(root_guard.path());
   AssertRepeatedAccessReusesAndClosesFileDescriptor(root_guard.path());
   AssertFileDescriptorCacheEvictsLeastRecentlyUsedFile(root_guard.path());

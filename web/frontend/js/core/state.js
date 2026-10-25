@@ -8,6 +8,8 @@
     sweepReplacerSelect: document.getElementById("sweep_replacer"),
     diskBackendSelect: document.getElementById("disk_backend"),
     sweepDiskBackendSelect: document.getElementById("sweep_disk_backend"),
+    foregroundWritebackSelect: document.getElementById("foreground_writeback"),
+    sweepForegroundWritebackSelect: document.getElementById("sweep_foreground_writeback"),
     runButton: document.getElementById("runButton"),
     sweepButton: document.getElementById("sweepButton"),
     languageSelect: document.getElementById("languageSelect"),

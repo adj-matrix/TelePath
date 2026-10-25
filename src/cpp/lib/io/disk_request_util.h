@@ -10,6 +10,7 @@
 namespace telepath {
 
 inline auto ValidateDiskRequest(const DiskRequest &request, std::size_t max_request_blocks) -> Status {
+  if (request.operation == DiskOperation::kSync) return Ok();
   if (request.block_count == 0 || request.block_count > max_request_blocks) return InvalidArgument("disk request block count is out of range");
   for (std::uint32_t i = 0; i < request.block_count; ++i) {
     if (request.buffers[i] == nullptr) return InvalidArgument("disk request buffer must not be null");
