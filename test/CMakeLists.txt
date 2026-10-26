@@ -392,6 +392,22 @@ target_link_libraries(telepath_durability_test PRIVATE telepath)
 
 add_test(NAME telepath_durability_test COMMAND telepath_durability_test)
 
+add_executable(telepath_rec_lsn_test
+  cpp/buffer/rec_lsn_test.cc
+)
+
+target_link_libraries(telepath_rec_lsn_test PRIVATE telepath)
+
+add_test(NAME telepath_rec_lsn_test COMMAND telepath_rec_lsn_test)
+
+add_executable(telepath_shared_memory_test
+  cpp/buffer/shared_memory_test.cc
+)
+
+target_link_libraries(telepath_shared_memory_test PRIVATE telepath)
+
+add_test(NAME telepath_shared_memory_test COMMAND telepath_shared_memory_test)
+
 add_executable(telepath_async_read_test
   cpp/buffer/async_read_test.cc
 )
@@ -478,7 +494,21 @@ if(TELEPATH_PYTHON3)
            COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/web_backend_parser_test.py)
   add_test(NAME telepath_web_frontend_contract_test
            COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/web_frontend_contract_test.py)
+  add_test(NAME telepath_observation_reader_test
+           COMMAND ${TELEPATH_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/python/observation_reader_test.py)
 endif()
+
+add_executable(telepath_observation_test
+  cpp/buffer/observation_test.cc
+)
+
+target_link_libraries(telepath_observation_test PRIVATE telepath)
+target_compile_definitions(telepath_observation_test PRIVATE TELEPATH_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+if(TELEPATH_PYTHON3)
+  target_compile_definitions(telepath_observation_test PRIVATE TELEPATH_PYTHON3="${TELEPATH_PYTHON3}")
+endif()
+
+add_test(NAME telepath_observation_test COMMAND telepath_observation_test)
 
 add_executable(telepath_benchmark
   cpp/benchmark/benchmark_main.cc

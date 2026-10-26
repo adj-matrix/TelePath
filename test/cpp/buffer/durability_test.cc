@@ -176,16 +176,6 @@ void ExpectPreWriteHookSeesSnapshotAndCanFail() {
   assert(PersistedByte(fixture.root.path(), 5, 2) == std::byte{0x52});
 }
 
-void ExpectObservationIsReserved() {
-  telepath::buffer_test_support::TestRootGuard root("telepath_durability_observation");
-  telepath::BufferManagerOptions options;
-  options.pool_size = 4;
-  options.page_size = kPageSize;
-  options.observation.enabled = true;
-  auto created = telepath::BufferManager::Create(options, std::make_unique<telepath::PosixDiskBackend>(root.path().string(), telepath::BlockGeometry::Of<kPageSize>()), telepath::MakeClockReplacer(4), nullptr);
-  assert(!created.has_value() && created.error().code() == telepath::ErrorCode::kUnavailable);
-}
-
 void ExpectZeroAndLockKeepsResidentContents() {
   Fixture fixture("telepath_durability_zero_and_lock");
   {
@@ -252,6 +242,5 @@ int main() {
   ExpectFailedSyncIsRetried();
   ExpectCloseFlushesAndRejectsLaterCalls();
   ExpectPreWriteHookSeesSnapshotAndCanFail();
-  ExpectObservationIsReserved();
   return 0;
 }

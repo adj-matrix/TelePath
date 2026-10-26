@@ -15,7 +15,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+try:
+    from .observation import ObservationError, read_observation
+except ImportError:
+    from observation import ObservationError, read_observation
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -730,6 +735,17 @@ def snapshot_session_state() -> dict[str, Any]:
     }
 
 
+def observation_response(query: dict[str, list[str]]) -> tuple[HTTPStatus, dict[str, Any]]:
+    name = query.get("name", [""])[0]
+    include_frames = query.get("frames", ["1"])[0] not in {"0", "false"}
+    try:
+        return HTTPStatus.OK, read_observation(name, include_frames=include_frames)
+    except ValueError as exc:
+        return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+    except ObservationError as exc:
+        return HTTPStatus.NOT_FOUND, {"error": str(exc)}
+
+
 class TelePathDemoHandler(BaseHTTPRequestHandler):
     server_version = "TelePathDemo/0.2"
 
@@ -780,6 +796,11 @@ class TelePathDemoHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/session":
             self.respond_json(HTTPStatus.OK, snapshot_session_state())
+            return
+
+        if parsed.path == "/api/observation":
+            status, payload = observation_response(parse_qs(parsed.query))
+            self.respond_json(status, payload)
             return
 
         self.serve_static(parsed.path)

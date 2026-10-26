@@ -85,7 +85,18 @@ Consequences for the flush entry points:
 - `FlushBuffer(ExclusiveBufferHandle&)` runs exactly one round: it persists the current bytes, and the page stays dirty while the handle lives (the holder may still write through a view obtained earlier).
 - `FlushBuffer(const SharedBufferHandle&)`, `FlushBuffer(file, block)`, `FlushAll()`, and victim writeback loop until the page is clean. With a shared holder or no holder, writers can only add rounds, so the loop terminates once writes stop.
 
-### 4.4 One Writer per Page
+### 4.4 recLSN
+
+Each descriptor carries `rec_lsn` (the earliest LSN reported through `ExclusiveBufferHandle::MarkDirty(lsn)` since the last writeback snapshot) and `writeback_rec_lsn` (the `rec_lsn` that the writeback in flight covers). A page's recLSN is the smaller valid one of the two.
+
+- `MarkDirty(lsn)` lowers `rec_lsn` with a CAS after marking the page dirty, under the exclusive latch.
+- Taking a writeback snapshot (under the shared latch, or by the exclusive holder for `FlushBuffer(ExclusiveBufferHandle&)`) stores `rec_lsn` into `writeback_rec_lsn`, then resets `rec_lsn`. The latch keeps writers out, and a reader loads `rec_lsn` before `writeback_rec_lsn`, so it never sees the recLSN in neither field.
+- Before the completion CAS (while the writeback flag still blocks a new snapshot): success resets `writeback_rec_lsn`; failure and a cancelled writeback lower `rec_lsn` to `writeback_rec_lsn` and leave `writeback_rec_lsn` until the next snapshot overwrites it. A change made during the writeback is already in `rec_lsn`, so the page's recLSN moves to that change's LSN instead of staying at the old one.
+- Dropping a page resets both fields. Every other way a frame is freed or reused requires the page to be clean, which a successful writeback reached.
+
+`CheckpointBuffers(lsn)` writes back pages whose recLSN is below `lsn` until each is at or above `lsn` or untracked, then syncs every written file.
+
+### 4.5 One Writer per Page
 
 At any time, a page has at most one resident frame, and each frame has at most one writeback queued or active. Writes for one page therefore cannot be reordered on disk.
 
@@ -159,3 +170,5 @@ Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`,
 - A thread must not hold two handles on the same page; `ReadBuffer` followed by `ReadBufferExclusive` on the same page in one thread deadlocks. Debug detection is not implemented yet.
 - There is no in-place upgrade: release the `SharedBufferHandle`, acquire an `ExclusiveBufferHandle`, and re-check.
 - Pin counts saturate at 32767 per frame; further pins yield until one is released.
+- Cross-process mode (`SharedMemoryOptions`) assumes every attached process stays alive while it holds a pin, latch, or `Loading` frame. A process that dies there leaves the frame pinned, latched, or loading for the others, and only removing the segment recovers; crash recovery is designed separately (phase 6e).
+- In cross-process mode a frame waits only on its control word, so a process may wait for a load or writeback another process started. Per-process state (I/O tokens, flush tasks, access batches, the cleaner) never crosses processes.

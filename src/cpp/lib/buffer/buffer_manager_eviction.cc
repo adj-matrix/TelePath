@@ -79,7 +79,9 @@ auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Stat
         result = InvalidArgument("a page in the dropped range is in use");
         break;
       }
-      if (frame_control::IsDirty(previous)) dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
+      if (frame_control::IsDirty(previous)) dirty_page_count_->fetch_sub(1, std::memory_order_acq_rel);
+      descriptor.rec_lsn.store(kInvalidLsn, std::memory_order_release);
+      descriptor.writeback_rec_lsn.store(kInvalidLsn, std::memory_order_release);
       page_table_->Remove(tag, frame_id);
       replacer_->Remove(frame_id);
       StoreTag(&descriptor, BufferTag{});

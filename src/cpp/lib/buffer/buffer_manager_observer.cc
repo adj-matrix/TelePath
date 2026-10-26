@@ -93,4 +93,6 @@ void BufferManagerObserver::RecordEvictionFailure(const BufferTag &tag) const {
   telemetry_sink_->RecordEvictionFailure(tag);
 }
 
+auto BufferManagerObserver::Snapshot() const -> TelemetrySnapshot { return telemetry_sink_->Snapshot(); }
+
 }  // namespace telepath

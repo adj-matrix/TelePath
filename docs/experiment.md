@@ -39,7 +39,7 @@ Benchmark runs can export the same point-in-time buffer-pool snapshot through tw
 - `--telemetry-export-path <path>` appends one compact JSON document per run as JSONL.
 - `--telemetry-shm-name /telepath_name` publishes the latest compact JSON document into a POSIX shared-memory object.
 
-The shared-memory path is meant for observation-plane prototype validation. It proves that the telemetry snapshot format can cross a process boundary without changing the buffer manager hot path. It is not yet a live event stream or a final real-time monitoring protocol.
+The shared-memory path is meant for observation-plane prototype validation. It proves that the telemetry snapshot format can cross a process boundary without changing the buffer manager hot path. It is not yet a live event stream or a final real-time monitoring protocol. The live observation plane of a running manager is separate: see `ObservationOptions` and the published binary format in `src/cpp/include/telepath/observation/observation_format.h`, read by `web/backend/observation.py` and served at `GET /api/observation`.
 
 The `snapshot` field in benchmark JSON is the final point-in-time state after the run. The `sampled_snapshots` field is a bounded sampling aid for presentation and diagnosis, not a full trace. The Web console keeps these views separate rather than replacing the final snapshot with a single automatically selected sample.
 

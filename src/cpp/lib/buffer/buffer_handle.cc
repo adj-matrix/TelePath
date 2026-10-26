@@ -71,6 +71,12 @@ auto ExclusiveBufferHandle::mutable_data() noexcept -> std::span<std::byte> {
   return {data_, size_};
 }
 
+void ExclusiveBufferHandle::MarkDirty(Lsn lsn) noexcept {
+  if (manager_ == nullptr) return;
+  manager_->MarkHandleDirty(frame_id_, lsn);
+  marked_dirty_ = true;
+}
+
 void ExclusiveBufferHandle::Reset() noexcept {
   if (manager_ == nullptr) return;
   std::exchange(manager_, nullptr)->ReleaseExclusiveHandle(frame_id_);

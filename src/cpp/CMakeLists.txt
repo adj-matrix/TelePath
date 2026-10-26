@@ -12,6 +12,8 @@ add_library(telepath
   lib/buffer/buffer_manager_flush.cc
   lib/buffer/buffer_manager_handle.cc
   lib/buffer/buffer_manager_lifecycle.cc
+  lib/buffer/observation_publisher.cc
+  lib/buffer/shared_segment.cc
   lib/buffer/buffer_manager_read.cc
   lib/buffer/buffer_manager_observer.cc
   lib/buffer/page_table.cc

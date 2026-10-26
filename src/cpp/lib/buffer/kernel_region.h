@@ -1,6 +1,7 @@
 #ifndef TELEPATH_LIB_BUFFER_KERNEL_REGION_H_
 #define TELEPATH_LIB_BUFFER_KERNEL_REGION_H_
 
+#include <atomic>
 #include <cstddef>
 #include <new>
 
@@ -13,8 +14,14 @@
 
 namespace telepath {
 
+// Counters every process attached to the kernel updates.
+struct KernelShared {
+  std::atomic<std::size_t> dirty_page_count{0};
+};
+
 // Where each piece of kernel metadata and the frames live inside one region.
 struct KernelLayout {
+  std::size_t shared{0};
   std::size_t descriptors{0};
   BufferManagerPageTable::Offsets page_table{};
   FrameFreeList::Offsets free_list{};
@@ -24,6 +31,7 @@ struct KernelLayout {
   static auto For(std::size_t pool_size, std::size_t stripe_count, BlockGeometry geometry) -> KernelLayout {
     StateLayout layout;
     KernelLayout result;
+    result.shared = layout.Add<KernelShared>(1);
     result.descriptors = layout.Add<BufferDescriptor>(pool_size);
     result.page_table = BufferManagerPageTable::Reserve(&layout, pool_size, stripe_count);
     result.free_list = FrameFreeList::Reserve(&layout, pool_size);

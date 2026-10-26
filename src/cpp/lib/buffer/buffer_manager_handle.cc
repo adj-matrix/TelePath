@@ -26,10 +26,11 @@ void BufferManager::ReleaseExclusiveHandle(FrameId frame_id) noexcept {
   ReleaseFrame(frame_id);
 }
 
-void BufferManager::MarkHandleDirty(FrameId frame_id) noexcept {
+void BufferManager::MarkHandleDirty(FrameId frame_id, Lsn lsn) noexcept {
   const std::optional<bool> became_dirty = frame_control::MarkDirty(descriptors_[frame_id].control);
+  frame_control::LowerRecLsn(descriptors_[frame_id].rec_lsn, lsn);
   if (!became_dirty.value_or(false)) return;
-  dirty_page_count_.fetch_add(1, std::memory_order_acq_rel);
+  dirty_page_count_->fetch_add(1, std::memory_order_acq_rel);
   NotifyCleaner();
 }
 

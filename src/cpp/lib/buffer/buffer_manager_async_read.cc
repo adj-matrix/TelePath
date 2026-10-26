@@ -6,6 +6,7 @@
 #include "buffer_manager_observer.h"
 #include "frame_memory_pool.h"
 #include "io_engine.h"
+#include "../sync/futex.h"
 
 namespace telepath {
 
@@ -140,6 +141,7 @@ void BufferManager::SubmitAsyncLoads(std::vector<std::unique_ptr<AsyncLoad>> *lo
   for (std::size_t i = 0; i < loads->size(); ++i) {
     AsyncLoad *load = (*loads)[i].release();
     if (load->operation != nullptr) load->operation->waiter.Add(1);
+    else prefetches_in_flight_.fetch_add(1, std::memory_order_relaxed);
     requests[i].token = reinterpret_cast<uint64_t>(static_cast<IoCompletion *>(load));
     requests[i].operation = DiskOperation::kRead;
     requests[i].tag = load->entries.front().tag;
@@ -162,6 +164,7 @@ void BufferManager::FinishAsyncLoad(AsyncLoad &load, const Status &status) {
     if (load.operation == nullptr) ReleaseFrame(frame_id);
   }
   if (load.operation != nullptr) load.operation->waiter.Complete(status);
+  else if (prefetches_in_flight_.fetch_sub(1, std::memory_order_release) == 1) sync::FutexWakeAll(prefetches_in_flight_);
 }
 
 void BufferManager::FinishReadBuffers(ReadBuffersOperation &operation, bool make_handles, Status *status) {

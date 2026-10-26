@@ -1,6 +1,7 @@
 #include "telepath/buffer/buffer_manager.h"
 
 #include <algorithm>
+#include <typeinfo>
 
 #include "cleaner_controller.h"
 #include "frame_memory_pool.h"
@@ -9,6 +10,7 @@
 #include "frame_free_list.h"
 #include "kernel_region.h"
 #include "page_table.h"
+#include "shared_segment.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
 
@@ -18,7 +20,8 @@ auto BufferManager::Initialize() -> Status {
   if (Status dependency_status = ValidateRuntimeDependencies(); !dependency_status.has_value()) return dependency_status;
   if (Status memory_status = InitializeKernelMemory(); !memory_status.has_value()) return memory_status;
 
-  SeedFreeFrames();
+  if (segment_ == nullptr || segment_->created()) SeedFreeFrames();
+  if (segment_ != nullptr && segment_->created()) segment_->MarkReady();
   ResolveCleanerOptions();
   const DiskBackendCapabilities capabilities = disk_backend_->GetCapabilities();
   options_.flush_worker_count = ResolveFlushWorkerCount(capabilities);
@@ -35,6 +38,11 @@ auto BufferManager::Initialize() -> Status {
   if (Status cleaner_status = StartCleanerController(); !cleaner_status.has_value()) {
     StopFlushPipeline(Unavailable("failed to start background cleaner"));
     return cleaner_status;
+  }
+
+  if (Status observation_status = StartObservation(); !observation_status.has_value()) {
+    StopFlushPipeline(Unavailable("failed to start the observation plane"));
+    return observation_status;
   }
   return Ok();
 }
@@ -61,13 +69,31 @@ auto BufferManager::failure() const -> std::optional<Error> {
 auto BufferManager::InitializeKernelMemory() -> Status {
   if (Status valid = FrameMemoryPool::Validate(pool_size_, geometry_); !valid.has_value()) return valid;
   const KernelLayout layout = KernelLayout::For(pool_size_, options_.page_table_stripe_count, geometry_);
-  region_ = std::make_unique<KernelRegion>(layout.bytes);
-  if (region_->base() == nullptr) return ResourceExhausted("failed to allocate kernel memory");
+  std::byte *base = nullptr;
+  bool initialize = true;
+  if (options_.shared_memory.name.empty()) {
+    region_ = std::make_unique<KernelRegion>(layout.bytes);
+    if (region_->base() == nullptr) return ResourceExhausted("failed to allocate kernel memory");
+    base = region_->base();
+  } else {
+    const std::size_t replacer_bytes = replacer_->SharedStateBytes();
+    if (replacer_bytes == 0) return InvalidArgument("replacer does not support cross-process mode");
+    const Replacer &replacer = *replacer_;
+    const SharedSegment::Shape shape{geometry_.block_size(), pool_size_, options_.page_table_stripe_count, replacer_bytes, typeid(replacer).name(), layout.bytes};
+    Result<std::unique_ptr<SharedSegment>> segment = SharedSegment::Open(options_.shared_memory, shape);
+    if (!segment.has_value()) return PropagateError(segment);
+    segment_ = std::move(segment.value());
+    initialize = segment_->created();
+    if (Status bound = replacer_->BindSharedState(segment_->replacer_state(), initialize); !bound.has_value()) return bound;
+    base = segment_->kernel_base();
+  }
 
-  std::byte *base = region_->base();
-  descriptors_ = std::span<BufferDescriptor>(ConstructState<BufferDescriptor>(base, layout.descriptors, pool_size_), pool_size_);
-  page_table_ = std::make_unique<BufferManagerPageTable>(pool_size_, options_.page_table_stripe_count, base, layout.page_table, true);
-  free_list_ = std::make_unique<FrameFreeList>(pool_size_, base, layout.free_list, true);
+  KernelShared *shared = initialize ? ConstructState<KernelShared>(base, layout.shared, 1) : StateAt<KernelShared>(base, layout.shared);
+  dirty_page_count_ = &shared->dirty_page_count;
+  BufferDescriptor *descriptors = initialize ? ConstructState<BufferDescriptor>(base, layout.descriptors, pool_size_) : StateAt<BufferDescriptor>(base, layout.descriptors);
+  descriptors_ = std::span<BufferDescriptor>(descriptors, pool_size_);
+  page_table_ = std::make_unique<BufferManagerPageTable>(pool_size_, options_.page_table_stripe_count, base, layout.page_table, initialize);
+  free_list_ = std::make_unique<FrameFreeList>(pool_size_, base, layout.free_list, initialize);
   frame_pool_ = std::make_unique<FrameMemoryPool>(geometry_, base + layout.frames);
   return Ok();
 }
@@ -134,6 +160,16 @@ void BufferManager::StopFlushPipeline(const Status &reason) {
 }
 
 void BufferManager::NoteWrittenFile(FileId file_id) {
+  if (segment_ != nullptr) {
+    SharedWrittenFiles &shared = segment_->written_files();
+    std::lock_guard<sync::FutexMutex> shared_guard(shared.latch);
+    const auto end = shared.files.begin() + shared.count;
+    if (std::find(shared.files.begin(), end, file_id) != end) return;
+    if (shared.count < SharedWrittenFiles::kCapacity) {
+      shared.files[shared.count++] = file_id;
+      return;
+    }
+  }
   std::lock_guard<std::mutex> guard(written_files_latch_);
   if (std::find(written_files_.begin(), written_files_.end(), file_id) == written_files_.end()) written_files_.push_back(file_id);
 }
@@ -143,6 +179,14 @@ auto BufferManager::SyncWrittenFiles() -> Status {
   {
     std::lock_guard<std::mutex> guard(written_files_latch_);
     files.swap(written_files_);
+  }
+  if (segment_ != nullptr) {
+    SharedWrittenFiles &shared = segment_->written_files();
+    std::lock_guard<sync::FutexMutex> shared_guard(shared.latch);
+    for (std::uint32_t index = 0; index < shared.count; ++index) {
+      if (std::find(files.begin(), files.end(), shared.files[index]) == files.end()) files.push_back(shared.files[index]);
+    }
+    shared.count = 0;
   }
   return SyncFiles(std::move(files));
 }

@@ -9,6 +9,7 @@
 namespace telepath {
 
 class TelemetrySink;
+struct TelemetrySnapshot;
 
 class BufferManagerObserver {
  public:
@@ -30,6 +31,7 @@ class BufferManagerObserver {
   void RecordCleanerFlushSkipped() const;
   void RecordEvictionFailure(const BufferTag &tag) const;
   void RecordZeroFill(const BufferTag *evicted_tag) const;
+  auto Snapshot() const -> TelemetrySnapshot;
 
  private:
   void RecordHit(const BufferTag &tag) const;

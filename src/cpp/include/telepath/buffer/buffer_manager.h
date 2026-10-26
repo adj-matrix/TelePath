@@ -4,10 +4,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -26,6 +28,8 @@ namespace telepath {
 class DiskBackend;
 class FrameMemoryPool;
 class KernelRegion;
+class ObservationPublisher;
+class SharedSegment;
 class Replacer;
 class TelemetrySink;
 class BufferManagerObserver;
@@ -74,6 +78,8 @@ struct FrameSnapshot {
   bool io_in_flight{false};
   bool flush_queued{false};
   bool flush_in_flight{false};
+  // See BufferManager::MinRecLsn(); kInvalidLsn when the page has none.
+  Lsn rec_lsn{kInvalidLsn};
 };
 
 struct BufferPoolSnapshot {
@@ -104,6 +110,10 @@ class BufferManager {
     std::unique_ptr<DiskBackend> disk_backend,
     std::unique_ptr<Replacer> replacer,
     std::shared_ptr<TelemetrySink> telemetry_sink) -> Result<std::unique_ptr<BufferManager>>;
+  // Removes the name of a cross-process segment (SharedMemoryOptions), for
+  // example one left behind with remove_when_unused set to false. Processes
+  // still attached keep using it. Returns kNotFound when there is none.
+  static auto RemoveSharedMemory(const std::string &name) -> Status;
 
   BufferManager(const BufferManager &) = delete;
   BufferManager &operator=(const BufferManager &) = delete;
@@ -183,16 +193,38 @@ class BufferManager {
   // kInvalidArgument, after discarding the pages it could, when one of them is
   // pinned; the caller must ensure nobody uses the dropped range.
   auto DropFileBuffers(FileId file_id, BlockId first_block) -> Status;
+
+  // Write-ahead-log support, with LSNs reported through
+  // ExclusiveBufferHandle::MarkDirty(lsn). A page's recLSN is the earliest LSN
+  // of its changes that no completed writeback covers yet; a change made
+  // during a writeback counts toward the next one.
+  //
+  // Returns the minimum recLSN over all pages, including pages whose
+  // writeback is in flight, or nullopt when no page has one. Every change with
+  // a smaller LSN has been written back, but is durable only once synced.
+  auto MinRecLsn() const -> std::optional<Lsn>;
+  // Writes back every page whose recLSN is below `lsn`, waits until each of
+  // those writebacks completed, and makes every completed writeback durable,
+  // like PostgreSQL's CheckPointBuffers(). Afterwards every change logged
+  // below `lsn` before the call is durable. Changes logged below `lsn` while
+  // it runs are written as well. Must not be called by a thread that holds an
+  // ExclusiveBufferHandle.
+  auto CheckpointBuffers(Lsn lsn) -> Status;
   // Runs FlushAll(), stops background work, and closes the manager: afterwards
   // every operation returns ErrorCode::kUnavailable. Waits for loads in flight,
   // such as prefetches, then returns kInvalidArgument without closing while a
   // handle or read operation still pins a page.
   // Closing a closed manager returns Ok; closing a failed one stops it and
-  // returns kFailed.
+  // returns kFailed. In cross-process mode pins held by other processes do not
+  // block closing, so release this process's handles first; FlushAll() writes
+  // back the dirty pages of every attached process.
   auto Close() -> Status;
   // Returns a point-in-time view of frame metadata for observability and debug
   // tooling. This does not expose direct page memory access.
   auto ExportSnapshot() const -> BufferPoolSnapshot;
+  // Publishes the observation area (ObservationOptions) now instead of waiting
+  // for the next interval. Returns kUnavailable when observation is disabled.
+  auto PublishObservation() -> Status;
 
   std::size_t pool_size() const { return pool_size_; }
   std::size_t page_size() const { return geometry_.block_size(); }
@@ -286,7 +318,8 @@ class BufferManager {
     bool *was_busy,
     bool cleaner_owned
   ) -> Result<std::shared_ptr<BufferManagerFlushTask>>;
-  auto WriteBackFrames(bool (*selected)(const BufferTag &tag, FileId file_id), FileId file_id) -> Status;
+  auto WriteBackFrames(const std::function<bool(FrameId)> &selected) -> Status;
+  static auto FrameRecLsn(const BufferDescriptor &descriptor) -> Lsn;
   auto SyncFiles(std::vector<FileId> files) -> Status;
   auto WaitForScheduledFlushes(const std::vector<std::shared_ptr<BufferManagerFlushTask>> &tasks) -> Status;
   auto FlushBusyFrames(const std::vector<FrameId> &frame_ids) -> Status;
@@ -343,7 +376,7 @@ class BufferManager {
   auto MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag) -> ExclusiveBufferHandle;
   void ReleaseSharedHandle(FrameId frame_id) noexcept;
   void ReleaseExclusiveHandle(FrameId frame_id) noexcept;
-  void MarkHandleDirty(FrameId frame_id) noexcept;
+  void MarkHandleDirty(FrameId frame_id, Lsn lsn = kInvalidLsn) noexcept;
   void ReleaseFrame(FrameId frame_id) noexcept;
 
   // buffer_manager_lifecycle.cc
@@ -363,12 +396,15 @@ class BufferManager {
   auto StartFlushScheduler() -> Status;
   void StopFlushPipeline(const Status &reason);
   auto StartIoEngine() -> Status;
+  auto StartObservation() -> Status;
   void NoteWrittenFile(FileId file_id);
   auto SyncWrittenFiles() -> Status;
 
   std::size_t pool_size_{0};
   BlockGeometry geometry_;
   BufferManagerOptions options_{};
+  // Outlives every component placed in it, including the replacer state.
+  std::unique_ptr<SharedSegment> segment_;
   std::unique_ptr<DiskBackend> disk_backend_;
   std::unique_ptr<Replacer> replacer_;
   std::unique_ptr<BufferManagerObserver> observer_;
@@ -386,9 +422,12 @@ class BufferManager {
   std::span<BufferDescriptor> descriptors_;
 
   std::unique_ptr<FrameFreeList> free_list_;
+  std::unique_ptr<ObservationPublisher> observation_;
   std::mutex written_files_latch_;
   std::vector<FileId> written_files_;
-  std::atomic<std::size_t> dirty_page_count_{0};
+  std::atomic<std::size_t> *dirty_page_count_{nullptr};
+  // PrefetchBuffer() reads this process submitted and has not finished.
+  std::atomic<std::uint32_t> prefetches_in_flight_{0};
 };
 
 }  // namespace telepath

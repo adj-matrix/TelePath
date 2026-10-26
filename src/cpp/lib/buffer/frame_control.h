@@ -284,8 +284,15 @@ inline auto CompleteWriteback(std::atomic<std::uint32_t> &control, bool succeede
   return completion;
 }
 
-auto PackWritebackError(const Status &status) -> std::uint64_t;
-auto UnpackWritebackError(std::uint64_t packed) -> Status;
+// Lowers `rec_lsn` to `lsn` unless it already holds an earlier valid LSN.
+inline void LowerRecLsn(std::atomic<Lsn> &rec_lsn, Lsn lsn) {
+  if (lsn == kInvalidLsn) return;
+  Lsn current = rec_lsn.load(std::memory_order_relaxed);
+  while ((current == kInvalidLsn || lsn < current) && !rec_lsn.compare_exchange_weak(current, lsn, std::memory_order_release, std::memory_order_relaxed)) {}
+}
+
+auto PackWritebackError(const Status &status) -> std::uint32_t;
+auto UnpackWritebackError(std::uint32_t packed) -> Status;
 
 }  // namespace telepath::frame_control
 

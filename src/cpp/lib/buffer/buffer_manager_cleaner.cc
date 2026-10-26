@@ -28,7 +28,7 @@ void BufferManager::ScheduleCleanerFlush(FrameId frame_id) {
 auto BufferManager::StartCleanerController() -> Status {
   if (!options_.enable_background_cleaner) return Ok();
 
-  cleaner_controller_ = std::make_unique<BufferManagerCleanerController>(pool_size_, &dirty_page_count_, options_.dirty_page_high_watermark, options_.dirty_page_low_watermark);
+  cleaner_controller_ = std::make_unique<BufferManagerCleanerController>(pool_size_, dirty_page_count_, options_.dirty_page_high_watermark, options_.dirty_page_low_watermark);
   return cleaner_controller_->Start(
     [this]() { SeedCleanerCandidates(); },
     [this](FrameId frame_id) { ScheduleCleanerFlush(frame_id); });

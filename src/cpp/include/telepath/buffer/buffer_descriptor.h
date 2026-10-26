@@ -22,12 +22,17 @@ enum class BufferFrameState {
 // no pointers or heap-owning members and fits in one cache line.
 struct alignas(kCacheLineSize) BufferDescriptor {
   std::atomic<std::uint32_t> control{0};
+  // Packed ErrorCode and errno of the most recent writeback; 0 when it succeeded.
+  std::atomic<std::uint32_t> last_writeback_error{0};
   std::atomic<std::uint64_t> version{0};
   std::atomic<FileId> tag_file_id{0};
-  std::atomic<BlockId> tag_block_id{0};
-  // Packed ErrorCode and errno of the most recent writeback; 0 when it succeeded.
-  std::atomic<std::uint64_t> last_writeback_error{0};
   FrameId frame_id{kInvalidFrameId};
+  std::atomic<BlockId> tag_block_id{0};
+  // LSN of the first logged change since the page's last writeback snapshot,
+  // or kInvalidLsn.
+  std::atomic<Lsn> rec_lsn{kInvalidLsn};
+  // rec_lsn as of the snapshot of the writeback in flight, or kInvalidLsn.
+  std::atomic<Lsn> writeback_rec_lsn{kInvalidLsn};
   // Reserved for the multi-tenant policy module.
   std::uint16_t tenant_id{0};
   // Reserved for cross-process pin ownership.

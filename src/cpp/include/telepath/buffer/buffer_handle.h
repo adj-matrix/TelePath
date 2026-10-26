@@ -50,8 +50,9 @@ class SharedBufferHandle {
 // Exclusive access to one resident page, returned by
 // BufferManager::ReadBufferExclusive(). The handle holds a pin and the page's
 // exclusive content latch from creation until Reset() or destruction.
-// Obtaining the writable view marks the page dirty; there is no separate
-// "mark dirty" call. Same threading rules as SharedBufferHandle.
+// Obtaining the writable view marks the page dirty. A caller with a
+// write-ahead log also reports each logged change through MarkDirty(lsn).
+// Same threading rules as SharedBufferHandle.
 class ExclusiveBufferHandle {
  public:
   ExclusiveBufferHandle() = default;
@@ -66,6 +67,12 @@ class ExclusiveBufferHandle {
   // Writable view of the page; marks the page dirty. Empty for a released
   // handle.
   auto mutable_data() noexcept -> std::span<std::byte>;
+  // Marks the page dirty and records that the log record at `lsn` changed it,
+  // which BufferManager::MinRecLsn() and CheckpointBuffers() use. Call it for
+  // every logged change, like PostgreSQL's MarkBufferDirty() with
+  // PageSetLSN(); the earliest LSN reported since the page's last writeback
+  // becomes its recLSN. Pages changed without an LSN are not tracked.
+  void MarkDirty(Lsn lsn) noexcept;
   auto tag() const noexcept -> const BufferTag & { return tag_; }
   auto frame_id() const noexcept -> FrameId { return frame_id_; }
   auto size() const noexcept -> std::size_t { return size_; }

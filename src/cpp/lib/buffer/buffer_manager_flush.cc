@@ -135,6 +135,8 @@ auto BufferManager::PrepareFlushTask(FrameId frame_id, const std::byte *stable_d
     const frame_control::QueueOutcome outcome = frame_control::TryQueueWriteback(descriptor.control, cleaner_owned);
     if (outcome == frame_control::QueueOutcome::kQueued) {
       descriptor.last_writeback_error.store(0, std::memory_order_relaxed);
+      descriptor.writeback_rec_lsn.store(descriptor.rec_lsn.load(std::memory_order_acquire), std::memory_order_release);
+      descriptor.rec_lsn.store(kInvalidLsn, std::memory_order_release);
       *tag = LoadTag(descriptor);
       *snapshot = CaptureFlushSnapshot(frame_id, stable_data);
       result = true;
@@ -173,6 +175,7 @@ auto BufferManager::RollBackFlushTask(FrameId frame_id, bool cleaner_owned, cons
 
   BufferDescriptor &descriptor = descriptors_[frame_id];
   descriptor.last_writeback_error.store(frame_control::PackWritebackError(status), std::memory_order_relaxed);
+  frame_control::LowerRecLsn(descriptor.rec_lsn, descriptor.writeback_rec_lsn.load(std::memory_order_acquire));
   frame_control::CancelQueuedWriteback(descriptor.control);
   observer_->RecordFlushTaskCompletion(LoadTag(descriptor), status);
   return status;
@@ -193,8 +196,10 @@ void BufferManager::FinalizeFlushTask(const std::shared_ptr<BufferManagerFlushTa
   if (task->clear_dirty_on_success) {
     BufferDescriptor &descriptor = descriptors_[task->frame_id];
     descriptor.last_writeback_error.store(frame_control::PackWritebackError(flush_status), std::memory_order_relaxed);
+    if (flush_status.has_value()) descriptor.writeback_rec_lsn.store(kInvalidLsn, std::memory_order_release);
+    else frame_control::LowerRecLsn(descriptor.rec_lsn, descriptor.writeback_rec_lsn.load(std::memory_order_acquire));
     const frame_control::WritebackCompletion completion = frame_control::CompleteWriteback(descriptor.control, flush_status.has_value());
-    if (completion.cleared_dirty) dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
+    if (completion.cleared_dirty) dirty_page_count_->fetch_sub(1, std::memory_order_acq_rel);
     if (ShouldQueueCleanerCandidate(completion.word)) MaybeEnqueueCleanerCandidate(task->frame_id);
     else if (completion.cleared_dirty) ResetCleanerCandidate(task->frame_id);
   }

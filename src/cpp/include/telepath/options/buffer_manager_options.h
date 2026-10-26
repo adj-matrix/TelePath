@@ -2,6 +2,7 @@
 #define TELEPATH_OPTIONS_BUFFER_MANAGER_OPTIONS_H_
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <span>
@@ -20,13 +21,19 @@ namespace telepath {
 // the writeback and may block; it must not call back into the BufferManager.
 using PreWriteHook = std::function<Status(const BufferTag &tag, std::span<const std::byte> page)>;
 
-// Reserved for the observation plane: frame states and counters published in
-// shared memory for other processes to read. Not implemented yet;
-// BufferManager::Create() rejects `enabled` with ErrorCode::kUnavailable.
+// Observation plane: frame states and telemetry counters published into a
+// POSIX shared-memory object in the format of
+// telepath/observation/observation_format.h, for other processes to read.
+// A background thread publishes periodically, so the page access paths do no
+// extra work. Managers of one cross-process cache share one object: each
+// writes its own counters and one of them the frame snapshot. Managers of
+// different caches must use different names. The name is removed when its
+// last user is destroyed.
 struct ObservationOptions {
   bool enabled{false};
-  // POSIX shared-memory object name, such as "/telepath_observation".
+  // Object name such as "/telepath_observation".
   std::string shared_memory_name;
+  std::chrono::milliseconds publish_interval{1000};
 };
 
 // How a single-page flush requested by a caller reaches the backend: the
@@ -39,6 +46,32 @@ enum class ForegroundWriteback {
   // The write joins the flush workers' foreground queue, sharing their batching
   // and the foreground/background burst limit with background writeback.
   kQueued,
+};
+
+// How a BufferManager opens its shared-memory segment.
+enum class SharedMemoryMode {
+  // Create the segment when it does not exist, otherwise attach to it.
+  kCreateOrAttach = 0,
+  // Create the segment; fail with kInvalidArgument when it already exists.
+  kCreate,
+  // Attach to an existing segment; fail with kNotFound when there is none.
+  kAttach,
+};
+
+// Cross-process mode: kernel metadata and frames live in a named POSIX
+// shared-memory segment that several processes map, so they share one cache.
+// Every process must use the same pool size, page size, page-table stripe
+// count, and replacer kind and capacity, which attaching validates, and the
+// replacer must support BindSharedState(). Each process keeps its own disk
+// backend, which must reach the same files. Linux only.
+struct SharedMemoryOptions {
+  // Segment name such as "/telepath_cache"; empty keeps the cache private to
+  // this process.
+  std::string name;
+  SharedMemoryMode mode{SharedMemoryMode::kCreateOrAttach};
+  // Removes the segment's name when the last manager attached to it is
+  // destroyed; otherwise the segment persists until RemoveSharedMemory().
+  bool remove_when_unused{true};
 };
 
 // Runtime configuration for BufferManager construction.
@@ -71,6 +104,8 @@ struct BufferManagerOptions {
   ForegroundWriteback foreground_writeback{ForegroundWriteback::kDirect};
   // Optional hook run before every page writeback.
   PreWriteHook pre_write_hook{};
+  // See SharedMemoryOptions.
+  SharedMemoryOptions shared_memory{};
   // Reserved; see ObservationOptions.
   ObservationOptions observation{};
 

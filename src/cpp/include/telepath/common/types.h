@@ -10,10 +10,14 @@ namespace telepath {
 using FileId = uint32_t;
 using BlockId = uint64_t;
 using FrameId = uint32_t;
+// Log sequence number of the caller's write-ahead log; the kernel only
+// compares them. kInvalidLsn means "no LSN".
+using Lsn = uint64_t;
 
 constexpr std::size_t kDefaultPageSize = 4096;
 constexpr std::size_t kCacheLineSize = 64;
 constexpr FrameId kInvalidFrameId = static_cast<FrameId>(-1);
+constexpr Lsn kInvalidLsn = 0;
 
 struct BufferTag {
   FileId file_id{0};
