@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 
 #include "telepath/replacer/replacer.h"
 
@@ -21,6 +20,7 @@ class SieveReplacer : public Replacer {
  public:
   // Creates a replacer for frame ids in [0, capacity).
   explicit SieveReplacer(std::size_t capacity);
+  ~SieveReplacer() override;
 
   // Sets the frame's visited bit.
   void RecordAccess(FrameId frame_id) override;
@@ -31,23 +31,12 @@ class SieveReplacer : public Replacer {
   bool Victim(const EvictionProbe &probe, FrameId *frame_id) override;
   // Unlinks the frame from the queue.
   void Remove(FrameId frame_id) override;
+  auto SharedStateBytes() const -> std::size_t override;
+  auto BindSharedState(std::span<std::byte> memory, bool initialize) -> Status override;
 
  private:
-  static constexpr FrameId kNone = kInvalidFrameId;
-
-  void Unlink(FrameId frame_id);
-  void PushNewest(FrameId frame_id);
-
-  const std::size_t capacity_;
-  std::unique_ptr<std::atomic<std::uint8_t>[]> visited_;
-  std::mutex latch_;
-  std::unique_ptr<FrameId[]> newer_;
-  std::unique_ptr<FrameId[]> older_;
-  std::unique_ptr<bool[]> linked_;
-  FrameId newest_{kNone};
-  FrameId oldest_{kNone};
-  FrameId hand_{kNone};
-  std::size_t linked_count_{0};
+  struct State;
+  std::unique_ptr<State> state_;
 };
 
 }  // namespace telepath

@@ -26,6 +26,8 @@ class FileDescriptorCache {
   auto Acquire(FileId file_id) -> Result<int>;
   void Release(FileId file_id);
   void CloseIdle();
+  auto FileSize(FileId file_id) -> Result<std::uint64_t>;
+  auto SetFileSize(FileId file_id, std::uint64_t size) -> Status;
 
  private:
   struct Entry {

@@ -7,6 +7,7 @@
 #include "io_engine.h"
 #include "flush_scheduler.h"
 #include "frame_free_list.h"
+#include "kernel_region.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -15,7 +16,7 @@ namespace telepath {
 
 auto BufferManager::Initialize() -> Status {
   if (Status dependency_status = ValidateRuntimeDependencies(); !dependency_status.has_value()) return dependency_status;
-  if (Status frame_status = InitializeFramePool(); !frame_status.has_value()) return frame_status;
+  if (Status memory_status = InitializeKernelMemory(); !memory_status.has_value()) return memory_status;
 
   SeedFreeFrames();
   ResolveCleanerOptions();
@@ -57,9 +58,18 @@ auto BufferManager::failure() const -> std::optional<Error> {
   return failure_;
 }
 
-auto BufferManager::InitializeFramePool() -> Status {
-  if (frame_pool_ == nullptr) return InvalidArgument("frame pool must not be null");
-  return frame_pool_->Initialize();
+auto BufferManager::InitializeKernelMemory() -> Status {
+  if (Status valid = FrameMemoryPool::Validate(pool_size_, geometry_); !valid.has_value()) return valid;
+  const KernelLayout layout = KernelLayout::For(pool_size_, options_.page_table_stripe_count, geometry_);
+  region_ = std::make_unique<KernelRegion>(layout.bytes);
+  if (region_->base() == nullptr) return ResourceExhausted("failed to allocate kernel memory");
+
+  std::byte *base = region_->base();
+  descriptors_ = std::span<BufferDescriptor>(ConstructState<BufferDescriptor>(base, layout.descriptors, pool_size_), pool_size_);
+  page_table_ = std::make_unique<BufferManagerPageTable>(pool_size_, options_.page_table_stripe_count, base, layout.page_table, true);
+  free_list_ = std::make_unique<FrameFreeList>(pool_size_, base, layout.free_list, true);
+  frame_pool_ = std::make_unique<FrameMemoryPool>(geometry_, base + layout.frames);
+  return Ok();
 }
 
 void BufferManager::SeedFreeFrames() {
@@ -73,7 +83,6 @@ auto BufferManager::ValidateRuntimeDependencies() const -> Status {
   if (disk_backend_ == nullptr) return InvalidArgument("disk backend must not be null");
   if (replacer_ == nullptr) return InvalidArgument("replacer must not be null");
   if (io_engine_ == nullptr) return InvalidArgument("io engine must not be null");
-  if (page_table_ == nullptr) return InvalidArgument("page table must not be null");
   return Ok();
 }
 
@@ -135,6 +144,10 @@ auto BufferManager::SyncWrittenFiles() -> Status {
     std::lock_guard<std::mutex> guard(written_files_latch_);
     files.swap(written_files_);
   }
+  return SyncFiles(std::move(files));
+}
+
+auto BufferManager::SyncFiles(std::vector<FileId> files) -> Status {
   if (files.empty()) return Ok();
 
   IoWaiter waiter(static_cast<std::uint32_t>(files.size()));

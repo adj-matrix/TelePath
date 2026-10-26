@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <memory>
 
+#include "../common/state_layout.h"
 #include "telepath/common/types.h"
 
 namespace telepath {
@@ -14,21 +15,48 @@ class FrameList {
  public:
   static constexpr FrameId kNone = kInvalidFrameId;
 
-  explicit FrameList(std::size_t capacity)
-    : front_to_back_(std::make_unique<FrameId[]>(capacity)),
-      back_to_front_(std::make_unique<FrameId[]>(capacity)),
-      linked_(std::make_unique<bool[]>(capacity)) {}
+  struct Ends {
+    FrameId front{kNone};
+    FrameId back{kNone};
+  };
+
+  struct Offsets {
+    std::size_t ends;
+    std::size_t front_to_back;
+    std::size_t back_to_front;
+    std::size_t linked;
+  };
+
+  static auto Reserve(StateLayout *layout, std::size_t capacity) -> Offsets {
+    return Offsets{layout->Add<Ends>(1), layout->Add<FrameId>(capacity), layout->Add<FrameId>(capacity), layout->Add<bool>(capacity)};
+  }
+
+  FrameList() = default;
+
+  void Place(std::byte *base, const Offsets &offsets, std::size_t capacity, bool initialize) {
+    if (initialize) {
+      ends_ = ConstructState<Ends>(base, offsets.ends, 1);
+      front_to_back_ = ConstructState<FrameId>(base, offsets.front_to_back, capacity, kNone);
+      back_to_front_ = ConstructState<FrameId>(base, offsets.back_to_front, capacity, kNone);
+      linked_ = ConstructState<bool>(base, offsets.linked, capacity, false);
+      return;
+    }
+    ends_ = StateAt<Ends>(base, offsets.ends);
+    front_to_back_ = StateAt<FrameId>(base, offsets.front_to_back);
+    back_to_front_ = StateAt<FrameId>(base, offsets.back_to_front);
+    linked_ = StateAt<bool>(base, offsets.linked);
+  }
 
   bool Contains(FrameId frame_id) const { return linked_[frame_id]; }
-  auto back() const -> FrameId { return back_; }
+  auto back() const -> FrameId { return ends_->back; }
   auto TowardFront(FrameId frame_id) const -> FrameId { return back_to_front_[frame_id]; }
 
   void PushFront(FrameId frame_id) {
-    front_to_back_[frame_id] = front_;
+    front_to_back_[frame_id] = ends_->front;
     back_to_front_[frame_id] = kNone;
-    if (front_ != kNone) back_to_front_[front_] = frame_id;
-    front_ = frame_id;
-    if (back_ == kNone) back_ = frame_id;
+    if (ends_->front != kNone) back_to_front_[ends_->front] = frame_id;
+    ends_->front = frame_id;
+    if (ends_->back == kNone) ends_->back = frame_id;
     linked_[frame_id] = true;
   }
 
@@ -36,9 +64,9 @@ class FrameList {
     const FrameId toward_back = front_to_back_[frame_id];
     const FrameId toward_front = back_to_front_[frame_id];
     if (toward_front != kNone) front_to_back_[toward_front] = toward_back;
-    else front_ = toward_back;
+    else ends_->front = toward_back;
     if (toward_back != kNone) back_to_front_[toward_back] = toward_front;
-    else back_ = toward_front;
+    else ends_->back = toward_front;
     linked_[frame_id] = false;
   }
 
@@ -48,11 +76,10 @@ class FrameList {
   }
 
  private:
-  std::unique_ptr<FrameId[]> front_to_back_;
-  std::unique_ptr<FrameId[]> back_to_front_;
-  std::unique_ptr<bool[]> linked_;
-  FrameId front_{kNone};
-  FrameId back_{kNone};
+  Ends *ends_{nullptr};
+  FrameId *front_to_back_{nullptr};
+  FrameId *back_to_front_{nullptr};
+  bool *linked_{nullptr};
 };
 
 }  // namespace telepath

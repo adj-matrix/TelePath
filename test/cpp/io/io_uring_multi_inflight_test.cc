@@ -151,6 +151,14 @@ void AssertSyncRequestCompletes(telepath::DiskBackend &backend) {
   assert(completion.value().status.has_value());
 }
 
+void AssertFileSizeRoundTrip(telepath::DiskBackend &backend) {
+  assert(backend.GetFileSize(77).value() == 0);
+  assert(backend.SetFileSize(77, 10000).has_value());
+  assert(backend.GetFileSize(77).value() == 10000);
+  assert(backend.SetFileSize(77, 123).has_value());
+  assert(backend.GetFileSize(77).value() == 123);
+}
+
 }  // namespace
 
 int main() {
@@ -170,6 +178,7 @@ int main() {
   AssertReadPagesMatch(read_a, read_b);
   AssertMultiBlockRead(&backend, tag_a);
   AssertSyncRequestCompletes(backend);
+  AssertFileSizeRoundTrip(backend);
   AssertPersistedPagesMatch(root_guard.path(), tag_a, tag_b);
   backend.Shutdown();
   return 0;

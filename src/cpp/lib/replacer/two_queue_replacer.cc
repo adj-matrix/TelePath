@@ -4,11 +4,40 @@
 
 #include "access_batcher.h"
 #include "frame_list.h"
+#include "../common/state_layout.h"
+#include "../sync/futex.h"
 
 namespace telepath {
 
+namespace {
+
+struct Offsets {
+  std::size_t latch;
+  FrameList::Offsets history;
+  FrameList::Offsets cache;
+  std::size_t bytes;
+};
+
+auto LayoutFor(std::size_t capacity) -> Offsets {
+  StateLayout layout;
+  Offsets offsets{};
+  offsets.latch = layout.Add<sync::FutexMutex>(1);
+  offsets.history = FrameList::Reserve(&layout, capacity);
+  offsets.cache = FrameList::Reserve(&layout, capacity);
+  offsets.bytes = layout.size();
+  return offsets;
+}
+
+}  // namespace
+
 struct TwoQueueReplacer::State {
-  explicit State(std::size_t capacity) : capacity(capacity), history(capacity), cache(capacity) {}
+  explicit State(std::size_t capacity) : capacity(capacity), offsets(LayoutFor(capacity)), owned(std::make_unique<std::byte[]>(offsets.bytes)) { Place(owned.get(), true); }
+
+  void Place(std::byte *base, bool initialize) {
+    latch = initialize ? ConstructState<sync::FutexMutex>(base, offsets.latch, 1) : StateAt<sync::FutexMutex>(base, offsets.latch);
+    history.Place(base, offsets.history, capacity, initialize);
+    cache.Place(base, offsets.cache, capacity, initialize);
+  }
 
   void Touch(FrameId frame_id) {
     if (frame_id >= capacity) return;
@@ -35,7 +64,9 @@ struct TwoQueueReplacer::State {
   }
 
   const std::size_t capacity;
-  std::mutex latch;
+  const Offsets offsets;
+  std::unique_ptr<std::byte[]> owned;
+  sync::FutexMutex *latch{nullptr};
   AccessBatcher batcher;
   FrameList history;
   FrameList cache;
@@ -45,13 +76,22 @@ TwoQueueReplacer::TwoQueueReplacer(std::size_t capacity) : state_(std::make_uniq
 
 TwoQueueReplacer::~TwoQueueReplacer() = default;
 
+auto TwoQueueReplacer::SharedStateBytes() const -> std::size_t { return state_->offsets.bytes; }
+
+auto TwoQueueReplacer::BindSharedState(std::span<std::byte> memory, bool initialize) -> Status {
+  if (Status valid = CheckStateMemory(memory, state_->offsets.bytes); !valid.has_value()) return valid;
+  state_->Place(memory.data(), initialize);
+  state_->owned.reset();
+  return Ok();
+}
+
 void TwoQueueReplacer::RecordAccess(FrameId frame_id) {
-  state_->batcher.Record(frame_id, state_->latch, [this](FrameId frame) { state_->Touch(frame); });
+  state_->batcher.Record(frame_id, *state_->latch, [this](FrameId frame) { state_->Touch(frame); });
 }
 
 void TwoQueueReplacer::RecordLoad(FrameId frame_id) {
   if (frame_id >= state_->capacity) return;
-  std::lock_guard<std::mutex> guard(state_->latch);
+  std::lock_guard<sync::FutexMutex> guard(*state_->latch);
   state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
   state_->Untrack(frame_id);
   state_->history.PushFront(frame_id);
@@ -59,14 +99,14 @@ void TwoQueueReplacer::RecordLoad(FrameId frame_id) {
 
 bool TwoQueueReplacer::Victim(const EvictionProbe &probe, FrameId *frame_id) {
   if (frame_id == nullptr) return false;
-  std::lock_guard<std::mutex> guard(state_->latch);
+  std::lock_guard<sync::FutexMutex> guard(*state_->latch);
   state_->batcher.DrainAll([this](FrameId frame) { state_->Touch(frame); });
   return State::PickFrom(state_->history, probe, frame_id) || State::PickFrom(state_->cache, probe, frame_id);
 }
 
 void TwoQueueReplacer::Remove(FrameId frame_id) {
   if (frame_id >= state_->capacity) return;
-  std::lock_guard<std::mutex> guard(state_->latch);
+  std::lock_guard<sync::FutexMutex> guard(*state_->latch);
   state_->batcher.DrainCurrentThread([this](FrameId frame) { state_->Touch(frame); });
   state_->Untrack(frame_id);
 }

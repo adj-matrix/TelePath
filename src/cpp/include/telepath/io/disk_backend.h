@@ -94,6 +94,21 @@ class DiskBackend {
   virtual void Shutdown() = 0;
   // Describes the backend implementation and its limits.
   virtual auto GetCapabilities() const -> DiskBackendCapabilities = 0;
+  // Returns the size in bytes of the file backing `file_id`, 0 for a file that
+  // does not exist yet. Runs synchronously. The default returns kUnavailable;
+  // PageCache needs a backend that implements it.
+  virtual auto GetFileSize(FileId file_id) -> Result<std::uint64_t> {
+    (void)file_id;
+    return Unavailable("disk backend does not report file sizes");
+  }
+  // Truncates or extends the file backing `file_id` to `size` bytes; extended
+  // bytes read as zeros. Runs synchronously and is durable only after a later
+  // kSync of the file. The default returns kUnavailable.
+  virtual auto SetFileSize(FileId file_id, std::uint64_t size) -> Status {
+    (void)file_id;
+    (void)size;
+    return Unavailable("disk backend does not resize files");
+  }
 };
 
 }  // namespace telepath

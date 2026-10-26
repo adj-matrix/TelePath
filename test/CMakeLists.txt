@@ -333,6 +333,49 @@ target_link_libraries(telepath_buffer_access_strategy_test PRIVATE telepath)
 
 add_test(NAME telepath_buffer_access_strategy_test COMMAND telepath_buffer_access_strategy_test)
 
+add_executable(telepath_indexed_ordered_set_test
+  cpp/replacer/indexed_ordered_set_test.cc
+)
+
+target_include_directories(telepath_indexed_ordered_set_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/replacer)
+target_link_libraries(telepath_indexed_ordered_set_test PRIVATE telepath)
+
+add_test(NAME telepath_indexed_ordered_set_test COMMAND telepath_indexed_ordered_set_test)
+
+add_executable(telepath_replacer_shared_state_test
+  cpp/replacer/replacer_shared_state_test.cc
+)
+
+target_link_libraries(telepath_replacer_shared_state_test PRIVATE telepath)
+
+add_test(NAME telepath_replacer_shared_state_test COMMAND telepath_replacer_shared_state_test)
+
+add_executable(telepath_plan_replacer_test
+  cpp/replacer/plan_replacer_test.cc
+)
+
+target_link_libraries(telepath_plan_replacer_test PRIVATE telepath)
+
+add_test(NAME telepath_plan_replacer_test COMMAND telepath_plan_replacer_test)
+
+add_executable(telepath_ml_prefetch_buffer_test
+  cpp/facade/ml_prefetch_buffer_test.cc
+)
+
+target_include_directories(telepath_ml_prefetch_buffer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/buffer)
+target_link_libraries(telepath_ml_prefetch_buffer_test PRIVATE telepath)
+
+add_test(NAME telepath_ml_prefetch_buffer_test COMMAND telepath_ml_prefetch_buffer_test)
+
+add_executable(telepath_page_cache_test
+  cpp/facade/page_cache_test.cc
+)
+
+target_include_directories(telepath_page_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/buffer)
+target_link_libraries(telepath_page_cache_test PRIVATE telepath)
+
+add_test(NAME telepath_page_cache_test COMMAND telepath_page_cache_test)
+
 add_executable(telepath_foreground_writeback_test
   cpp/buffer/foreground_writeback_test.cc
 )

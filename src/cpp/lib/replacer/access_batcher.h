@@ -22,8 +22,8 @@ class AccessBatcher {
     : slot_count_(std::bit_ceil(std::max<std::size_t>(4, 2 * std::max(1U, std::thread::hardware_concurrency())))),
       slots_(std::make_unique<Slot[]>(slot_count_)) {}
 
-  template <typename Apply>
-  void Record(FrameId frame_id, std::mutex &policy_latch, Apply &&apply) {
+  template <typename PolicyLatch, typename Apply>
+  void Record(FrameId frame_id, PolicyLatch &policy_latch, Apply &&apply) {
     std::array<FrameId, kBatchSize> batch;
     {
       Slot &slot = slots_[SlotIndex()];
@@ -33,7 +33,7 @@ class AccessBatcher {
       batch = slot.frames;
       slot.count = 0;
     }
-    std::lock_guard<std::mutex> policy_guard(policy_latch);
+    std::lock_guard<PolicyLatch> policy_guard(policy_latch);
     for (FrameId frame : batch) apply(frame);
   }
 

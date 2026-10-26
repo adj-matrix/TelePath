@@ -1,5 +1,6 @@
 #include "telepath/buffer/buffer_manager.h"
 
+#include <tuple>
 #include <vector>
 
 #include "buffer_manager_observer.h"
@@ -14,7 +15,7 @@ namespace {
 
 class FrameEvictionProbe final : public EvictionProbe {
  public:
-  explicit FrameEvictionProbe(const std::vector<BufferDescriptor> &descriptors) : descriptors_(descriptors) {}
+  explicit FrameEvictionProbe(std::span<const BufferDescriptor> descriptors) : descriptors_(descriptors) {}
 
   bool IsEvictable(FrameId frame_id) const override {
     if (frame_id >= descriptors_.size()) return false;
@@ -24,7 +25,7 @@ class FrameEvictionProbe final : public EvictionProbe {
   }
 
  private:
-  const std::vector<BufferDescriptor> &descriptors_;
+  std::span<const BufferDescriptor> descriptors_;
 };
 
 }  // namespace
@@ -49,6 +50,44 @@ auto BufferManager::AcquireReservationFrame() -> Result<FrameId> {
   FrameId frame_id = kInvalidFrameId;
   if (replacer_->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return frame_id;
   return ResourceExhausted("no evictable frame available");
+}
+
+auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Status {
+  if (Status usable = CheckUsable(); !usable.has_value()) return usable;
+  Status result = Ok();
+  for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
+    BufferDescriptor &descriptor = descriptors_[frame_id];
+    while (true) {
+      const BufferTag tag = LoadTag(descriptor);
+      const std::uint32_t word = descriptor.control.load(std::memory_order_acquire);
+      if (frame_control::State(word) == BufferFrameState::kFree || tag.file_id != file_id || tag.block_id < first_block) break;
+      if (frame_control::State(word) == BufferFrameState::kLoading) {
+        WaitForLoad(frame_id, tag);
+        continue;
+      }
+      if (!TryPinResidentFrame(frame_id, tag, false)) continue;
+
+      std::uint32_t previous = 0;
+      const frame_control::DiscardOutcome outcome = frame_control::TryDiscardPinned(descriptor.control, &previous);
+      if (outcome == frame_control::DiscardOutcome::kWriteback) {
+        ReleaseFrame(frame_id);
+        std::ignore = WaitForPendingFlush(&descriptor);
+        continue;
+      }
+      if (outcome == frame_control::DiscardOutcome::kBusy) {
+        ReleaseFrame(frame_id);
+        result = InvalidArgument("a page in the dropped range is in use");
+        break;
+      }
+      if (frame_control::IsDirty(previous)) dirty_page_count_.fetch_sub(1, std::memory_order_acq_rel);
+      page_table_->Remove(tag, frame_id);
+      replacer_->Remove(frame_id);
+      StoreTag(&descriptor, BufferTag{});
+      ReleaseFreeFrame(frame_id);
+      break;
+    }
+  }
+  return result;
 }
 
 bool BufferManager::HasPinnedFrame() const {

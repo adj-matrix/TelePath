@@ -85,6 +85,10 @@ void BufferManagerObserver::RecordCleanerFlushSkipped() const {
   telemetry_sink_->RecordCleanerFlushSkipped();
 }
 
+void BufferManagerObserver::RecordZeroFill(const BufferTag *evicted_tag) const {
+  if (evicted_tag != nullptr) RecordEviction(*evicted_tag);
+}
+
 void BufferManagerObserver::RecordEvictionFailure(const BufferTag &tag) const {
   telemetry_sink_->RecordEvictionFailure(tag);
 }

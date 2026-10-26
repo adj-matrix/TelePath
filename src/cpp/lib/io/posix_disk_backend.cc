@@ -190,4 +190,8 @@ void PosixDiskBackend::WorkerLoop() {
   }
 }
 
+auto PosixDiskBackend::GetFileSize(FileId file_id) -> Result<std::uint64_t> { return files_->FileSize(file_id); }
+
+auto PosixDiskBackend::SetFileSize(FileId file_id, std::uint64_t size) -> Status { return files_->SetFileSize(file_id, size); }
+
 }  // namespace telepath

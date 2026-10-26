@@ -18,6 +18,8 @@ add_library(telepath
   lib/buffer/cleaner_controller.cc
   lib/buffer/flush_scheduler.cc
   lib/buffer/io_engine.cc
+  lib/facade/ml_prefetch_buffer.cc
+  lib/facade/page_cache.cc
   lib/io/disk_backend_factory.cc
   lib/io/file_descriptor_cache.cc
   lib/io/io_uring_disk_backend.cc
@@ -26,8 +28,10 @@ add_library(telepath
   lib/replacer/clock_sweep_replacer.cc
   lib/replacer/lru_k_replacer.cc
   lib/replacer/lru_replacer.cc
+  lib/replacer/plan_replacer.cc
   lib/replacer/sieve_replacer.cc
   lib/replacer/two_queue_replacer.cc
+  lib/sync/futex.cc
   lib/telemetry/counter_telemetry_sink.cc
   lib/telemetry/telemetry_export.cc
   lib/telemetry/shared_memory_telemetry.cc

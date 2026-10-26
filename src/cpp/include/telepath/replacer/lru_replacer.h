@@ -26,6 +26,8 @@ class LruReplacer : public Replacer {
   bool Victim(const EvictionProbe &probe, FrameId *frame_id) override;
   // Stops tracking the frame.
   void Remove(FrameId frame_id) override;
+  auto SharedStateBytes() const -> std::size_t override;
+  auto BindSharedState(std::span<std::byte> memory, bool initialize) -> Status override;
 
  private:
   struct State;

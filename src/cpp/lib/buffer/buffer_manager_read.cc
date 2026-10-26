@@ -1,5 +1,6 @@
 #include "telepath/buffer/buffer_manager.h"
 
+#include <cstring>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -14,7 +15,7 @@
 
 namespace telepath {
 
-auto BufferManager::PinPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameId> {
+auto BufferManager::PinPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<FrameId> {
   if (Status usable = CheckUsable(); !usable.has_value()) return PropagateError(usable);
   const bool record_access = strategy == nullptr || strategy->RecordsAccesses();
 
@@ -33,9 +34,11 @@ auto BufferManager::PinPage(const BufferTag &tag, BufferAccessStrategy *strategy
       continue;
     }
 
-    Result<std::optional<FrameId>> loaded = LoadPage(tag, strategy);
-    if (!loaded.has_value()) return PropagateError(loaded);
-    if (loaded->has_value()) return loaded->value();
+    Result<std::optional<FrameId>> loaded = LoadPage(tag, strategy, mode);
+    if (loaded.has_value() && loaded->has_value()) return loaded->value();
+    // Running out of frames while another thread loaded this very page is no
+    // failure: go back and use that copy.
+    if (!loaded.has_value() && (loaded.error().code() != ErrorCode::kResourceExhausted || !IsResidentTag(tag))) return PropagateError(loaded);
   }
 }
 
@@ -81,13 +84,13 @@ bool BufferManager::IsLiveFor(FrameId frame_id, const BufferTag &tag) const {
   return frame_control::State(descriptor.control.load(std::memory_order_acquire)) != BufferFrameState::kFree && LoadTag(descriptor) == tag;
 }
 
-auto BufferManager::LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameId>> {
+auto BufferManager::LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<std::optional<FrameId>> {
   Result<std::optional<FrameReservation>> reserved = ReserveFrameForTag(tag, strategy);
   if (!reserved.has_value()) return PropagateError(reserved);
   if (!reserved->has_value()) return std::optional<FrameId>{};
 
   observer_->RecordReadMiss(tag);
-  Result<FrameId> frame = CompleteReservation(tag, reserved->value());
+  Result<FrameId> frame = CompleteReservation(tag, reserved->value(), mode);
   if (!frame.has_value()) return PropagateError(frame);
   return std::optional<FrameId>{frame.value()};
 }
@@ -133,8 +136,13 @@ auto BufferManager::TryReserveRingFrame(const BufferTag &tag, BufferAccessStrate
   return TryReserveFrameForTag(ring_frame, tag, false, reservation);
 }
 
-auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReservation &reservation) -> Result<FrameId>{
+auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReservation &reservation, ReadBufferMode mode) -> Result<FrameId> {
   const FrameId frame_id = reservation.frame_id;
+  if (mode == ReadBufferMode::kZeroAndLock) {
+    std::memset(frame_pool_->GetFrameData(frame_id), 0, geometry_.block_size());
+    PublishLoadedFrame(tag, reservation, false);
+    return frame_id;
+  }
 
   Status read_status = ReadReservedPage(frame_id, tag);
   if (!read_status.has_value()) return PropagateError(AbortLoadReservation(frame_id, tag, read_status));
@@ -143,11 +151,12 @@ auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReserva
   return frame_id;
 }
 
-void BufferManager::PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation) {
+void BufferManager::PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation, bool read_from_disk) {
   ResetCleanerCandidate(reservation.frame_id);
   frame_control::PublishResident(descriptors_[reservation.frame_id].control);
   replacer_->RecordLoad(reservation.frame_id);
-  if (reservation.had_evicted_page) observer_->RecordLoadCompletion(tag, reservation.evicted_tag);
+  if (!read_from_disk) observer_->RecordZeroFill(reservation.had_evicted_page ? &reservation.evicted_tag : nullptr);
+  else if (reservation.had_evicted_page) observer_->RecordLoadCompletion(tag, reservation.evicted_tag);
   else observer_->RecordLoadCompletion(tag);
 }
 

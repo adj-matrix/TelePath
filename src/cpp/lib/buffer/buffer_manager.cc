@@ -9,6 +9,7 @@
 #include "frame_control.h"
 #include "io_engine.h"
 #include "frame_free_list.h"
+#include "kernel_region.h"
 #include "page_table.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -55,11 +56,8 @@ BufferManager::BufferManager(
     disk_backend_(std::move(disk_backend)),
     replacer_(std::move(replacer)),
     observer_(std::make_unique<BufferManagerObserver>(std::move(telemetry_sink))),
-    frame_pool_(std::make_unique<FrameMemoryPool>(options.pool_size, geometry)),
     io_engine_(std::make_unique<IoEngine>(disk_backend_.get())),
-    page_table_(std::make_unique<BufferManagerPageTable>(options.pool_size, options.ResolvePageTableStripeCount())),
-    descriptors_(options.pool_size),
-    free_list_(std::make_unique<FrameFreeList>(options.pool_size)) {
+    page_table_(nullptr) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
 }
 
@@ -82,9 +80,9 @@ auto BufferManager::ReadBuffer(FileId file_id, BlockId block_id, BufferAccessStr
   return MakeSharedHandle(frame.value(), tag);
 }
 
-auto BufferManager::ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy) -> Result<ExclusiveBufferHandle> {
+auto BufferManager::ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<ExclusiveBufferHandle> {
   const BufferTag tag{file_id, block_id};
-  Result<FrameId> frame = PinPage(tag, strategy);
+  Result<FrameId> frame = PinPage(tag, strategy, mode);
   if (!frame.has_value()) return PropagateError(frame);
   return MakeExclusiveHandle(frame.value(), tag);
 }
@@ -127,12 +125,32 @@ auto BufferManager::FlushBuffer(ExclusiveBufferHandle &handle) -> Status {
 
 auto BufferManager::FlushAll() -> Status {
   if (Status usable = CheckUsable(); !usable.has_value()) return usable;
+  if (Status written = WriteBackFrames([](const BufferTag &, FileId) { return true; }, 0); !written.has_value()) return written;
+  return SyncWrittenFiles();
+}
+
+auto BufferManager::FlushFileBuffers(FileId file_id) -> Status {
+  if (Status usable = CheckUsable(); !usable.has_value()) return usable;
+  return WriteBackFrames([](const BufferTag &tag, FileId file) { return tag.file_id == file; }, file_id);
+}
+
+auto BufferManager::SyncFile(FileId file_id) -> Status {
+  if (Status usable = CheckUsable(); !usable.has_value()) return usable;
+  {
+    std::lock_guard<std::mutex> guard(written_files_latch_);
+    std::erase(written_files_, file_id);
+  }
+  return SyncFiles({file_id});
+}
+
+auto BufferManager::WriteBackFrames(bool (*selected)(const BufferTag &tag, FileId file_id), FileId file_id) -> Status {
   std::vector<std::shared_ptr<BufferManagerFlushTask>> queued_tasks;
   queued_tasks.reserve(pool_size_);
   std::vector<FrameId> busy_frames;
   busy_frames.reserve(pool_size_);
 
   for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
+    if (!selected(LoadTag(descriptors_[frame_id]), file_id)) continue;
     bool was_busy = false;
     Result<std::shared_ptr<BufferManagerFlushTask>> schedule_result = TryScheduleFlushTask(frame_id, nullptr, &was_busy, false);
     if (!schedule_result.has_value()) return PropagateError(schedule_result);
@@ -146,12 +164,15 @@ auto BufferManager::FlushAll() -> Status {
   Status wait_status = WaitForScheduledFlushes(queued_tasks);
   Status flush_status = FlushBusyFrames(busy_frames);
   if (!wait_status.has_value()) return wait_status;
-  if (!flush_status.has_value()) return flush_status;
-  return SyncWrittenFiles();
+  return flush_status;
 }
 
 auto BufferManager::Close() -> Status {
   if (closed_.load(std::memory_order_acquire)) return Ok();
+  // Prefetches still in flight pin their frames only until they complete.
+  for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
+    if (IsLoadingTag(frame_id, LoadTag(descriptors_[frame_id]))) WaitForLoad(frame_id, LoadTag(descriptors_[frame_id]));
+  }
   if (HasPinnedFrame()) return InvalidArgument("pages are still pinned by handles or read operations");
   Status status = CheckUsable();
   if (status.has_value()) status = FlushAll();

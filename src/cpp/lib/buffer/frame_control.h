@@ -9,6 +9,7 @@
 
 #include "telepath/buffer/buffer_descriptor.h"
 #include "telepath/common/status.h"
+#include "../sync/futex.h"
 
 namespace telepath::frame_control {
 
@@ -41,9 +42,9 @@ constexpr bool IsResident(std::uint32_t word) { return State(word) == BufferFram
 constexpr bool IsDirty(std::uint32_t word) { return (word & kDirty) != 0; }
 constexpr bool HasWriteback(std::uint32_t word) { return (word & kWritebackMask) != 0; }
 
-void FutexWait(std::atomic<std::uint32_t> &control, std::uint32_t expected);
-void FutexWaitFor(std::atomic<std::uint32_t> &control, std::uint32_t expected, std::chrono::nanoseconds timeout);
-void FutexWakeAll(std::atomic<std::uint32_t> &control);
+using sync::FutexWait;
+using sync::FutexWaitFor;
+using sync::FutexWakeAll;
 
 // Sleeps until `blocked(word)` is false and returns the observed word.
 template <typename Blocked>
@@ -134,6 +135,28 @@ inline void ReleaseToFree(std::atomic<std::uint32_t> &control) {
     control,
     [](std::uint32_t word) { return word & (kWaiters | kLatchMask); },
     [](std::uint32_t, std::uint32_t) { return true; });
+}
+
+enum class DiscardOutcome {
+  kDiscarded,
+  kWriteback,
+  kBusy,
+};
+
+// Resident -> Free for a frame whose only pin is the caller's, dropping its
+// contents and dirty state. A writeback or any other pin or latch holder
+// prevents it. On success `previous` receives the replaced word.
+inline auto TryDiscardPinned(std::atomic<std::uint32_t> &control, std::uint32_t *previous) -> DiscardOutcome {
+  std::uint32_t word = control.load(std::memory_order_acquire);
+  while (true) {
+    if (HasWriteback(word)) return DiscardOutcome::kWriteback;
+    if (!IsResident(word) || Pins(word) != 1 || (word & kLatchMask) != 0) return DiscardOutcome::kBusy;
+    if (control.compare_exchange_weak(word, 0, std::memory_order_acq_rel, std::memory_order_acquire)) {
+      *previous = word;
+      if ((word & kWaiters) != 0) FutexWakeAll(control);
+      return DiscardOutcome::kDiscarded;
+    }
+  }
 }
 
 // Sets the dirty bit on a resident frame. Returns whether the frame became

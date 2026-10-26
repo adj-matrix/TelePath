@@ -45,21 +45,50 @@ BufferManagerPageTable::StripeWriter::~StripeWriter() {
   }
 }
 
+auto BufferManagerPageTable::BucketCount(std::size_t frame_capacity) -> std::size_t {
+  return std::bit_ceil(std::max<std::size_t>(frame_capacity, 1));
+}
+
+auto BufferManagerPageTable::Reserve(StateLayout *layout, std::size_t frame_capacity, std::size_t stripe_count) -> Offsets {
+  Offsets offsets{};
+  offsets.heads = layout->Add<std::atomic<std::uint32_t>>(BucketCount(frame_capacity));
+  offsets.next = layout->Add<std::atomic<std::uint32_t>>(frame_capacity);
+  offsets.bucket_of = layout->Add<std::atomic<std::uint32_t>>(frame_capacity);
+  offsets.key_file_id = layout->Add<std::atomic<FileId>>(frame_capacity);
+  offsets.key_block_id = layout->Add<std::atomic<BlockId>>(frame_capacity);
+  offsets.stripes = layout->Add<Stripe>(std::max<std::size_t>(stripe_count, 1));
+  return offsets;
+}
+
 BufferManagerPageTable::BufferManagerPageTable(std::size_t frame_capacity, std::size_t stripe_count)
-  : frame_capacity_(frame_capacity),
-    bucket_mask_(std::bit_ceil(std::max<std::size_t>(frame_capacity, 1)) - 1),
-    stripe_count_(std::max<std::size_t>(stripe_count, 1)),
-    heads_(std::make_unique<std::atomic<std::uint32_t>[]>(bucket_mask_ + 1)),
-    next_(std::make_unique<std::atomic<std::uint32_t>[]>(frame_capacity)),
-    bucket_of_(std::make_unique<std::atomic<std::uint32_t>[]>(frame_capacity)),
-    key_file_id_(std::make_unique<std::atomic<FileId>[]>(frame_capacity)),
-    key_block_id_(std::make_unique<std::atomic<BlockId>[]>(frame_capacity)),
-    stripes_(std::make_unique<Stripe[]>(stripe_count_)) {
-  for (std::size_t bucket = 0; bucket <= bucket_mask_; ++bucket) heads_[bucket].store(kNone, std::memory_order_relaxed);
-  for (std::size_t frame = 0; frame < frame_capacity_; ++frame) {
-    next_[frame].store(kNone, std::memory_order_relaxed);
-    bucket_of_[frame].store(kNone, std::memory_order_relaxed);
+  : frame_capacity_(frame_capacity), bucket_mask_(BucketCount(frame_capacity) - 1), stripe_count_(std::max<std::size_t>(stripe_count, 1)) {
+  StateLayout layout;
+  const Offsets offsets = Reserve(&layout, frame_capacity, stripe_count);
+  owned_ = std::make_unique<std::byte[]>(layout.size());
+  Place(owned_.get(), offsets, true);
+}
+
+BufferManagerPageTable::BufferManagerPageTable(std::size_t frame_capacity, std::size_t stripe_count, std::byte *base, const Offsets &offsets, bool initialize)
+  : frame_capacity_(frame_capacity), bucket_mask_(BucketCount(frame_capacity) - 1), stripe_count_(std::max<std::size_t>(stripe_count, 1)) {
+  Place(base, offsets, initialize);
+}
+
+void BufferManagerPageTable::Place(std::byte *base, const Offsets &offsets, bool initialize) {
+  if (!initialize) {
+    heads_ = StateAt<std::atomic<std::uint32_t>>(base, offsets.heads);
+    next_ = StateAt<std::atomic<std::uint32_t>>(base, offsets.next);
+    bucket_of_ = StateAt<std::atomic<std::uint32_t>>(base, offsets.bucket_of);
+    key_file_id_ = StateAt<std::atomic<FileId>>(base, offsets.key_file_id);
+    key_block_id_ = StateAt<std::atomic<BlockId>>(base, offsets.key_block_id);
+    stripes_ = StateAt<Stripe>(base, offsets.stripes);
+    return;
   }
+  heads_ = ConstructState<std::atomic<std::uint32_t>>(base, offsets.heads, bucket_mask_ + 1, kNone);
+  next_ = ConstructState<std::atomic<std::uint32_t>>(base, offsets.next, frame_capacity_, kNone);
+  bucket_of_ = ConstructState<std::atomic<std::uint32_t>>(base, offsets.bucket_of, frame_capacity_, kNone);
+  key_file_id_ = ConstructState<std::atomic<FileId>>(base, offsets.key_file_id, frame_capacity_, FileId{0});
+  key_block_id_ = ConstructState<std::atomic<BlockId>>(base, offsets.key_block_id, frame_capacity_, BlockId{0});
+  stripes_ = ConstructState<Stripe>(base, offsets.stripes, stripe_count_);
 }
 
 auto BufferManagerPageTable::LookupFrameId(const BufferTag &tag) const -> std::optional<FrameId> {

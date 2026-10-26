@@ -20,6 +20,7 @@ class ClockSweepReplacer : public Replacer {
 
   // Creates a replacer for frame ids in [0, capacity).
   explicit ClockSweepReplacer(std::size_t capacity);
+  ~ClockSweepReplacer() override;
 
   // Raises the frame's usage count by one, saturating at kMaxUsageCount.
   void RecordAccess(FrameId frame_id) override;
@@ -30,13 +31,14 @@ class ClockSweepReplacer : public Replacer {
   bool Victim(const EvictionProbe &probe, FrameId *frame_id) override;
   // Stops tracking the frame.
   void Remove(FrameId frame_id) override;
+  auto SharedStateBytes() const -> std::size_t override;
+  auto BindSharedState(std::span<std::byte> memory, bool initialize) -> Status override;
 
  private:
   static constexpr std::uint8_t kUntracked = 0xFF;
 
-  const std::size_t capacity_;
-  std::unique_ptr<std::atomic<std::uint8_t>[]> usage_count_;
-  std::atomic<std::size_t> hand_{0};
+  struct State;
+  std::unique_ptr<State> state_;
 };
 
 }  // namespace telepath

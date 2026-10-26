@@ -424,4 +424,8 @@ void IoUringDiskBackend::SetNextCompletionResultForTest(int result) {
 
 auto IoUringDiskBackend::InFlightRequestCountForTest() const -> std::size_t { return in_flight_.load(); }
 
+auto IoUringDiskBackend::GetFileSize(FileId file_id) -> Result<std::uint64_t> { return files_->FileSize(file_id); }
+
+auto IoUringDiskBackend::SetFileSize(FileId file_id, std::uint64_t size) -> Status { return files_->SetFileSize(file_id, size); }
+
 }  // namespace telepath

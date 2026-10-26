@@ -24,7 +24,7 @@ Regression coverage:
 | `BufferDescriptor::version` (64-bit atomic) | per frame | write/reuse counter (reserved for optimistic reads) |
 | `BufferDescriptor::tag_file_id` / `tag_block_id` (atomics) | per frame | current tag; written only while the frame is `Loading` and owned by its loader |
 | page table stripe spinlock + sequence counter | per stripe | `BufferTag -> FrameId` chains; writers lock, lookups validate the sequence without locking |
-| replacer `latch_` | global | replacement-policy state |
+| replacer policy latch (`sync::FutexMutex`, stored with the policy state) | global | replacement-policy state |
 | cleaner controller `latch_` | global | cleaner candidate queue and in-flight count |
 | `FrameFreeList` head (64-bit atomic: index and version) | global | lock-free stack of free frames |
 | flush scheduler `latch_`, `BufferManagerFlushTask::latch` | global / per task | flush queues and task completion |
@@ -44,7 +44,7 @@ The control-word bit layout is specified in `docs/design/kernel-refactor.md` (se
 
 ## 3. Waiting Rules
 
-Threads sleep on a frame's control word through `frame_control::WaitWhile()`: set the `waiters` bit, then `futex_wait` on the observed value. Every transition that can unblock a waiter (latch release, `Loading` → `Resident`/`Free`, clearing writeback flags) clears `waiters` in its CAS and wakes all sleepers, which re-check their condition.
+All futexes are process-shared (`src/cpp/lib/sync/futex.h`), so the words may live in memory several processes map. Threads sleep on a frame's control word through `frame_control::WaitWhile()`: set the `waiters` bit, then `futex_wait` on the observed value. Every transition that can unblock a waiter (latch release, `Loading` → `Resident`/`Free`, clearing writeback flags) clears `waiters` in its CAS and wakes all sleepers, which re-check their condition.
 
 Current waits:
 
@@ -127,6 +127,10 @@ A reader that finds a frame `Loading` with its tag sleeps on that frame's contro
 
 When a victim writeback fails, the frame keeps its tag, data, and dirty state, returns to the replacer, and the failing `ReadBuffer()`/`ReadBufferExclusive()` returns the I/O error. Eviction failures are counted in telemetry (`eviction_failures`).
 
+### 5.7 Dropping Pages
+
+`DropFileBuffers()` first pins a candidate frame and checks its tag under the pin, so the frame cannot be reused for another page while it decides. It then moves the frame from `Resident` to `Free` with one CAS that requires its own pin to be the only one, no latch holder, and no writeback; dirty contents are discarded. A loading page is waited for, and a page under writeback is waited for and retried. Any other pin means someone still uses the page: the call leaves it and reports `kInvalidArgument`, because the caller promised nobody uses the dropped range.
+
 ## 6. Replacer Contract
 
 Evictability lives only in the frame's control word. Replacement policies order frames by coldness and never learn about pins, latches, or writebacks:
@@ -134,7 +138,7 @@ Evictability lives only in the frame's control word. Replacement policies order 
 - `RecordAccess()` is called on every pin of a resident frame, outside any frame lock. Policies must keep it lock-free (Clock, clock-sweep, SIEVE) or batch it (LRU, LRU-K, 2Q).
 - `RecordLoad()` is called after a frame is reused for a newly loaded page; `Remove()` when a frame returns to the free list.
 - `Victim()` asks the buffer manager's `EvictionProbe` for each candidate (resident, unpinned, unlatched, no writeback) and nominates the first that passes. The frame **stays tracked**. The manager then claims it with `TryReserve`; if the claim fails because the frame changed in between, the manager simply asks for another victim. Nothing has to be handed back, so no frame can drop out of the evictable set.
-- If `Victim()` nominates nothing while some frame is unpinned or `Loading`, `ReserveFrameForTag()` yields and retries; it returns `kResourceExhausted` only when every frame is pinned by a resident page. An unpinned frame may be latched, under writeback, or simply missed: concurrent callers advance a shared clock hand, so one caller's bounded scan does not visit every frame, and a frame between `ReleaseToFree` and the free list is invisible to the replacer. A `Loading` frame is pinned only until its load publishes it or, for a reservation that lost the install race (5.5), until it returns to the free list: concurrent misses on one page each reserve a frame before learning they lost, which can briefly pin a small pool completely.
+- If `Victim()` nominates nothing while some frame is unpinned or `Loading`, `ReserveFrameForTag()` yields and retries; it returns `kResourceExhausted` only when every frame is pinned by a resident page. An unpinned frame may be latched, under writeback, or simply missed: concurrent callers advance a shared clock hand, so one caller's bounded scan does not visit every frame, and a frame between `ReleaseToFree` and the free list is invisible to the replacer. A `Loading` frame is pinned only until its load publishes it or, for a reservation that lost the install race (5.5), until it returns to the free list: concurrent misses on one page each reserve a frame before learning they lost, which can briefly pin a small pool completely. When the pool is exhausted because another thread just loaded the very page being read, `PinPage()` goes back to the lookup and pins that copy instead of failing.
 
 Batched policies buffer accesses in per-thread slots (`AccessBatcher`) and apply a full slot under the policy latch. Lock order is policy latch, then slot latch; recording never holds a slot latch while taking the policy latch. `RecordLoad()` and `Remove()` first apply the calling thread's own slot, so a thread's accesses and loads keep their program order; accesses from different threads have no order to preserve. `Victim()` applies every slot before choosing.
 

@@ -186,9 +186,68 @@ void ExpectObservationIsReserved() {
   assert(!created.has_value() && created.error().code() == telepath::ErrorCode::kUnavailable);
 }
 
+void ExpectZeroAndLockKeepsResidentContents() {
+  Fixture fixture("telepath_durability_zero_and_lock");
+  {
+    auto fresh = fixture.manager->ReadBufferExclusive(6, 0, nullptr, telepath::ReadBufferMode::kZeroAndLock);
+    assert(fresh.has_value());
+    assert(fresh->data()[0] == std::byte{0});
+    fresh->mutable_data()[0] = std::byte{0x66};
+  }
+  auto again = fixture.manager->ReadBufferExclusive(6, 0, nullptr, telepath::ReadBufferMode::kZeroAndLock);
+  assert(again.has_value());
+  assert(again->data()[0] == std::byte{0x66});
+}
+
+void ExpectFileFlushAndSyncTouchOnlyThatFile() {
+  Fixture fixture("telepath_durability_file_flush");
+  WriteByte(fixture.manager.get(), 7, 0, std::byte{0x71});
+  WriteByte(fixture.manager.get(), 8, 0, std::byte{0x81});
+  assert(fixture.manager->FlushFileBuffers(7).has_value());
+  assert(fixture.manager->ExportSnapshot().dirty_page_count == 1);
+  assert(fixture.backend->syncs().empty());
+  assert(PersistedByte(fixture.root.path(), 7, 0) == std::byte{0x71});
+  assert(PersistedByte(fixture.root.path(), 8, 0) == std::byte{0});
+
+  assert(fixture.manager->SyncFile(7).has_value());
+  auto syncs = fixture.backend->syncs();
+  assert(syncs.size() == 1 && syncs[7] == 1);
+  assert(fixture.manager->FlushAll().has_value());
+  syncs = fixture.backend->syncs();
+  assert(syncs[7] == 1 && syncs[8] == 1);
+}
+
+void ExpectDropFileBuffersDiscardsDirtyPages() {
+  Fixture fixture("telepath_durability_drop");
+  for (telepath::BlockId block = 0; block < 4; ++block) WriteByte(fixture.manager.get(), 9, block, static_cast<std::byte>(0x90 + block));
+  WriteByte(fixture.manager.get(), 10, 3, std::byte{0xA3});
+  assert(fixture.manager->ExportSnapshot().dirty_page_count == 5);
+
+  {
+    auto pinned = fixture.manager->ReadBuffer(9, 3);
+    assert(pinned.has_value());
+    auto refused = fixture.manager->DropFileBuffers(9, 2);
+    assert(!refused.has_value() && refused.error().code() == telepath::ErrorCode::kInvalidArgument);
+  }
+  assert(fixture.manager->DropFileBuffers(9, 2).has_value());
+  assert(fixture.manager->ExportSnapshot().dirty_page_count == 3);
+
+  auto dropped = fixture.manager->ReadBuffer(9, 2);
+  assert(dropped.has_value() && dropped->data()[0] == std::byte{0});
+  dropped->Reset();
+  auto kept = fixture.manager->ReadBuffer(9, 1);
+  assert(kept.has_value() && kept->data()[0] == std::byte{0x91});
+  kept->Reset();
+  auto other = fixture.manager->ReadBuffer(10, 3);
+  assert(other.has_value() && other->data()[0] == std::byte{0xA3});
+}
+
 }  // namespace
 
 int main() {
+  ExpectZeroAndLockKeepsResidentContents();
+  ExpectFileFlushAndSyncTouchOnlyThatFile();
+  ExpectDropFileBuffersDiscardsDirtyPages();
   ExpectFlushAllSyncsEachWrittenFileOnce();
   ExpectFailedSyncIsRetried();
   ExpectCloseFlushesAndRejectsLaterCalls();

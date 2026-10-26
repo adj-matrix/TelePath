@@ -16,6 +16,8 @@ TelePath is a long-term open-source SDK. Its kernel is a **keyed, fixed-size blo
 
 Out of scope: network-stack buffer pools, compiler symbol interning, sample-level ML caches, mmap semantics. Shuffling, decoding, and batching stay outside TelePath.
 
+"Three facades on one kernel" means three kinds of products reuse one kernel implementation. An application normally uses one facade, and each facade creates and owns its kernel instance; any number of threads may use one facade instance concurrently. Sharing one cache between facades or between processes is a future plan (section 8), not part of the current design.
+
 ## 2. Ground Rules
 
 - **Language**: C++23. No backward-compatibility target. Avoid modules and library features without mature GCC/Clang support. Minimum compilers are **GCC 14** and **Clang 19**, both building against libstdc++ 14; `support/install_build_deps.sh` installs them. Clang 18 is excluded because it reports `__cpp_concepts` as `201907L`, which makes libstdc++ 14 hide `std::expected`.
@@ -116,7 +118,7 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 
 ## 6. Phases
 
-**Progress:** phases 0, 1a–1e, 2, and 3 are implemented, and phase 4 except the observation plane, which is reserved; see section 7.
+**Progress:** phases 0, 1a–1e, 2, 3, 4, 5a, and 5b are implemented (the observation plane is reserved and moved to phase 6); see section 7.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
@@ -128,10 +130,12 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 | 1e | Fixed-size open-addressing page table | 1c |
 | 2 | Policy layer: admission, eviction, hints, tenant hook; evictability derived from frame state | 1 |
 | 3 | I/O interface: completion tokens, batch and multi-block submission; async load completion; threading model | 1 |
-| 4 | Writeback and durability contract (`Close()`, pre-write hook, ordering); observation plane on shared metadata | 2, 3 |
-| 5 | Facades: PageCache, MLPrefetchBuffer; cross-process mode | 4 |
+| 4 | Writeback and durability contract (`Close()`, pre-write hook, ordering) | 2, 3 |
+| 5 | Facades: PageCache (5a), MLPrefetchBuffer with a plan-driven replacer (5b); each facade owns its kernel instance | 4 |
+| 6 | Cross-process mode: metadata in shared memory, pin-holder ledger, crash recovery; the shared-memory layout reserves the namespace fields of section 8; observation plane v1 (read-only frame states and counters for other processes) | 5 |
+| 7 | Shared namespaces (section 8): sharing one cache between facades or processes with per-namespace policy and quotas; eviction event stream; Web namespace views | 6 |
 
-Topics deferred to their phase: policy interface details (2), I/O interface and threading (3), durability contract and event schema (4), facade APIs (5).
+Topics deferred to their phase: facade APIs (5), shared-memory layout and observation schema (6), namespace policy, quotas, and event schema (7).
 
 ## 7. Implementation Notes
 
@@ -263,4 +267,85 @@ Same write-heavy workload with the default worker count, ops/s:
 io_uring gains less because the kernel usually punts buffered writes to its io-wq workers, so a direct write still waits for a thread hand-off inside the kernel.
 
 Read-only miss path (same setup as the phase 3 table, ops/s, phase 3 → phase 4): POSIX 442 K → 555 K (1 thread), 766 K → 861 K (4), 759 K → 748 K (16); io_uring 383 K → 456 K, 835 K → 1006 K, 990 K → 1067 K. The 16-thread plateau remains and has not been located yet.
+
+### Phase 5a: PageCache
+
+- **Facade** (`telepath/facade/page_cache.h`): `PageCache::Create(PageCacheOptions, backend, replacer, telemetry)` creates and owns a `BufferManager` (clock-sweep by default). `Read(file, offset, out)` copies up to the file's logical size and returns the byte count; `Write(file, offset, data)` extends the size, and a gap reads as zeros; `FileSize`, `Truncate`, `Sync(file)`, and `Close()`. All methods are thread-safe; overlapping concurrent writes have no atomicity across blocks, and `Truncate()` must not race with I/O on the same file.
+- **File sizes**: the cache keeps each file's logical size in memory, loaded on first use with `DiskBackend::GetFileSize()`. Writebacks round the backing file up to whole blocks, so `Sync()` writes back the file's dirty pages, sets the backing size with `DiskBackend::SetFileSize()`, and then syncs; until then a crash can leave a block-rounded size. Shrinking discards cached pages past the new size, zeroes the tail of the last page, and shrinks the backing file at once, so a later extension reads zeros rather than old bytes.
+- **Readahead**: on the second consecutive sequential read of a file the window starts at 4 blocks and doubles up to `max_readahead_blocks` (default 32); the cache prefetches only blocks past what it already requested. Random reads reset the window.
+- **Write-behind**: `write_behind` (default on) enables the background cleaner.
+- **Kernel additions**: `ReadBufferMode::kZeroAndLock` for `ReadBufferExclusive()` zero-fills a missing page instead of reading it (PostgreSQL's `RBM_ZERO_AND_LOCK`); the cache uses it only for whole-block writes: a partial write past the old end must still read, because a concurrent writer may already have written, evicted, and persisted part of that block. `FlushFileBuffers(file)` writes back one file's dirty pages without syncing (`FlushRelationBuffers`), `SyncFile(file)` syncs one file, and `DropFileBuffers(file, first_block)` discards a file's pages from a block on, dirty ones included (`DropRelationBuffers`); see `docs/concurrency.md`, section 5.7.
+- **Backend additions**: `DiskBackend::GetFileSize()` and `SetFileSize()` (synchronous `fstat` and `ftruncate` through the shared descriptor cache). They have default implementations that return `kUnavailable`, so existing custom backends still compile; `PageCache` needs a backend that implements them.
+
+### Phase 5b: MLPrefetchBuffer
+
+- **Facade** (`telepath/facade/ml_prefetch_buffer.h`): `MLPrefetchBuffer::Create(MLPrefetchBufferOptions, backend, telemetry)` creates and owns a read-only `BufferManager` (1 MiB blocks unless set, background writeback off) with a `PlanReplacer`. `SetPlan(blocks)` starts an epoch whose consumption order is known; a block may appear more than once. `Fetch(position)` returns the block at a plan position, pinned for reading, so a data loader can distribute positions to its workers deterministically, as PyTorch's DataLoader does with a map-style dataset; `Next()` hands out positions in order to whichever thread asks and returns `std::nullopt` at the end of the plan. One style per plan.
+- **Prefetching**: each fetch prefetches up to `prefetch_depth` (default 8) positions past the furthest position requested so far.
+- **Belady eviction** (`telepath/replacer/plan_replacer.h`): the facade precomputes, for every position, the next position of the same block, and after each fetch tells `PlanReplacer::SetNextUse()` when that frame is needed again. `Victim()` evicts the evictable frame needed furthest in the future, pages not needed again first; a freshly loaded (prefetched) frame counts as needed immediately until it is consumed. With prefetching off and one consumer, the miss count equals Belady's optimum (`ml_prefetch_buffer_test`). Deterministic partitions make workers progress unevenly, which only makes the estimate less exact. The replacer interface is unchanged; only this facade uses it.
+- **Kernel change**: `Close()` now waits for loads in flight (such as prefetches) before checking for pinned pages.
+- **Overhead for other users**: none by construction (separate facade, replacer chosen only by it, no kernel hot-path change). A release A/B against phase 4 showed equal hit-path throughput at 1 and 4 threads; at 16 threads run-to-run variance on the development machine (22–35 M ops/s for the same binary) exceeds any difference, so the phase 7 parity gate needs pinned cores or a quiet benchmark host.
+
+### Phase 6 Plan: Cross-Process Mode
+
+**Status: agreed design, in progress.** Decisions:
+
+| Topic | Decision |
+| --- | --- |
+| Process model | Symmetric create-or-attach: any process may create the named segment or attach to it; the segment can outlive its last process or be removed with it. A dedicated daemon can be built on top later. |
+| I/O | Each process owns its backend, I/O engine, descriptors, and rings and opens the same files under the same root. Completions change shared state only through frame ids (phase 3 tokens are process-local). |
+| Replacers | All policies keep one implementation that places its state in caller-provided memory and locks it with a futex-based lock, so the same code serves the heap (single process) and the segment. Only LRU-K and `PlanReplacer` change data structure (ordered sets become index-based structures); the algorithms stay. |
+| Background work | One process at a time runs the background cleaner, elected through a lock word in the segment; foreground writeback stays with each process. |
+| Observation | A separate observation area in the segment with a published, versioned binary format (counters, per-frame state summary, reserved namespace id). Python maps it and parses it directly; there is no exporter program. The kernel's internal layout stays free to change. |
+| WAL support | The kernel provides what a WAL needs from a buffer pool, not a WAL: the pre-write hook (phase 4), a per-frame recLSN (log position when the page first became dirty) with a query for the minimum, and checkpoint support (write back pages whose recLSN precedes a position). An optional generic log module (append, group commit, durable flush, read back; log contents owned by the user) is a later phase after 7. |
+| Process crash | **Open.** Exclusive latches have one holder and can be recovered exactly through `holder_slot`, but shared pins and latches are summed counts: a per-process ledger cannot tell whether a process that died between updating the control word and its ledger had applied the pin, and guessing wrong corrupts other processes' pins or leaks a frame. PostgreSQL resets shared memory after a backend crash, and CacheLib drops a shared cache after an unclean exit. A recovery protocol is designed separately (6e) before it is implemented. |
+
+Steps:
+
+- **6a** Metadata in caller-provided memory (descriptors, page table, free list, replacer state) and process-shared futexes and locks; single-process behavior unchanged. **Done**: all futex operations use process-shared futexes (`src/cpp/lib/sync/futex.h`, only the sleep and wake slow paths differ), and `sync::FutexMutex` replaces `std::mutex` in policy state. Kernel metadata and frames live in one `KernelRegion` laid out by `KernelLayout`; the page table, free list, frame pool, and descriptors are placed in it instead of allocating themselves. Every replacer places its state in one block through `Replacer::SharedStateBytes()` and `BindSharedState(memory, initialize)` (default: unsupported, so custom replacers still compile); single-process mode keeps the block on the heap. LRU-K's ordered sets and history deques and `PlanReplacer`'s ordered set became an index-based treap (`src/cpp/lib/replacer/indexed_ordered_set.h`) and per-frame history rings; ordering rules are unchanged. Per-thread access batches stay process-local, since losing them only loses recency hints. Fix found while verifying 6a: with a one-frame pool, a reader could fail with `kResourceExhausted` while another reader held the very page it wanted (`wait_evict_interleave_test`, once in a clang debug run); `PinPage()` now retries the lookup in that case. The race came from the phase 4 removal of the miss table.
+- **6b** Segment layout (header with magic, layout version, geometry, replacer kind, reserved namespace registry; process slots), create-or-attach, and validation on attach.
+- **6c** Observation area and its published format; the Web backend reads it with Python.
+- **6d** recLSN per frame, minimum-recLSN query, and checkpoint writeback.
+- **6e** Process-crash detection and recovery, and cleaner election.
+
+## 8. Future Plan: Shared Namespaces and Observation
+
+**Status: planned for phases 6 and 7; nothing here is implemented.** Until then each facade owns its kernel instance (section 1). This section records the plan and the constraints that keep it possible.
+
+### 8.1 Motivation
+
+Running two kinds of cache users against one cache is uncommon but real: a database that also trains or serves models in-process, an engine that both answers SQL and feeds training data, and, most realistically, a node-level cache service shared by several processes (a database and training jobs on one machine). Separate instances already let such users coexist, but they partition memory statically, duplicate background threads, and cache a shared file twice without coherence. Sharing one cache removes those costs.
+
+### 8.2 What sharing needs
+
+| Piece | Cost | Notes |
+| --- | --- | --- |
+| Namespace id in `BufferTag` and in each frame | one more key compare on lookups; spare bytes exist in `BufferDescriptor` | single-namespace users always use namespace 0 |
+| Per-namespace replacer and writeback settings | one table lookup in `RecordAccess`; victim selection picks a namespace first | this is the "quota picks the tenant, replacer picks within it" split of section 2 |
+| Quotas and isolation | only when enabled | lower and upper bounds per namespace |
+| Different block sizes | see below | the only real conflict |
+
+Different block sizes (for example a 1 MiB dataset cache next to 8 KiB database pages):
+
+- **(a) Share only between users with the same block size.** No cost.
+- **(b) Sub-pools per block size inside one instance**, as Oracle does with its per-block-size caches: page table, I/O engine, threads, and namespace registry are shared; memory is not lent between sub-pools. Every sub-pool keeps fixed-size frames, so hot paths still only shift and mask.
+- **(c) Variable-size frames in one elastic pool.** Rejected: it breaks fixed-size frames, which the shared-memory frame table, shift-and-mask addressing, and fragmentation-free allocation all depend on.
+
+### 8.3 Observation
+
+Once metadata lives in shared memory and frames carry a namespace id, an external process can show, without involving the engine: frame ownership per namespace (the block map colored by namespace), cross-namespace eviction ("whose load evicted whose page", from an eviction event ring written only on the miss path), quota versus occupancy over time, and per-namespace hit rate, miss latency, dirty pages, and writeback volume; after phase 6 also which process pins which pages. The Web console renders these views. Per-namespace counters extend the existing per-thread counter shards; events never touch the hit path.
+
+### 8.4 Related work
+
+Meta's CacheLib supports several memory pools with independent eviction policies and rebalancing inside one cache, but it is a key-value object cache without buffer-pool semantics. The combination targeted here is buffer-pool semantics (page latches, writeback, the pre-write hook) with cross-process sharing, per-namespace policy and quotas, and an external observation plane.
+
+### 8.5 Constraints in force now
+
+These keep phases 6 and 7 from forcing a rewrite and cost nothing today:
+
+- Facades create their kernel internally and do not expose ownership in a way that would block a later constructor that attaches to an existing shared kernel.
+- The phase 6 shared-memory layout reserves a namespace id in `BufferTag` and `BufferDescriptor` and a fixed-size namespace registry in the shared header, next to the existing tenant id.
+- Replacement and writeback settings stay behind one per-instance policy point (today a single replacer and options object), so per-namespace dispatch replaces a field rather than call sites.
+- Telemetry counters keep their sharded layout so a namespace dimension can be added.
+- Frames stay fixed-size (option (c) is out).
+- Acceptance gate for phase 7: with a single namespace, hit-path throughput must match the phase 6 baseline.
 

@@ -29,6 +29,7 @@ class BufferManagerObserver {
   void RecordCleanerFlushFinished(const BufferTag &tag) const;
   void RecordCleanerFlushSkipped() const;
   void RecordEvictionFailure(const BufferTag &tag) const;
+  void RecordZeroFill(const BufferTag *evicted_tag) const;
 
  private:
   void RecordHit(const BufferTag &tag) const;

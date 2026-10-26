@@ -3,7 +3,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <span>
 
+#include "telepath/common/status.h"
 #include "telepath/common/types.h"
 
 namespace telepath {
@@ -37,6 +39,21 @@ class Replacer {
   virtual bool Victim(const EvictionProbe &probe, FrameId *frame_id) = 0;
   // Stops tracking a frame that went back to the free list.
   virtual void Remove(FrameId frame_id) = 0;
+
+  // Size in bytes of the policy state when it is placed in caller-provided
+  // memory, as cross-process mode does, or 0 when the replacer cannot place
+  // its state there. The default returns 0.
+  virtual auto SharedStateBytes() const -> std::size_t { return 0; }
+  // Moves the policy state into `memory`, SharedStateBytes() bytes aligned to
+  // a cache line. With `initialize` the state starts empty; without it the
+  // replacer uses state that another replacer of the same kind and capacity
+  // initialized there. Must be called before any other method. The default
+  // returns kUnavailable.
+  virtual auto BindSharedState(std::span<std::byte> memory, bool initialize) -> Status {
+    (void)memory;
+    (void)initialize;
+    return Unavailable("replacer cannot place its state in shared memory");
+  }
 };
 
 // Builds a Clock (second-chance) replacer: one reference bit per frame.

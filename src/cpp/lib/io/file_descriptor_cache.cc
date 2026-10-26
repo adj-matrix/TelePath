@@ -1,6 +1,7 @@
 #include "file_descriptor_cache.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -43,6 +44,27 @@ void FileDescriptorCache::Release(FileId file_id) {
   if (it->second.pins > 0) --it->second.pins;
   it->second.last_used = ++clock_;
   EvictIdleLocked(max_open_files_);
+}
+
+auto FileDescriptorCache::FileSize(FileId file_id) -> Result<std::uint64_t> {
+  Result<int> fd = Acquire(file_id);
+  if (!fd.has_value()) return PropagateError(fd);
+  struct stat info{};
+  const int result = fstat(fd.value(), &info);
+  const int error = errno;
+  Release(file_id);
+  if (result != 0) return IoError("fstat failed", error);
+  return static_cast<std::uint64_t>(info.st_size);
+}
+
+auto FileDescriptorCache::SetFileSize(FileId file_id, std::uint64_t size) -> Status {
+  Result<int> fd = Acquire(file_id);
+  if (!fd.has_value()) return PropagateError(fd);
+  const int result = ftruncate(fd.value(), static_cast<off_t>(size));
+  const int error = errno;
+  Release(file_id);
+  if (result != 0) return IoError("ftruncate failed", error);
+  return Ok();
 }
 
 void FileDescriptorCache::CloseIdle() {

@@ -214,6 +214,14 @@ void AssertSyncRequestCompletes(telepath::DiskBackend &backend) {
   assert(completion.value().status.has_value());
 }
 
+void AssertFileSizeRoundTrip(telepath::DiskBackend &backend) {
+  assert(backend.GetFileSize(77).value() == 0);
+  assert(backend.SetFileSize(77, 10000).has_value());
+  assert(backend.GetFileSize(77).value() == 10000);
+  assert(backend.SetFileSize(77, 123).has_value());
+  assert(backend.GetFileSize(77).value() == 123);
+}
+
 }  // namespace
 
 int main() {
@@ -222,6 +230,10 @@ int main() {
   AssertMalformedRequestsRejected(root_guard.path());
   AssertWaitModeCompletesOnCallingThread(root_guard.path());
   AssertMultiBlockRequestsRoundTrip(root_guard.path());
+  {
+    telepath::PosixDiskBackend size_backend(root_guard.path().string(), telepath::BlockGeometry::Of<4096>());
+    AssertFileSizeRoundTrip(size_backend);
+  }
   {
     telepath::PosixDiskBackend sync_backend(root_guard.path().string(), telepath::BlockGeometry::Of<4096>());
     AssertSyncRequestCompletes(sync_backend);

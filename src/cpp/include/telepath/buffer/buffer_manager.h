@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,7 @@ namespace telepath {
 
 class DiskBackend;
 class FrameMemoryPool;
+class KernelRegion;
 class Replacer;
 class TelemetrySink;
 class BufferManagerObserver;
@@ -34,6 +36,16 @@ class BufferManagerCleanerController;
 class BufferManagerPageTable;
 struct BufferManagerFlushTask;
 struct ReadBuffersState;
+
+// How ReadBufferExclusive() fills a page that is not resident, modeled after
+// PostgreSQL's ReadBufferMode.
+enum class ReadBufferMode {
+  // Read the page from the backing store.
+  kNormal = 0,
+  // Zero-fill the page instead of reading it, for a caller that overwrites the
+  // whole page. A page that is already resident keeps its contents.
+  kZeroAndLock,
+};
 
 // A reserved frame never carries a dirty victim: dirty victims are written back
 // while still mapped under their old tag, before the frame can be reserved.
@@ -108,7 +120,11 @@ class BufferManager {
   auto ReadBuffer(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy = nullptr) -> Result<SharedBufferHandle>;
   // Pins the requested page with exclusive access, loading it from the backing
   // store on a miss. Blocks while any other handle on the page exists.
-  auto ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy = nullptr) -> Result<ExclusiveBufferHandle>;
+  auto ReadBufferExclusive(
+    FileId file_id,
+    BlockId block_id,
+    BufferAccessStrategy *strategy = nullptr,
+    ReadBufferMode mode = ReadBufferMode::kNormal) -> Result<ExclusiveBufferHandle>;
   // Starts asynchronous reads of the blocks in [block_id, block_id +
   // block_count) that are not resident or already being read, and returns
   // without waiting for them; consecutive missing blocks are combined into one
@@ -155,9 +171,22 @@ class BufferManager {
   // writeback durable. Must not be called by a thread that holds an
   // ExclusiveBufferHandle.
   auto FlushAll() -> Status;
+  // Writes back every resident dirty page of `file_id` and waits, like
+  // FlushBuffer() for each of them; the writes are not made durable. Must not
+  // be called by a thread that holds an ExclusiveBufferHandle on such a page.
+  auto FlushFileBuffers(FileId file_id) -> Status;
+  // Makes every completed write to `file_id` durable.
+  auto SyncFile(FileId file_id) -> Status;
+  // Discards the cached pages of `file_id` whose block id is at least
+  // `first_block`, including unwritten changes, for example after truncating
+  // the file. Waits for loads and writebacks of those pages. Returns
+  // kInvalidArgument, after discarding the pages it could, when one of them is
+  // pinned; the caller must ensure nobody uses the dropped range.
+  auto DropFileBuffers(FileId file_id, BlockId first_block) -> Status;
   // Runs FlushAll(), stops background work, and closes the manager: afterwards
-  // every operation returns ErrorCode::kUnavailable. Returns kInvalidArgument
-  // without closing while a handle or read operation still pins a page.
+  // every operation returns ErrorCode::kUnavailable. Waits for loads in flight,
+  // such as prefetches, then returns kInvalidArgument without closing while a
+  // handle or read operation still pins a page.
   // Closing a closed manager returns Ok; closing a failed one stops it and
   // returns kFailed.
   auto Close() -> Status;
@@ -193,7 +222,7 @@ class BufferManager {
     std::shared_ptr<TelemetrySink> telemetry_sink);
 
   // buffer_manager_read.cc
-  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<FrameId>;
+  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode = ReadBufferMode::kNormal) -> Result<FrameId>;
   auto TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId>;
   auto ProbeResident(const BufferTag &tag, bool record_access, FrameId *frame_id) -> ResidentProbe;
   bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access);
@@ -202,7 +231,7 @@ class BufferManager {
   bool IsLiveFor(FrameId frame_id, const BufferTag &tag) const;
   // Loads `tag` into a newly reserved frame and returns it pinned; nullopt
   // means another thread installed the tag first and the caller must retry.
-  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameId>>;
+  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<std::optional<FrameId>>;
   // Reserves a frame for `tag`; nullopt means another frame already holds or
   // is loading the tag.
   auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameReservation>>;
@@ -211,9 +240,10 @@ class BufferManager {
   auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy, FrameReservation *reservation) -> FrameReservationOutcome;
   auto CompleteReservation(
     const BufferTag &tag,
-    const FrameReservation &reservation
+    const FrameReservation &reservation,
+    ReadBufferMode mode
   ) -> Result<FrameId>;
-  void PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation);
+  void PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation, bool read_from_disk = true);
   auto ReadReservedPage(FrameId frame_id, const BufferTag &tag) -> Status;
   bool IsResidentTag(const BufferTag &tag) const;
 
@@ -256,6 +286,8 @@ class BufferManager {
     bool *was_busy,
     bool cleaner_owned
   ) -> Result<std::shared_ptr<BufferManagerFlushTask>>;
+  auto WriteBackFrames(bool (*selected)(const BufferTag &tag, FileId file_id), FileId file_id) -> Status;
+  auto SyncFiles(std::vector<FileId> files) -> Status;
   auto WaitForScheduledFlushes(const std::vector<std::shared_ptr<BufferManagerFlushTask>> &tasks) -> Status;
   auto FlushBusyFrames(const std::vector<FrameId> &frame_ids) -> Status;
   auto TryScheduleFlushTask(
@@ -318,7 +350,7 @@ class BufferManager {
   auto Initialize() -> Status;
   auto CheckUsable() const -> Status;
   void EnterFailedState(const Error &cause);
-  auto InitializeFramePool() -> Status;
+  auto InitializeKernelMemory() -> Status;
   void SeedFreeFrames();
   auto ValidateRuntimeDependencies() const -> Status;
   void ResolveCleanerOptions();
@@ -345,12 +377,13 @@ class BufferManager {
   mutable std::mutex failure_latch_;
   std::optional<Error> failure_;
 
+  std::unique_ptr<KernelRegion> region_;
   std::unique_ptr<FrameMemoryPool> frame_pool_;
   std::unique_ptr<IoEngine> io_engine_;
   std::unique_ptr<BufferManagerFlushScheduler> flush_scheduler_;
   std::unique_ptr<BufferManagerCleanerController> cleaner_controller_;
   std::unique_ptr<BufferManagerPageTable> page_table_;
-  std::vector<BufferDescriptor> descriptors_;
+  std::span<BufferDescriptor> descriptors_;
 
   std::unique_ptr<FrameFreeList> free_list_;
   std::mutex written_files_latch_;

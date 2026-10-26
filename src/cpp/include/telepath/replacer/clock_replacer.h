@@ -16,6 +16,7 @@ class ClockReplacer : public Replacer {
  public:
   // Creates a replacer for frame ids in [0, capacity).
   explicit ClockReplacer(std::size_t capacity);
+  ~ClockReplacer() override;
 
   // Sets the frame's reference bit.
   void RecordAccess(FrameId frame_id) override;
@@ -26,15 +27,16 @@ class ClockReplacer : public Replacer {
   bool Victim(const EvictionProbe &probe, FrameId *frame_id) override;
   // Stops tracking the frame.
   void Remove(FrameId frame_id) override;
+  auto SharedStateBytes() const -> std::size_t override;
+  auto BindSharedState(std::span<std::byte> memory, bool initialize) -> Status override;
 
  private:
   static constexpr std::uint8_t kUntracked = 0;
   static constexpr std::uint8_t kClear = 1;
   static constexpr std::uint8_t kReferenced = 2;
 
-  const std::size_t capacity_;
-  std::unique_ptr<std::atomic<std::uint8_t>[]> state_;
-  std::atomic<std::size_t> hand_{0};
+  struct State;
+  std::unique_ptr<State> state_;
 };
 
 }  // namespace telepath

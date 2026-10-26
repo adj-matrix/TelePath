@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "telepath/common/types.h"
+#include "../common/state_layout.h"
 
 namespace telepath {
 
@@ -17,7 +18,23 @@ namespace telepath {
 // per-stripe sequence counters. Writers serialize per stripe.
 class BufferManagerPageTable {
  public:
+  struct Offsets {
+    std::size_t heads;
+    std::size_t next;
+    std::size_t bucket_of;
+    std::size_t key_file_id;
+    std::size_t key_block_id;
+    std::size_t stripes;
+  };
+
+  // Reserves space for a table over `frame_capacity` frames in `layout`.
+  static auto Reserve(StateLayout *layout, std::size_t frame_capacity, std::size_t stripe_count) -> Offsets;
+
+  // Owns its memory.
   BufferManagerPageTable(std::size_t frame_capacity, std::size_t stripe_count);
+  // Lives at `base` + `offsets`; `initialize` empties the table, otherwise it
+  // uses a table another process initialized there.
+  BufferManagerPageTable(std::size_t frame_capacity, std::size_t stripe_count, std::byte *base, const Offsets &offsets, bool initialize);
 
   BufferManagerPageTable(const BufferManagerPageTable &) = delete;
   BufferManagerPageTable &operator=(const BufferManagerPageTable &) = delete;
@@ -63,15 +80,19 @@ class BufferManagerPageTable {
   void Link(std::size_t bucket, const BufferTag &tag, FrameId frame_id);
   void Unlink(FrameId frame_id);
 
+  static auto BucketCount(std::size_t frame_capacity) -> std::size_t;
+  void Place(std::byte *base, const Offsets &offsets, bool initialize);
+
   std::size_t frame_capacity_;
   std::size_t bucket_mask_;
   std::size_t stripe_count_;
-  std::unique_ptr<std::atomic<std::uint32_t>[]> heads_;
-  std::unique_ptr<std::atomic<std::uint32_t>[]> next_;
-  std::unique_ptr<std::atomic<std::uint32_t>[]> bucket_of_;
-  std::unique_ptr<std::atomic<FileId>[]> key_file_id_;
-  std::unique_ptr<std::atomic<BlockId>[]> key_block_id_;
-  std::unique_ptr<Stripe[]> stripes_;
+  std::unique_ptr<std::byte[]> owned_;
+  std::atomic<std::uint32_t> *heads_{nullptr};
+  std::atomic<std::uint32_t> *next_{nullptr};
+  std::atomic<std::uint32_t> *bucket_of_{nullptr};
+  std::atomic<FileId> *key_file_id_{nullptr};
+  std::atomic<BlockId> *key_block_id_{nullptr};
+  Stripe *stripes_{nullptr};
 };
 
 template <typename Live>

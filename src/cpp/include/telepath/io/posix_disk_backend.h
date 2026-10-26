@@ -37,6 +37,8 @@ class PosixDiskBackend : public DiskBackend {
   auto Reap(std::span<DiskCompletion> out, bool wait) -> Result<std::size_t> override;
   void Shutdown() override;
   auto GetCapabilities() const -> DiskBackendCapabilities override;
+  auto GetFileSize(FileId file_id) -> Result<std::uint64_t> override;
+  auto SetFileSize(FileId file_id, std::uint64_t size) -> Status override;
 
  private:
   auto Execute(const DiskRequest &request) -> Status;
