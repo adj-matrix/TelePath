@@ -44,11 +44,11 @@ void BufferManager::ReleaseFreeFrame(FrameId frame_id) {
   free_list_->Push(frame_id);
 }
 
-auto BufferManager::AcquireReservationFrame() -> Result<FrameId> {
-  if (std::optional<FrameId> free_frame = free_list_->Pop(); free_frame.has_value()) return free_frame.value();
+auto BufferManager::AcquireReservationFrame() -> Result<ReservationCandidate> {
+  if (std::optional<FrameId> free_frame = free_list_->Pop(); free_frame.has_value()) return ReservationCandidate{free_frame.value(), true};
 
   FrameId frame_id = kInvalidFrameId;
-  if (replacer_->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return frame_id;
+  if (replacer_->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return ReservationCandidate{frame_id, false};
   return ResourceExhausted("no evictable frame available");
 }
 
@@ -72,6 +72,11 @@ auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Stat
       if (outcome == frame_control::DiscardOutcome::kWriteback) {
         ReleaseFrame(frame_id);
         std::ignore = WaitForPendingFlush(&descriptor);
+        continue;
+      }
+      if (outcome == frame_control::DiscardOutcome::kLatched) {
+        frame_control::WaitWhile(descriptor.control, [](std::uint32_t word) { return (word & frame_control::kLatchMask) != 0; });
+        ReleaseFrame(frame_id);
         continue;
       }
       if (outcome == frame_control::DiscardOutcome::kBusy) {
@@ -112,10 +117,10 @@ auto BufferManager::InstallReservationEntry(const BufferTag &tag, const FrameRes
   return page_table_->ReplaceUnlessLive(evicted_tag, tag, reservation.frame_id, [&](FrameId other) { return IsLiveFor(other, tag); });
 }
 
-auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag, bool allow_victim_flush, FrameReservation *reservation) -> FrameReservationOutcome {
+auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag, bool allow_victim_flush, bool from_free_list, FrameReservation *reservation) -> FrameReservationOutcome {
   BufferDescriptor &descriptor = descriptors_[frame_id];
   std::uint32_t observed = 0;
-  const frame_control::ReserveOutcome outcome = frame_control::TryReserve(descriptor.control, &observed);
+  const frame_control::ReserveOutcome outcome = frame_control::TryReserve(descriptor.control, &observed, from_free_list);
   if (outcome == frame_control::ReserveOutcome::kRejected) return FrameReservationOutcome::kRejected;
   if (outcome == frame_control::ReserveOutcome::kNeedsFlush) {
     return allow_victim_flush ? FrameReservationOutcome::kNeedsFlush : FrameReservationOutcome::kRejected;

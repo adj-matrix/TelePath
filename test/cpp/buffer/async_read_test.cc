@@ -1,4 +1,6 @@
 #include <array>
+#include <cstdlib>
+#include <cstdio>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -185,6 +187,66 @@ void ExpectPrefetchStopsWhenPoolIsPinned() {
   assert(TotalPins(*fixture.manager) == 0);
 }
 
+// Turns a hang into a failure: the reservation loops below once spun forever.
+template <typename Body>
+void WithinDeadline(const char *what, Body body) {
+  std::atomic<bool> done{false};
+  std::thread watchdog([&] {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!done.load()) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        std::fprintf(stderr, "%s did not finish\n", what);
+        std::abort();
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  });
+  body();
+  done.store(true);
+  watchdog.join();
+}
+
+// A prefetch wider than the pool reads what fits and stops instead of waiting
+// for frames that only its own unsubmitted reads hold.
+void ExpectPrefetchWiderThanPoolStopsEarly() {
+  Fixture fixture("telepath_async_read_prefetch_wide", 4);
+  WithinDeadline("PrefetchBuffer wider than the pool", [&] { assert(fixture.manager->PrefetchBuffer(kFile, 0, 8).has_value()); });
+  WaitForResident(*fixture.manager, 0, 4);
+  assert(TotalPins(*fixture.manager) == 0);
+  auto handle = fixture.manager->ReadBuffer(kFile, 7);
+  assert(handle.has_value());
+  ExpectPage(handle->data(), 7);
+}
+
+// A read operation needing more frames than the pool fails cleanly, and one
+// that fits succeeds afterwards.
+void ExpectReadBuffersWiderThanPoolFails() {
+  Fixture fixture("telepath_async_read_read_buffers_wide", 4);
+  telepath::ReadBuffersOperation operation;
+  WithinDeadline("ReadBuffers wider than the pool", [&] {
+    assert(fixture.manager->StartReadBuffers(operation, kFile, 0, 8).has_value());
+    auto waited = fixture.manager->WaitReadBuffers(operation);
+    assert(!waited.has_value() && waited.error().code() == telepath::ErrorCode::kResourceExhausted);
+  });
+  assert(operation.handles().empty() && !operation.in_progress());
+  assert(TotalPins(*fixture.manager) == 0);
+
+  assert(fixture.manager->StartReadBuffers(operation, kFile, 4, 4).has_value());
+  assert(fixture.manager->WaitReadBuffers(operation).has_value());
+  for (telepath::BlockId i = 0; i < 4; ++i) ExpectPage(operation.handles()[i].data(), 4 + i);
+}
+
+// Zero blocks is a valid, empty operation.
+void ExpectEmptyReadBuffers() {
+  Fixture fixture("telepath_async_read_read_buffers_empty", 4);
+  telepath::ReadBuffersOperation operation;
+  assert(fixture.manager->StartReadBuffers(operation, kFile, 0, 0).has_value());
+  assert(fixture.manager->WaitReadBuffers(operation).has_value());
+  assert(operation.handles().empty());
+  assert(fixture.manager->PrefetchBuffer(kFile, 0, 0).has_value());
+  assert(TotalPins(*fixture.manager) == 0);
+}
+
 void ExpectReadBuffersReturnsHandlesInOrder() {
   Fixture fixture("telepath_async_read_read_buffers");
   assert(fixture.manager->ReadBuffer(kFile, 3).has_value());
@@ -297,5 +359,8 @@ int main() {
   ExpectFailedReadReleasesEveryPin();
   ExpectOperationMisuseIsRejected();
   ExpectConcurrentReadersShareInFlightLoads();
+  ExpectPrefetchWiderThanPoolStopsEarly();
+  ExpectReadBuffersWiderThanPoolFails();
+  ExpectEmptyReadBuffers();
   return 0;
 }

@@ -10,8 +10,8 @@ auto BufferManager::MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> 
   return SharedBufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
 }
 
-auto BufferManager::MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag) -> ExclusiveBufferHandle {
-  frame_control::AcquireExclusive(descriptors_[frame_id].control);
+auto BufferManager::MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag, bool latched) -> ExclusiveBufferHandle {
+  if (!latched) frame_control::AcquireExclusive(descriptors_[frame_id].control);
   return ExclusiveBufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
 }
 

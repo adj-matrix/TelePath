@@ -59,6 +59,15 @@ target_link_libraries(telepath_page_table_test PRIVATE telepath)
 
 add_test(NAME telepath_page_table_test COMMAND telepath_page_table_test)
 
+add_executable(telepath_primitives_stress_test
+  cpp/buffer/primitives_stress_test.cc
+)
+
+target_include_directories(telepath_primitives_stress_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cpp/lib/buffer)
+target_link_libraries(telepath_primitives_stress_test PRIVATE telepath)
+
+add_test(NAME telepath_primitives_stress_test COMMAND telepath_primitives_stress_test)
+
 add_executable(telepath_frame_control_test
   cpp/buffer/frame_control_test.cc
 )
@@ -323,6 +332,22 @@ add_executable(telepath_stress_integrity_test
 target_link_libraries(telepath_stress_integrity_test PRIVATE telepath)
 
 add_test(NAME telepath_stress_integrity_test COMMAND telepath_stress_integrity_test)
+
+add_executable(telepath_chaos_test
+  cpp/buffer/chaos_test.cc
+)
+
+target_link_libraries(telepath_chaos_test PRIVATE telepath)
+
+add_test(NAME telepath_chaos_test COMMAND telepath_chaos_test)
+
+add_executable(telepath_lifecycle_stress_test
+  cpp/buffer/lifecycle_stress_test.cc
+)
+
+target_link_libraries(telepath_lifecycle_stress_test PRIVATE telepath)
+
+add_test(NAME telepath_lifecycle_stress_test COMMAND telepath_lifecycle_stress_test)
 set_tests_properties(telepath_stress_integrity_test PROPERTIES TIMEOUT 300)
 
 add_executable(telepath_buffer_access_strategy_test
@@ -350,6 +375,14 @@ target_link_libraries(telepath_replacer_shared_state_test PRIVATE telepath)
 
 add_test(NAME telepath_replacer_shared_state_test COMMAND telepath_replacer_shared_state_test)
 
+add_executable(telepath_replacer_model_test
+  cpp/replacer/replacer_model_test.cc
+)
+
+target_link_libraries(telepath_replacer_model_test PRIVATE telepath)
+
+add_test(NAME telepath_replacer_model_test COMMAND telepath_replacer_model_test)
+
 add_executable(telepath_plan_replacer_test
   cpp/replacer/plan_replacer_test.cc
 )
@@ -376,6 +409,15 @@ target_link_libraries(telepath_page_cache_test PRIVATE telepath)
 
 add_test(NAME telepath_page_cache_test COMMAND telepath_page_cache_test)
 
+add_executable(telepath_page_cache_model_test
+  cpp/facade/page_cache_model_test.cc
+)
+
+target_include_directories(telepath_page_cache_model_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/buffer)
+target_link_libraries(telepath_page_cache_model_test PRIVATE telepath)
+
+add_test(NAME telepath_page_cache_model_test COMMAND telepath_page_cache_model_test)
+
 add_executable(telepath_foreground_writeback_test
   cpp/buffer/foreground_writeback_test.cc
 )
@@ -400,6 +442,14 @@ target_link_libraries(telepath_rec_lsn_test PRIVATE telepath)
 
 add_test(NAME telepath_rec_lsn_test COMMAND telepath_rec_lsn_test)
 
+add_executable(telepath_rec_lsn_stress_test
+  cpp/buffer/rec_lsn_stress_test.cc
+)
+
+target_link_libraries(telepath_rec_lsn_stress_test PRIVATE telepath)
+
+add_test(NAME telepath_rec_lsn_stress_test COMMAND telepath_rec_lsn_stress_test)
+
 add_executable(telepath_shared_memory_test
   cpp/buffer/shared_memory_test.cc
 )
@@ -407,6 +457,14 @@ add_executable(telepath_shared_memory_test
 target_link_libraries(telepath_shared_memory_test PRIVATE telepath)
 
 add_test(NAME telepath_shared_memory_test COMMAND telepath_shared_memory_test)
+
+add_executable(telepath_shared_memory_stress_test
+  cpp/buffer/shared_memory_stress_test.cc
+)
+
+target_link_libraries(telepath_shared_memory_stress_test PRIVATE telepath)
+
+add_test(NAME telepath_shared_memory_stress_test COMMAND telepath_shared_memory_stress_test)
 
 add_executable(telepath_async_read_test
   cpp/buffer/async_read_test.cc
@@ -509,6 +567,18 @@ if(TELEPATH_PYTHON3)
 endif()
 
 add_test(NAME telepath_observation_test COMMAND telepath_observation_test)
+
+add_executable(telepath_observation_stress_test
+  cpp/buffer/observation_stress_test.cc
+)
+
+target_link_libraries(telepath_observation_stress_test PRIVATE telepath)
+target_compile_definitions(telepath_observation_stress_test PRIVATE TELEPATH_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+if(TELEPATH_PYTHON3)
+  target_compile_definitions(telepath_observation_stress_test PRIVATE TELEPATH_PYTHON3="${TELEPATH_PYTHON3}")
+endif()
+
+add_test(NAME telepath_observation_stress_test COMMAND telepath_observation_stress_test)
 
 add_executable(telepath_benchmark
   cpp/benchmark/benchmark_main.cc

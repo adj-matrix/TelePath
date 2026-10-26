@@ -58,7 +58,7 @@ auto BufferManager::PrefetchBuffer(FileId file_id, BlockId block_id, std::size_t
   for (std::size_t i = 0; i < block_count; ++i) {
     const BufferTag tag{file_id, block_id + i};
     if (IsResidentTag(tag)) continue;
-    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, nullptr);
+    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, nullptr, false);
     if (!reservation.has_value()) {
       if (reservation.error().code() != ErrorCode::kResourceExhausted) status = PropagateError(reservation);
       break;
@@ -93,7 +93,7 @@ auto BufferManager::StartReadBuffers(ReadBuffersOperation &operation, FileId fil
     }
 
     if (IsResidentTag(tag)) continue;
-    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, strategy);
+    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, strategy, false);
     if (!reservation.has_value() || !reservation->has_value()) continue;
     observer_->RecordReadMiss(tag);
     state->frames[i] = reservation->value().frame_id;
@@ -160,8 +160,7 @@ void BufferManager::FinishAsyncLoad(AsyncLoad &load, const Status &status) {
       if (load.operation != nullptr) load.operation->slots[entry.slot] = ReadBuffersState::Slot::kFailed;
       continue;
     }
-    PublishLoadedFrame(entry.tag, entry.reservation);
-    if (load.operation == nullptr) ReleaseFrame(frame_id);
+    PublishLoadedFrame(entry.tag, entry.reservation, true, load.operation == nullptr);
   }
   if (load.operation != nullptr) load.operation->waiter.Complete(status);
   else if (prefetches_in_flight_.fetch_sub(1, std::memory_order_release) == 1) sync::FutexWakeAll(prefetches_in_flight_);

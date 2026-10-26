@@ -3,7 +3,9 @@
 
 Without arguments it decodes a hand-built observation area. With
 `--live NAME EXPECTED_JSON` it reads a live area published by the C++
-observation_test and checks that every key in EXPECTED_JSON matches.
+observation_test and checks that every key in EXPECTED_JSON matches. With
+`--consistency NAME SECONDS` it reads a live area that is being republished
+continuously and checks that every snapshot is internally consistent.
 """
 
 from __future__ import annotations
@@ -73,8 +75,17 @@ def test_rejects_bad_areas(observation) -> None:
     with tempfile.TemporaryDirectory() as root:
         (Path(root) / "torn").write_bytes(build_area(observation, 3))
         try:
-            observation.read_observation("/torn", shm_root=root, retries=5)
+            observation.read_observation("/torn", shm_root=root, timeout=0.05)
             raise AssertionError("a snapshot being written must not be returned")
+        except observation.ObservationError:
+            pass
+
+        unpublished = bytearray(build_area(observation, 0))
+        struct.pack_into("<Q", unpublished, 16, 0)
+        (Path(root) / "unpublished").write_bytes(bytes(unpublished))
+        try:
+            observation.read_observation("/unpublished", shm_root=root)
+            raise AssertionError("an area without a snapshot must be rejected")
         except observation.ObservationError:
             pass
 
@@ -98,6 +109,36 @@ def test_rejects_bad_areas(observation) -> None:
             pass
 
 
+def test_web_route(observation) -> None:
+    import os
+    from http import HTTPStatus
+
+    from web.backend import server
+
+    name = f"/telepath_web_route_{os.getpid()}"
+    path = observation.shm_path(name)
+    try:
+        path.write_bytes(build_area(observation, 2))
+        status, payload = server.observation_response({"name": [name]})
+        assert status == HTTPStatus.OK and payload["pool_size"] == 3 and len(payload["frames"]) == 3
+        status, payload = server.observation_response({"name": [name], "frames": ["0"]})
+        assert status == HTTPStatus.OK and "frames" not in payload
+
+        unpublished = bytearray(build_area(observation, 0))
+        struct.pack_into("<Q", unpublished, 16, 0)
+        path.write_bytes(bytes(unpublished))
+        status, payload = server.observation_response({"name": [name]})
+        assert status == HTTPStatus.NOT_FOUND and "no snapshot" in payload["error"]
+    finally:
+        path.unlink(missing_ok=True)
+    status, _ = server.observation_response({"name": [name]})
+    assert status == HTTPStatus.NOT_FOUND
+    status, _ = server.observation_response({"name": ["no_slash"]})
+    assert status == HTTPStatus.BAD_REQUEST
+    status, _ = server.observation_response({})
+    assert status == HTTPStatus.BAD_REQUEST
+
+
 def check_live(observation, name: str, expected: dict) -> None:
     result = observation.read_observation(name)
 
@@ -115,13 +156,50 @@ def check_live(observation, name: str, expected: dict) -> None:
     check(result, expected, "observation")
 
 
+def check_consistency(observation, name: str, seconds: float) -> None:
+    import time
+
+    deadline = time.monotonic() + seconds
+    snapshots = 0
+    sequences = set()
+    while time.monotonic() < deadline:
+        try:
+            result = observation.read_observation(name)
+        except observation.ObservationError as exc:
+            assert "no snapshot yet" in str(exc), exc
+            continue
+        frames = result["frames"]
+        summary = result["summary"]
+        assert len(frames) == result["pool_size"]
+        counted = {
+            "free_frames": sum(f["state"] == "free" for f in frames),
+            "loading_frames": sum(f["state"] == "loading" for f in frames),
+            "resident_frames": sum(f["state"] == "resident" for f in frames),
+            "dirty_frames": sum(f["dirty"] for f in frames),
+            "pinned_frames": sum(f["pins"] != 0 for f in frames),
+            "writeback_queued_frames": sum(f["writeback_queued"] for f in frames),
+            "writeback_active_frames": sum(f["writeback_active"] for f in frames),
+        }
+        for key, value in counted.items():
+            assert summary[key] == value, f"torn snapshot {result['sequence']}: {key} {summary[key]} != {value}"
+        assert [f["frame_id"] for f in frames] == list(range(result["pool_size"]))
+        assert result["sequence"] % 2 == 0
+        sequences.add(result["sequence"])
+        snapshots += 1
+    assert len(sequences) > 10, f"only {len(sequences)} distinct snapshots in {snapshots} reads"
+
+
 def main() -> int:
     observation = load_reader()
     if len(sys.argv) == 4 and sys.argv[1] == "--live":
         check_live(observation, sys.argv[2], json.loads(sys.argv[3]))
         return 0
+    if len(sys.argv) == 4 and sys.argv[1] == "--consistency":
+        check_consistency(observation, sys.argv[2], float(sys.argv[3]))
+        return 0
     test_decodes_hand_built_area(observation)
     test_rejects_bad_areas(observation)
+    test_web_route(observation)
     return 0
 
 

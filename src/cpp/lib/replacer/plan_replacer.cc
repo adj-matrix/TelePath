@@ -82,6 +82,7 @@ void PlanReplacer::RecordLoad(FrameId frame_id) {
 }
 
 bool PlanReplacer::Victim(const EvictionProbe &probe, FrameId *frame_id) {
+  if (frame_id == nullptr) return false;
   std::lock_guard<sync::FutexMutex> guard(state_->header->latch);
   for (FrameId candidate = state_->order.Last(); candidate != IndexedOrderedSet::kNone; candidate = state_->order.Previous(candidate)) {
     if (!probe.IsEvictable(candidate)) continue;

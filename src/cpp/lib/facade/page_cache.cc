@@ -77,6 +77,12 @@ auto PageCache::Write(FileId file_id, std::uint64_t offset, std::span<const std:
   Result<FileState *> state = State(file_id);
   if (!state.has_value()) return PropagateError(state);
   FileState &file = *state.value();
+  const auto extend_to = [&file](std::uint64_t end) {
+    std::uint64_t size = file.size.load(std::memory_order_relaxed);
+    while (size < end && !file.size.compare_exchange_weak(size, end, std::memory_order_acq_rel)) {
+    }
+    file.touched.store(true, std::memory_order_release);
+  };
 
   for (std::size_t copied = 0; copied < data.size();) {
     const std::uint64_t position = offset + copied;
@@ -87,16 +93,14 @@ auto PageCache::Write(FileId file_id, std::uint64_t offset, std::span<const std:
     // already have written, evicted, and persisted part of any other block.
     const ReadBufferMode mode = chunk == block_size_ ? ReadBufferMode::kZeroAndLock : ReadBufferMode::kNormal;
     Result<ExclusiveBufferHandle> handle = manager_->ReadBufferExclusive(file_id, block, nullptr, mode);
-    if (!handle.has_value()) return PropagateError(handle);
+    if (!handle.has_value()) {
+      if (copied != 0) extend_to(offset + copied);
+      return PropagateError(handle);
+    }
     std::memcpy(handle->mutable_data().data() + in_block, data.data() + copied, chunk);
     copied += chunk;
   }
-
-  const std::uint64_t end = offset + data.size();
-  std::uint64_t size = file.size.load(std::memory_order_relaxed);
-  while (size < end && !file.size.compare_exchange_weak(size, end, std::memory_order_acq_rel)) {
-  }
-  file.touched.store(true, std::memory_order_release);
+  extend_to(offset + data.size());
   return Ok();
 }
 
@@ -139,7 +143,7 @@ auto PageCache::Sync(FileId file_id) -> Status {
 }
 
 auto PageCache::Close() -> Status {
-  if (closed_.exchange(true, std::memory_order_acq_rel)) return Ok();
+  if (closed_.load(std::memory_order_acquire)) return Ok();
   std::vector<std::pair<FileId, FileState *>> touched;
   {
     std::shared_lock<std::shared_mutex> guard(files_latch_);
@@ -147,14 +151,13 @@ auto PageCache::Close() -> Status {
       if (state->touched.load(std::memory_order_acquire)) touched.emplace_back(file_id, state.get());
     }
   }
-  Status status = Ok();
   for (const auto &[file_id, state] : touched) {
-    Status synced = SyncState(file_id, *state);
-    if (!synced.has_value() && status.has_value()) status = synced;
+    if (Status synced = SyncState(file_id, *state); !synced.has_value()) return synced;
   }
   Status closed = manager_->Close();
-  if (!closed.has_value() && status.has_value()) status = closed;
-  return status;
+  if (!closed.has_value() && closed.error().code() != ErrorCode::kFailed) return closed;
+  closed_.store(true, std::memory_order_release);
+  return closed;
 }
 
 auto PageCache::State(FileId file_id) -> Result<FileState *> {

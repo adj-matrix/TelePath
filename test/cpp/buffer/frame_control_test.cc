@@ -36,27 +36,31 @@ void AssertPinRequiresResidentState() {
 void AssertReserveClaimsOnlyIdleFrames() {
   std::uint32_t observed = 0;
 
+  // Only the thread that popped a free frame from the free list may claim it;
+  // a stale victim nomination of a frame being released must not.
   std::atomic<std::uint32_t> free_frame{0};
-  assert(fc::TryReserve(free_frame, &observed) == fc::ReserveOutcome::kReserved);
+  assert(fc::TryReserve(free_frame, &observed, false) == fc::ReserveOutcome::kRejected);
+  assert(free_frame.load() == 0);
+  assert(fc::TryReserve(free_frame, &observed, true) == fc::ReserveOutcome::kReserved);
   assert(fc::State(free_frame.load()) == telepath::BufferFrameState::kLoading);
   assert(fc::Pins(free_frame.load()) == 1);
 
   std::atomic<std::uint32_t> clean{ResidentWord(0, fc::kRedirtied)};
-  assert(fc::TryReserve(clean, &observed) == fc::ReserveOutcome::kReserved);
+  assert(fc::TryReserve(clean, &observed, false) == fc::ReserveOutcome::kReserved);
   assert(fc::IsResident(observed));
   assert((clean.load() & (fc::kDirty | fc::kRedirtied)) == 0);
 
   std::atomic<std::uint32_t> pinned{ResidentWord(1)};
-  assert(fc::TryReserve(pinned, &observed) == fc::ReserveOutcome::kRejected);
+  assert(fc::TryReserve(pinned, &observed, false) == fc::ReserveOutcome::kRejected);
 
   std::atomic<std::uint32_t> latched{ResidentWord(0, fc::kSharedOne)};
-  assert(fc::TryReserve(latched, &observed) == fc::ReserveOutcome::kRejected);
+  assert(fc::TryReserve(latched, &observed, false) == fc::ReserveOutcome::kRejected);
 
   std::atomic<std::uint32_t> flushing{ResidentWord(0, fc::kDirty | fc::kWritebackActive)};
-  assert(fc::TryReserve(flushing, &observed) == fc::ReserveOutcome::kRejected);
+  assert(fc::TryReserve(flushing, &observed, false) == fc::ReserveOutcome::kRejected);
 
   std::atomic<std::uint32_t> dirty{ResidentWord(0, fc::kDirty)};
-  assert(fc::TryReserve(dirty, &observed) == fc::ReserveOutcome::kNeedsFlush);
+  assert(fc::TryReserve(dirty, &observed, false) == fc::ReserveOutcome::kNeedsFlush);
   assert(dirty.load() == ResidentWord(0, fc::kDirty));
 }
 
@@ -184,13 +188,13 @@ void AssertWritebackErrorRoundTrip() {
 void AssertReleaseToFreeKeepsLatchHolders() {
   std::atomic<std::uint32_t> control{0};
   std::uint32_t observed = 0;
-  assert(fc::TryReserve(control, &observed) == fc::ReserveOutcome::kReserved);
+  assert(fc::TryReserve(control, &observed, true) == fc::ReserveOutcome::kReserved);
   assert(fc::TryAcquireShared(control));
   fc::ReleaseToFree(control);
   assert(fc::State(control.load()) == telepath::BufferFrameState::kFree);
   assert(fc::Pins(control.load()) == 0);
   assert(fc::SharedHolders(control.load()) == 1);
-  assert(fc::TryReserve(control, &observed) == fc::ReserveOutcome::kRejected);
+  assert(fc::TryReserve(control, &observed, true) == fc::ReserveOutcome::kRejected);
   fc::ReleaseShared(control);
   assert(control.load() == 0);
 }

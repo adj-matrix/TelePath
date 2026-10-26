@@ -77,7 +77,7 @@ auto MLPrefetchBuffer::Next() -> Result<std::optional<PlannedBlock>> {
 auto MLPrefetchBuffer::Close() -> Status {
   if (closed_.load(std::memory_order_acquire)) return Ok();
   Status status = manager_->Close();
-  if (status.has_value() || status.error().code() != ErrorCode::kInvalidArgument) closed_.store(true, std::memory_order_release);
+  if (status.has_value() || status.error().code() == ErrorCode::kFailed) closed_.store(true, std::memory_order_release);
   return status;
 }
 

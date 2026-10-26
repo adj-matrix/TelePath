@@ -59,6 +59,15 @@ struct FrameReservation {
   BufferTag evicted_tag{};
 };
 
+// A frame that may be reserved: one popped from the free list, which the
+// caller owns while it is free and pushes back if it cannot claim it (a
+// flusher may hold the shared latch on any frame for a moment), or one the
+// replacer nominated, which can only be claimed while resident.
+struct ReservationCandidate {
+  FrameId frame_id{kInvalidFrameId};
+  bool from_free_list{false};
+};
+
 enum class FrameReservationOutcome {
   kReserved = 0,
   kNeedsFlush,
@@ -213,11 +222,16 @@ class BufferManager {
   // Runs FlushAll(), stops background work, and closes the manager: afterwards
   // every operation returns ErrorCode::kUnavailable. Waits for loads in flight,
   // such as prefetches, then returns kInvalidArgument without closing while a
-  // handle or read operation still pins a page.
+  // handle or read operation still pins a page. When FlushAll() fails, returns
+  // its error without closing, so the caller can retry.
   // Closing a closed manager returns Ok; closing a failed one stops it and
   // returns kFailed. In cross-process mode pins held by other processes do not
   // block closing, so release this process's handles first; FlushAll() writes
-  // back the dirty pages of every attached process.
+  // back the dirty pages of every attached process. Stop other threads' calls
+  // before closing, as PostgreSQL stops its backends before the shutdown
+  // checkpoint: a call already under way may still change a page after
+  // Close()'s FlushAll() and its change is then not written back. Calls that
+  // start after Close() returned fail with kUnavailable.
   auto Close() -> Status;
   // Returns a point-in-time view of frame metadata for observability and debug
   // tooling. This does not expose direct page memory access.
@@ -254,7 +268,10 @@ class BufferManager {
     std::shared_ptr<TelemetrySink> telemetry_sink);
 
   // buffer_manager_read.cc
-  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode = ReadBufferMode::kNormal) -> Result<FrameId>;
+  // Returns the page pinned. A kZeroAndLock page that had to be zero-filled
+  // also comes with the exclusive latch held, reported in `exclusive_latched`,
+  // so that no other thread sees the zeros.
+  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode = ReadBufferMode::kNormal, bool *exclusive_latched = nullptr) -> Result<FrameId>;
   auto TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId>;
   auto ProbeResident(const BufferTag &tag, bool record_access, FrameId *frame_id) -> ResidentProbe;
   bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access);
@@ -263,19 +280,25 @@ class BufferManager {
   bool IsLiveFor(FrameId frame_id, const BufferTag &tag) const;
   // Loads `tag` into a newly reserved frame and returns it pinned; nullopt
   // means another thread installed the tag first and the caller must retry.
-  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<std::optional<FrameId>>;
+  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode, bool *exclusive_latched) -> Result<std::optional<FrameId>>;
   // Reserves a frame for `tag`; nullopt means another frame already holds or
-  // is loading the tag.
-  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy) -> Result<std::optional<FrameReservation>>;
-  auto AcquireVictimFrame() -> Result<FrameId>;
-  auto ReserveVictim(FrameId frame_id, const BufferTag &tag, FrameReservation *reservation) -> Result<FrameReservationOutcome>;
+  // is loading the tag. With `wait_for_frame` it keeps retrying while some
+  // frame may still become free; without it, it returns kResourceExhausted at
+  // once, which a caller holding reservations whose reads it has not yet
+  // submitted needs, since those reservations would keep it waiting forever.
+  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy, bool wait_for_frame = true) -> Result<std::optional<FrameReservation>>;
+  auto AcquireVictimFrame(bool wait_for_frame) -> Result<ReservationCandidate>;
+  auto ReserveVictim(const ReservationCandidate &candidate, const BufferTag &tag, FrameReservation *reservation) -> Result<FrameReservationOutcome>;
   auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy, FrameReservation *reservation) -> FrameReservationOutcome;
   auto CompleteReservation(
     const BufferTag &tag,
     const FrameReservation &reservation,
-    ReadBufferMode mode
+    ReadBufferMode mode,
+    bool *exclusive_latched
   ) -> Result<FrameId>;
-  void PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation, bool read_from_disk = true);
+  // Publishes a loaded page; `release_pin` drops the loader's pin in the same
+  // step, for loads nobody waits to use, such as prefetches.
+  void PublishLoadedFrame(const BufferTag &tag, const FrameReservation &reservation, bool read_from_disk = true, bool release_pin = false);
   auto ReadReservedPage(FrameId frame_id, const BufferTag &tag) -> Status;
   bool IsResidentTag(const BufferTag &tag) const;
 
@@ -357,7 +380,7 @@ class BufferManager {
     const Status &status
   ) -> Status;
   void ReleaseFreeFrame(FrameId frame_id);
-  auto AcquireReservationFrame() -> Result<FrameId>;
+  auto AcquireReservationFrame() -> Result<ReservationCandidate>;
   auto InstallReservationEntry(
     const BufferTag &tag,
     const FrameReservation &reservation) -> std::optional<FrameId>;
@@ -365,6 +388,7 @@ class BufferManager {
     FrameId frame_id,
     const BufferTag &tag,
     bool allow_victim_flush,
+    bool from_free_list,
     FrameReservation *reservation
   ) -> FrameReservationOutcome;
   bool HasTransientFrame() const;
@@ -373,7 +397,7 @@ class BufferManager {
 
   // buffer_manager_handle.cc
   auto MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> SharedBufferHandle;
-  auto MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag) -> ExclusiveBufferHandle;
+  auto MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag, bool latched = false) -> ExclusiveBufferHandle;
   void ReleaseSharedHandle(FrameId frame_id) noexcept;
   void ReleaseExclusiveHandle(FrameId frame_id) noexcept;
   void MarkHandleDirty(FrameId frame_id, Lsn lsn = kInvalidLsn) noexcept;
@@ -397,7 +421,14 @@ class BufferManager {
   void StopFlushPipeline(const Status &reason);
   auto StartIoEngine() -> Status;
   auto StartObservation() -> Status;
+  // Remembers that `file_id` has completed writes awaiting a sync. In
+  // cross-process mode the list lives in the segment, so any process's
+  // FlushAll() syncs it; RecordWrittenFile() returns false when that list is
+  // full, and the caller must sync the file itself, since a list of its own
+  // would be lost if it exited before syncing.
+  auto RecordWrittenFile(FileId file_id) -> bool;
   void NoteWrittenFile(FileId file_id);
+  void NoteLocalWrittenFile(FileId file_id);
   auto SyncWrittenFiles() -> Status;
 
   std::size_t pool_size_{0};

@@ -1,11 +1,20 @@
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <functional>
+#include <condition_variable>
+#include <atomic>
+#include <thread>
+#include <tuple>
 #include <cassert>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "buffer_test_support.h"
@@ -133,6 +142,26 @@ void ExpectFailedSyncIsRetried() {
   assert(fixture.backend->syncs()[3] == 2);
 }
 
+// A Close() whose flush fails keeps the manager open, so a retry still has
+// work to do instead of reporting success for data that is not durable.
+void ExpectFailedCloseCanBeRetried() {
+  Fixture fixture("telepath_durability_close_retry");
+  WriteByte(fixture.manager.get(), 6, 0, std::byte{0x61});
+  fixture.backend->set_fail_syncs(true);
+  auto failed = fixture.manager->Close();
+  assert(!failed.has_value() && failed.error().code() == telepath::ErrorCode::kIoError);
+  auto still_open = fixture.manager->ReadBuffer(6, 0);
+  assert(still_open.has_value() && still_open->data()[0] == std::byte{0x61});
+  still_open->Reset();
+
+  fixture.backend->set_fail_syncs(false);
+  assert(fixture.manager->Close().has_value());
+  assert(fixture.backend->syncs()[6] == 2);
+  assert(PersistedByte(fixture.root.path(), 6, 0) == std::byte{0x61});
+  auto after = fixture.manager->ReadBuffer(6, 0);
+  assert(!after.has_value() && after.error().code() == telepath::ErrorCode::kUnavailable);
+}
+
 void ExpectCloseFlushesAndRejectsLaterCalls() {
   Fixture fixture("telepath_durability_close");
   WriteByte(fixture.manager.get(), 4, 0, std::byte{0x41});
@@ -234,12 +263,124 @@ void ExpectDropFileBuffersDiscardsDirtyPages() {
 
 }  // namespace
 
+// Runs callbacks when an eviction or a disk read is reported. A zero-filled
+// load reports the page it evicted, and an asynchronous load its disk read,
+// right after publishing the page, so the callbacks run inside the windows
+// those paths must keep closed.
+class HookSink : public telepath::TelemetrySink {
+ public:
+  std::function<void()> on_eviction;
+  std::function<void()> on_disk_read;
+
+ protected:
+  void DoRecordHit(const telepath::BufferTag &) override {}
+  void DoRecordMiss(const telepath::BufferTag &) override {}
+  void DoRecordDiskRead(const telepath::BufferTag &) override {
+    if (on_disk_read) on_disk_read();
+  }
+  void DoRecordDiskWrite(const telepath::BufferTag &) override {}
+  void DoRecordEviction(const telepath::BufferTag &) override {
+    if (on_eviction) on_eviction();
+  }
+  void DoRecordDirtyFlush(const telepath::BufferTag &) override {}
+  void DoRecordFlushTaskScheduled(const telepath::BufferTag &) override {}
+  void DoRecordFlushTaskCompleted(const telepath::BufferTag &) override {}
+  void DoRecordFlushFailure(const telepath::BufferTag &) override {}
+  void DoRecordCleanerFlushScheduled(const telepath::BufferTag &) override {}
+  void DoRecordCleanerFlushFinished(const telepath::BufferTag &) override {}
+  void DoRecordCleanerFlushSkipped() override {}
+  void DoRecordEvictionFailure(const telepath::BufferTag &) override {}
+  auto DoSnapshot() const -> telepath::TelemetrySnapshot override { return {}; }
+};
+
+// kZeroAndLock hands out the zero-filled page already latched, so no other
+// thread ever sees the zeros the caller is about to overwrite.
+void ExpectZeroAndLockNeverExposesZeros() {
+  telepath::buffer_test_support::TestRootGuard root("telepath_durability_zero_exposure");
+  auto sink = std::make_shared<HookSink>();
+  auto created = telepath::BufferManager::Create(1, kPageSize, std::make_unique<telepath::PosixDiskBackend>(root.path().string(), telepath::BlockGeometry::Of<kPageSize>()), telepath::MakeClockSweepReplacer(1), sink);
+  assert(created.has_value());
+  auto &manager = created.value();
+  assert(manager->ReadBuffer(7, 1).has_value());
+
+  std::byte seen{0};
+  std::thread reader;
+  std::mutex latch;
+  std::condition_variable cv;
+  bool read_done = false;
+  bool armed = true;
+  sink->on_eviction = [&] {
+    if (!std::exchange(armed, false)) return;
+    reader = std::thread([&] {
+      auto handle = manager->ReadBuffer(7, 0);
+      assert(handle.has_value());
+      seen = handle->data()[0];
+      handle->Reset();
+      std::lock_guard<std::mutex> guard(latch);
+      read_done = true;
+      cv.notify_all();
+    });
+    // Give the reader every chance to slip in before the caller gets the page.
+    std::unique_lock<std::mutex> lock(latch);
+    cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return read_done; });
+  };
+  {
+    auto handle = manager->ReadBufferExclusive(7, 0, nullptr, telepath::ReadBufferMode::kZeroAndLock);
+    assert(handle.has_value());
+    std::fill(handle->mutable_data().begin(), handle->mutable_data().end(), std::byte{0xAB});
+  }
+  reader.join();
+  assert(seen == std::byte{0xAB});
+}
+
+// A prefetched page is unpinned as it becomes resident, so dropping it right
+// then succeeds instead of seeing the prefetch's pin as a user's.
+void ExpectDropRightAfterPrefetchSucceeds() {
+  telepath::buffer_test_support::TestRootGuard root("telepath_durability_drop_prefetched");
+  auto sink = std::make_shared<HookSink>();
+  auto created = telepath::BufferManager::Create(4, kPageSize, std::make_unique<telepath::PosixDiskBackend>(root.path().string(), telepath::BlockGeometry::Of<kPageSize>()), telepath::MakeClockSweepReplacer(4), sink);
+  assert(created.has_value());
+  auto &manager = created.value();
+
+  std::mutex latch;
+  std::condition_variable cv;
+  std::optional<telepath::Status> dropped;
+  std::thread dropper;
+  bool armed = true;
+  sink->on_disk_read = [&] {
+    if (!std::exchange(armed, false)) return;
+    dropper = std::thread([&] {
+      telepath::Status status = manager->DropFileBuffers(7, 0);
+      std::lock_guard<std::mutex> guard(latch);
+      dropped = status;
+      cv.notify_all();
+    });
+    std::unique_lock<std::mutex> lock(latch);
+    cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return dropped.has_value(); });
+  };
+  assert(manager->PrefetchBuffer(7, 0, 1).has_value());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (true) {
+    {
+      std::lock_guard<std::mutex> guard(latch);
+      if (dropped.has_value()) break;
+    }
+    assert(std::chrono::steady_clock::now() < deadline);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  dropper.join();
+  assert(dropped->has_value());
+}
+
 int main() {
+  ExpectDropRightAfterPrefetchSucceeds();
+  ExpectZeroAndLockNeverExposesZeros();
   ExpectZeroAndLockKeepsResidentContents();
   ExpectFileFlushAndSyncTouchOnlyThatFile();
   ExpectDropFileBuffersDiscardsDirtyPages();
   ExpectFlushAllSyncsEachWrittenFileOnce();
   ExpectFailedSyncIsRetried();
+  ExpectFailedCloseCanBeRetried();
   ExpectCloseFlushesAndRejectsLaterCalls();
   ExpectPreWriteHookSeesSnapshotAndCanFail();
   return 0;

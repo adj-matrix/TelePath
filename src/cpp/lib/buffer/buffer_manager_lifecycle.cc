@@ -159,17 +159,25 @@ void BufferManager::StopFlushPipeline(const Status &reason) {
   if (io_engine_ != nullptr) io_engine_->Shutdown(reason);
 }
 
-void BufferManager::NoteWrittenFile(FileId file_id) {
-  if (segment_ != nullptr) {
-    SharedWrittenFiles &shared = segment_->written_files();
-    std::lock_guard<sync::FutexMutex> shared_guard(shared.latch);
-    const auto end = shared.files.begin() + shared.count;
-    if (std::find(shared.files.begin(), end, file_id) != end) return;
-    if (shared.count < SharedWrittenFiles::kCapacity) {
-      shared.files[shared.count++] = file_id;
-      return;
-    }
+auto BufferManager::RecordWrittenFile(FileId file_id) -> bool {
+  if (segment_ == nullptr) {
+    NoteLocalWrittenFile(file_id);
+    return true;
   }
+  SharedWrittenFiles &shared = segment_->written_files();
+  std::lock_guard<sync::FutexMutex> shared_guard(shared.latch);
+  const auto end = shared.files.begin() + shared.count;
+  if (std::find(shared.files.begin(), end, file_id) != end) return true;
+  if (shared.count == SharedWrittenFiles::kCapacity) return false;
+  shared.files[shared.count++] = file_id;
+  return true;
+}
+
+void BufferManager::NoteWrittenFile(FileId file_id) {
+  if (!RecordWrittenFile(file_id)) NoteLocalWrittenFile(file_id);
+}
+
+void BufferManager::NoteLocalWrittenFile(FileId file_id) {
   std::lock_guard<std::mutex> guard(written_files_latch_);
   if (std::find(written_files_.begin(), written_files_.end(), file_id) == written_files_.end()) written_files_.push_back(file_id);
 }

@@ -211,6 +211,71 @@ void ExpectCloseRejectsLaterCalls() {
   assert(fixture.cache->Close().has_value());
   auto after = fixture.cache->Fetch(1);
   assert(!after.has_value() && after.error().code() == telepath::ErrorCode::kUnavailable);
+  auto next = fixture.cache->Next();
+  assert(!next.has_value() && next.error().code() == telepath::ErrorCode::kUnavailable);
+  auto replan = fixture.cache->SetPlan(plan);
+  assert(!replan.has_value() && replan.error().code() == telepath::ErrorCode::kUnavailable);
+}
+
+void ExpectEmptyPlan() {
+  Fixture fixture("telepath_ml_prefetch_empty", 4, 2);
+  assert(fixture.cache->SetPlan({}).has_value());
+  assert(fixture.cache->plan_size() == 0);
+  auto next = fixture.cache->Next();
+  assert(next.has_value() && !next->has_value());
+  auto fetched = fixture.cache->Fetch(0);
+  assert(!fetched.has_value() && fetched.error().code() == telepath::ErrorCode::kInvalidArgument);
+}
+
+// Prefetching further ahead than the pool holds reads what fits and never
+// gets in the way of the position being consumed; blocks past the end of the
+// dataset read as zeros.
+void ExpectPrefetchDeeperThanPool() {
+  Fixture fixture("telepath_ml_prefetch_deep", 2, 16);
+  std::vector<telepath::BufferTag> plan = ShuffledPlan(60, 11);
+  plan[17] = {kFile, 1000};
+  assert(fixture.cache->SetPlan(plan).has_value());
+  for (std::size_t expected = 0; expected < plan.size(); ++expected) {
+    auto next = fixture.cache->Next();
+    assert(next.has_value() && next->has_value() && (*next)->position == expected);
+    if (plan[expected].block_id == 1000) {
+      assert((*next)->handle.data()[0] == std::byte{0} && (*next)->handle.data()[kBlock - 1] == std::byte{0});
+      continue;
+    }
+    ExpectBlock((*next)->handle, plan[expected].block_id);
+  }
+  auto done = fixture.cache->Next();
+  assert(done.has_value() && !done->has_value());
+}
+
+// Many threads fetch random positions, several times each, from a pool far
+// smaller than the plan; every handle shows its block.
+void ExpectConcurrentRandomFetchesOnTinyPool() {
+  Fixture fixture("telepath_ml_prefetch_tiny_pool", 3, 4);
+  const std::vector<telepath::BufferTag> plan = ShuffledPlan(200, 5);
+  assert(fixture.cache->SetPlan(plan).has_value());
+  std::atomic<int> exhausted{0};
+  std::vector<std::thread> threads;
+  for (unsigned thread = 0; thread < 8; ++thread) {
+    threads.emplace_back([&, thread] {
+      std::mt19937 rng(thread);
+      for (int fetch = 0; fetch < 300; ++fetch) {
+        const std::size_t position = rng() % plan.size();
+        auto handle = fixture.cache->Fetch(position);
+        if (!handle.has_value()) {
+          assert(handle.error().code() == telepath::ErrorCode::kResourceExhausted);
+          exhausted.fetch_add(1);
+          continue;
+        }
+        ExpectBlock(handle.value(), plan[position].block_id);
+      }
+    });
+  }
+  for (auto &thread : threads) thread.join();
+  // Eight threads share three frames, so a fetch may find every frame pinned,
+  // but most fetches succeed.
+  assert(exhausted.load() < 8 * 300 / 2);
+  assert(fixture.cache->Close().has_value());
 }
 
 }  // namespace
@@ -221,5 +286,8 @@ int main() {
   ExpectDeterministicPartitionWithFetch();
   ExpectPrefetchReadsAheadAndNewPlanRestarts();
   ExpectCloseRejectsLaterCalls();
+  ExpectEmptyPlan();
+  ExpectPrefetchDeeperThanPool();
+  ExpectConcurrentRandomFetchesOnTinyPool();
   return 0;
 }

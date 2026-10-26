@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -31,13 +32,29 @@ class RecordingBackend : public telepath::DiskBackend {
       std::lock_guard<std::mutex> guard(latch_);
       for (const auto &request : requests) {
         if (request.operation == telepath::DiskOperation::kRead) reads_.push_back({request.tag.block_id, request.block_count});
+        if (request.operation == telepath::DiskOperation::kRead && fail_read_of_ == request.tag.block_id) {
+          failing_tokens_.push_back(request.token);
+          fail_read_of_.reset();
+        }
         if (request.operation == telepath::DiskOperation::kSync) ++syncs_;
+        if (request.operation == telepath::DiskOperation::kSync && fail_syncs_) failing_tokens_.push_back(request.token);
       }
     }
     return inner_.Submit(requests, mode);
   }
 
-  auto Reap(std::span<telepath::DiskCompletion> out, bool wait) -> telepath::Result<std::size_t> override { return inner_.Reap(out, wait); }
+  auto Reap(std::span<telepath::DiskCompletion> out, bool wait) -> telepath::Result<std::size_t> override {
+    auto reaped = inner_.Reap(out, wait);
+    if (!reaped.has_value()) return reaped;
+    std::lock_guard<std::mutex> guard(latch_);
+    for (std::size_t i = 0; i < reaped.value(); ++i) {
+      auto it = std::find(failing_tokens_.begin(), failing_tokens_.end(), out[i].token);
+      if (it == failing_tokens_.end()) continue;
+      failing_tokens_.erase(it);
+      out[i].status = telepath::IoError("injected read failure", 5);
+    }
+    return reaped;
+  }
   void Shutdown() override { inner_.Shutdown(); }
   auto GetCapabilities() const -> telepath::DiskBackendCapabilities override { return inner_.GetCapabilities(); }
   auto GetFileSize(telepath::FileId file_id) -> telepath::Result<std::uint64_t> override { return inner_.GetFileSize(file_id); }
@@ -63,11 +80,25 @@ class RecordingBackend : public telepath::DiskBackend {
     return syncs_;
   }
 
+  void set_fail_syncs(bool value) {
+    std::lock_guard<std::mutex> guard(latch_);
+    fail_syncs_ = value;
+  }
+
+  // Fails the next read of `block`.
+  void FailNextReadOf(telepath::BlockId block) {
+    std::lock_guard<std::mutex> guard(latch_);
+    fail_read_of_ = block;
+  }
+
  private:
   telepath::PosixDiskBackend inner_;
   std::mutex latch_;
   std::vector<Read> reads_;
   int syncs_{0};
+  std::optional<telepath::BlockId> fail_read_of_;
+  bool fail_syncs_{false};
+  std::vector<std::uint64_t> failing_tokens_;
 };
 
 struct Fixture {
@@ -243,7 +274,51 @@ void ExpectCloseRejectsLaterCalls() {
 
 }  // namespace
 
+// A write that fails partway has written a prefix, and the file size covers
+// it, like a short POSIX write; those bytes never surface later inside a gap
+// that must read as zeros.
+void ExpectFailedWriteLeavesNoHiddenBytes() {
+  telepath::buffer_test_support::TestRootGuard root("telepath_page_cache_failed_write");
+  Fixture fixture(root.path(), 8, 0);
+  fixture.backend->FailNextReadOf(1);
+  const std::vector<std::byte> data = Pattern(kBlock, 9);
+  auto failed = fixture.cache->Write(5, 100, data);
+  assert(!failed.has_value() && failed.error().code() == telepath::ErrorCode::kIoError);
+  const std::uint64_t size = fixture.cache->FileSize(5).value();
+  assert(size == 0 || size == kBlock);
+
+  assert(fixture.cache->Write(5, 3 * kBlock, std::vector<std::byte>{std::byte{1}}).has_value());
+  const std::vector<std::byte> first = ReadAll(*fixture.cache, 5, 0, kBlock);
+  for (std::size_t i = 0; i < kBlock; ++i) {
+    const bool written = i >= 100 && i < size;
+    assert(first[i] == (written ? data[i - 100] : std::byte{0}));
+  }
+}
+
+// A Close() whose sync fails keeps the cache open for a retry.
+void ExpectFailedCloseCanBeRetried() {
+  telepath::buffer_test_support::TestRootGuard root("telepath_page_cache_close_retry");
+  {
+    Fixture fixture(root.path(), 8, 0);
+    const std::vector<std::byte> data = Pattern(1000, 3);
+    assert(fixture.cache->Write(6, 0, data).has_value());
+    fixture.backend->set_fail_syncs(true);
+    auto failed = fixture.cache->Close();
+    assert(!failed.has_value() && failed.error().code() == telepath::ErrorCode::kIoError);
+    assert(ReadAll(*fixture.cache, 6, 0, 1000) == data);
+    fixture.backend->set_fail_syncs(false);
+    assert(fixture.cache->Close().has_value());
+    auto after = fixture.cache->FileSize(6);
+    assert(!after.has_value() && after.error().code() == telepath::ErrorCode::kUnavailable);
+  }
+  Fixture reopened(root.path(), 8, 0);
+  assert(reopened.cache->FileSize(6).value() == 1000);
+  assert(ReadAll(*reopened.cache, 6, 0, 1000) == Pattern(1000, 3));
+}
+
 int main() {
+  ExpectFailedWriteLeavesNoHiddenBytes();
+  ExpectFailedCloseCanBeRetried();
   ExpectUnalignedWritesReadBackAndExtendSize();
   ExpectFullBlockWritesSkipDiskReads();
   ExpectSyncPersistsDataAndExactSize();

@@ -87,9 +87,10 @@ auto BufferManager::ReadBuffer(FileId file_id, BlockId block_id, BufferAccessStr
 
 auto BufferManager::ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<ExclusiveBufferHandle> {
   const BufferTag tag{file_id, block_id};
-  Result<FrameId> frame = PinPage(tag, strategy, mode);
+  bool latched = false;
+  Result<FrameId> frame = PinPage(tag, strategy, mode, &latched);
   if (!frame.has_value()) return PropagateError(frame);
-  return MakeExclusiveHandle(frame.value(), tag);
+  return MakeExclusiveHandle(frame.value(), tag, latched);
 }
 
 auto BufferManager::ReleaseBuffer(SharedBufferHandle &&handle) -> Status {
@@ -225,6 +226,7 @@ auto BufferManager::Close() -> Status {
   if (segment_ == nullptr && HasPinnedFrame()) return InvalidArgument("pages are still pinned by handles or read operations");
   Status status = CheckUsable();
   if (status.has_value()) status = FlushAll();
+  if (!status.has_value() && !failed_.load(std::memory_order_acquire)) return status;
   if (observation_ != nullptr) {
     observation_->Publish();
     observation_->Stop();

@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <span>
+#include <tuple>
 
 #include "buffer_manager_observer.h"
 #include "cleaner_controller.h"
@@ -209,7 +210,7 @@ void BufferManager::FinalizeFlushTask(const std::shared_ptr<BufferManagerFlushTa
     observer_->RecordCleanerFlushFinished(task->tag);
   }
   if (flush_status.has_value()) {
-    NoteWrittenFile(task->tag.file_id);
+    if (!RecordWrittenFile(task->tag.file_id)) std::ignore = SyncFiles({task->tag.file_id});
     observer_->RecordSuccessfulFlush(task->tag);
   }
   NotifyCleaner();

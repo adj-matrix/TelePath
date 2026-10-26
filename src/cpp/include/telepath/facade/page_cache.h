@@ -59,7 +59,9 @@ class PageCache {
   // were copied: fewer at the end of the file, and 0 at or past it.
   auto Read(FileId file_id, std::uint64_t offset, std::span<std::byte> out) -> Result<std::size_t>;
   // Copies `data` to `offset`, extending the file when it ends past the
-  // current size; a gap between the old size and `offset` reads as zeros.
+  // current size; a gap between the old size and `offset` reads as zeros. On
+  // an error a prefix of `data` may have been written, as with a short POSIX
+  // write, and the size then covers that prefix.
   auto Write(FileId file_id, std::uint64_t offset, std::span<const std::byte> data) -> Status;
   auto FileSize(FileId file_id) -> Result<std::uint64_t>;
   // Sets the file's size. Shrinking discards cached data past the new size,
@@ -69,7 +71,8 @@ class PageCache {
   // durable.
   auto Sync(FileId file_id) -> Status;
   // Syncs every file this cache has changed and closes it; afterwards every
-  // call returns ErrorCode::kUnavailable.
+  // call returns ErrorCode::kUnavailable. When a sync fails, returns its error
+  // without closing, so the caller can retry. Stop other threads' calls first.
   auto Close() -> Status;
 
   auto block_size() const -> std::size_t { return block_size_; }

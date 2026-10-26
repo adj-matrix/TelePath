@@ -9,6 +9,7 @@ from __future__ import annotations
 import mmap
 import os
 import struct
+import time
 from pathlib import Path
 from typing import Any
 
@@ -67,10 +68,14 @@ def shm_path(name: str, shm_root: str = "/dev/shm") -> Path:
     return Path(shm_root) / name[1:]
 
 
-def _read_consistent(view: mmap.mmap, sequence_offset: int, start: int, end: int, retries: int) -> bytes:
-    for _ in range(retries):
+def _read_consistent(view: mmap.mmap, sequence_offset: int, start: int, end: int, timeout: float) -> bytes:
+    # Bounded by time rather than attempts: a writer descheduled mid-snapshot
+    # keeps the sequence odd for as long as it waits.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         (before,) = struct.unpack_from("<Q", view, sequence_offset)
         if before % 2 == 1:
+            time.sleep(0)
             continue
         data = view[start:end]
         (after,) = struct.unpack_from("<Q", view, sequence_offset)
@@ -99,7 +104,7 @@ def _decode_frames(data: bytes, count: int) -> list[dict[str, Any]]:
     return frames
 
 
-def read_observation(name: str, *, include_frames: bool = True, shm_root: str = "/dev/shm", retries: int = 10000) -> dict[str, Any]:
+def read_observation(name: str, *, include_frames: bool = True, shm_root: str = "/dev/shm", timeout: float = 2.0) -> dict[str, Any]:
     """Returns one consistent snapshot of the observation area `name`."""
     path = shm_path(name, shm_root)
     try:
@@ -129,9 +134,11 @@ def read_observation(name: str, *, include_frames: bool = True, shm_root: str = 
             raise ObservationError("observation area is truncated")
 
         frames_end = frames_offset + pool_size * FRAME.size if include_frames else HEADER.size
-        snapshot = _read_consistent(view, SEQUENCE_OFFSET, 0, frames_end, retries)
+        snapshot = _read_consistent(view, SEQUENCE_OFFSET, 0, frames_end, timeout)
         header = HEADER.unpack_from(snapshot, 0)
         sequence, published_unix_ms, publisher_pid = header[3], header[4], header[5]
+        if published_unix_ms == 0:
+            raise ObservationError("observation area has no snapshot yet")
         summary = dict(zip(SUMMARY_FIELDS, header[14:22]))
         min_rec_lsn = header[22]
 
@@ -139,7 +146,7 @@ def read_observation(name: str, *, include_frames: bool = True, shm_root: str = 
         totals = dict.fromkeys(COUNTER_FIELDS, 0)
         for index in range(process_capacity):
             start = processes_offset + index * PROCESS.size
-            record = PROCESS.unpack(_read_consistent(view, start + PROCESS_SEQUENCE_OFFSET, start, start + PROCESS.size, retries))
+            record = PROCESS.unpack(_read_consistent(view, start + PROCESS_SEQUENCE_OFFSET, start, start + PROCESS.size, timeout))
             if record[0] == 0:
                 continue
             counters = dict(zip(COUNTER_FIELDS, record[4:]))

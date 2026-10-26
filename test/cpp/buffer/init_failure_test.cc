@@ -49,6 +49,16 @@ void ExpectInitializationFailureIsReportedByCreate() {
   assert(manager_result.error().code() == telepath::ErrorCode::kInvalidArgument);
 }
 
+// Frame ids are 32 bits wide; a larger pool is refused before any memory is
+// allocated for it.
+void ExpectPoolBeyondFrameIdRangeIsRejected() {
+  for (std::size_t pool_size : {std::size_t{1} << 32, std::size_t{telepath::kInvalidFrameId}}) {
+    auto manager_result = telepath::BufferManager::Create(pool_size, 4096, std::make_unique<NoOpDiskBackend>(), telepath::MakeClockReplacer(1), nullptr);
+    assert(!manager_result.has_value());
+    assert(manager_result.error().code() == telepath::ErrorCode::kInvalidArgument);
+  }
+}
+
 void ExpectMissingDependencyIsReportedByCreate() {
   auto manager_result = telepath::BufferManager::Create(1, 4096, nullptr, telepath::MakeClockReplacer(1), nullptr);
   assert(!manager_result.has_value());
@@ -83,6 +93,7 @@ void ExpectForeignGuardIsRejected() {
 int main() {
   ExpectInitializationFailureIsReportedByCreate();
   ExpectMissingDependencyIsReportedByCreate();
+  ExpectPoolBeyondFrameIdRangeIsRejected();
   ExpectInvalidPageSizeIsReportedByCreate();
   ExpectBackendBlockSizeMismatchIsReportedByCreate();
   ExpectForeignGuardIsRejected();

@@ -107,12 +107,17 @@ enum class ReserveOutcome {
 
 // Claims a free frame, or a clean, unpinned, unlatched resident frame with no
 // writeback, for a new load: the frame becomes Loading with one pin held by
-// the caller. A dirty but otherwise reservable frame yields kNeedsFlush.
-inline auto TryReserve(std::atomic<std::uint32_t> &control, std::uint32_t *observed) -> ReserveOutcome {
+// the caller. A dirty but otherwise reservable frame yields kNeedsFlush. A
+// free frame belongs to the free list, so only a caller that popped it there
+// (`popped_from_free_list`) may claim it; anyone else, such as a stale victim
+// nomination, could otherwise claim a frame that its releaser is about to
+// push onto the free list.
+inline auto TryReserve(std::atomic<std::uint32_t> &control, std::uint32_t *observed, bool popped_from_free_list) -> ReserveOutcome {
   std::uint32_t word = control.load(std::memory_order_acquire);
   while (true) {
     *observed = word;
     if (State(word) == BufferFrameState::kLoading) return ReserveOutcome::kRejected;
+    if (State(word) == BufferFrameState::kFree && !popped_from_free_list) return ReserveOutcome::kRejected;
     if (Pins(word) != 0 || (word & (kLatchMask | kWritebackMask)) != 0) return ReserveOutcome::kRejected;
     if (IsResident(word) && IsDirty(word)) return ReserveOutcome::kNeedsFlush;
     const std::uint32_t next = (word & kWaiters) | kPinOne | static_cast<std::uint32_t>(BufferFrameState::kLoading);
@@ -120,11 +125,13 @@ inline auto TryReserve(std::atomic<std::uint32_t> &control, std::uint32_t *obser
   }
 }
 
-// Loading -> Resident; the loader keeps its pin.
-inline void PublishResident(std::atomic<std::uint32_t> &control) {
+// Loading -> Resident; the loader keeps its pin unless `release_pin`, in
+// which case the page is unpinned in the same step, so nobody can observe
+// the loader's pin on a resident page.
+inline void PublishResident(std::atomic<std::uint32_t> &control, bool release_pin = false) {
   UpdateAndWake(
     control,
-    [](std::uint32_t word) { return WithState(word, BufferFrameState::kResident); },
+    [release_pin](std::uint32_t word) { return WithState(word, BufferFrameState::kResident) - (release_pin ? kPinOne : 0); },
     [](std::uint32_t, std::uint32_t) { return true; });
 }
 
@@ -140,6 +147,9 @@ inline void ReleaseToFree(std::atomic<std::uint32_t> &control) {
 enum class DiscardOutcome {
   kDiscarded,
   kWriteback,
+  // Only the caller pins the frame but someone holds a latch on it: a flusher
+  // taking its snapshot, since users latch only pinned pages. Transient.
+  kLatched,
   kBusy,
 };
 
@@ -150,7 +160,8 @@ inline auto TryDiscardPinned(std::atomic<std::uint32_t> &control, std::uint32_t 
   std::uint32_t word = control.load(std::memory_order_acquire);
   while (true) {
     if (HasWriteback(word)) return DiscardOutcome::kWriteback;
-    if (!IsResident(word) || Pins(word) != 1 || (word & kLatchMask) != 0) return DiscardOutcome::kBusy;
+    if (!IsResident(word) || Pins(word) != 1) return DiscardOutcome::kBusy;
+    if ((word & kLatchMask) != 0) return DiscardOutcome::kLatched;
     if (control.compare_exchange_weak(word, 0, std::memory_order_acq_rel, std::memory_order_acquire)) {
       *previous = word;
       if ((word & kWaiters) != 0) FutexWakeAll(control);

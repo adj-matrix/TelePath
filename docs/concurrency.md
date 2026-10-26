@@ -106,6 +106,8 @@ At any time, a page has at most one resident frame, and each frame has at most o
 
 `TryReserve` moves a frame to `Loading` (with one pin for the loader) only if, in the same CAS, it is `Free`, or `Resident` with zero pins, no latch holders, no writeback flags, and clean. `TryPinResident` succeeds only on `Resident`. A pin and a reservation can therefore never both succeed on the same frame state.
 
+A `Free` frame belongs to the free list: only the thread that popped it there may reserve it (`TryReserve(..., popped_from_free_list)`), and if that fails because a flusher holds the frame's shared latch for a moment, the thread pushes it back. Victim nominations and strategy ring frames can only claim `Resident` frames. Otherwise a stale nomination could reserve a frame between the moment its releaser marked it `Free` (dropping a page, abandoning a load, losing an install race) and the moment the releaser pushes it onto the free list: the releaser would then overwrite the new owner's tag and push a frame in use, which a later pop hands out a second time (found by `chaos_test`).
+
 After pinning, the reader compares the frame's tag with the requested tag and unpins on a mismatch. The tag is stable while the frame is `Resident` because it is only written by the loader during `Loading`, before `PublishResident`'s release CAS.
 
 ### 5.2 Write Back Before Remapping
@@ -132,6 +134,8 @@ There is no separate miss table. A thread that misses reserves a frame and, in t
 
 A reader that finds a frame `Loading` with its tag sleeps on that frame's control word until the state changes, then retries the lookup. If the load failed, the loader releases the frame to `Free`, the waiters wake, and one of them loads the page itself, so each waiter sees its own read result rather than another thread's error.
 
+Every load publishes its page with the loader's pin, and no other thread can see the page before that. A `kZeroAndLock` load also takes the exclusive latch while the frame is still `Loading`, so the caller receives the zero-filled page already latched and no reader ever sees the zeros it is about to overwrite. A prefetch (`PrefetchBuffer()`), whose loader does not use the page, drops its pin in the same CAS that publishes it, so nobody can mistake that pin for a user's (5.7).
+
 `ReleaseToFree` keeps the latch bits: `FlushAll()` may hold the shared latch of any frame, including one whose load is being abandoned, and clearing that count would make the later release underflow.
 
 ### 5.6 Writeback Failure
@@ -140,7 +144,7 @@ When a victim writeback fails, the frame keeps its tag, data, and dirty state, r
 
 ### 5.7 Dropping Pages
 
-`DropFileBuffers()` first pins a candidate frame and checks its tag under the pin, so the frame cannot be reused for another page while it decides. It then moves the frame from `Resident` to `Free` with one CAS that requires its own pin to be the only one, no latch holder, and no writeback; dirty contents are discarded. A loading page is waited for, and a page under writeback is waited for and retried. Any other pin means someone still uses the page: the call leaves it and reports `kInvalidArgument`, because the caller promised nobody uses the dropped range.
+`DropFileBuffers()` first pins a candidate frame and checks its tag under the pin, so the frame cannot be reused for another page while it decides. It then moves the frame from `Resident` to `Free` with one CAS that requires its own pin to be the only one, no latch holder, and no writeback; dirty contents are discarded. A loading page is waited for, a page under writeback is waited for and retried, and a latch held while its own pin is the only one belongs to a flusher taking a snapshot (users latch only pinned pages), so that latch is waited for as well. Any other pin means someone still uses the page: the call leaves it and reports `kInvalidArgument`, because the caller promised nobody uses the dropped range.
 
 ## 6. Replacer Contract
 
@@ -149,6 +153,7 @@ Evictability lives only in the frame's control word. Replacement policies order 
 - `RecordAccess()` is called on every pin of a resident frame, outside any frame lock. Policies must keep it lock-free (Clock, clock-sweep, SIEVE) or batch it (LRU, LRU-K, 2Q).
 - `RecordLoad()` is called after a frame is reused for a newly loaded page; `Remove()` when a frame returns to the free list.
 - `Victim()` asks the buffer manager's `EvictionProbe` for each candidate (resident, unpinned, unlatched, no writeback) and nominates the first that passes. The frame **stays tracked**. The manager then claims it with `TryReserve`; if the claim fails because the frame changed in between, the manager simply asks for another victim. Nothing has to be handed back, so no frame can drop out of the evictable set.
+- A caller that holds reservations whose reads it has not submitted yet (`StartReadBuffers()`, `PrefetchBuffer()`) must not wait for a frame: its own `Loading` frames would keep it retrying forever, and every other thread with it. These callers reserve without waiting; a prefetch stops early and a read operation reads the remaining blocks one by one in `WaitReadBuffers()`, after its reads are submitted.
 - If `Victim()` nominates nothing while some frame is unpinned or `Loading`, `ReserveFrameForTag()` yields and retries; it returns `kResourceExhausted` only when every frame is pinned by a resident page. An unpinned frame may be latched, under writeback, or simply missed: concurrent callers advance a shared clock hand, so one caller's bounded scan does not visit every frame, and a frame between `ReleaseToFree` and the free list is invisible to the replacer. A `Loading` frame is pinned only until its load publishes it or, for a reservation that lost the install race (5.5), until it returns to the free list: concurrent misses on one page each reserve a frame before learning they lost, which can briefly pin a small pool completely. When the pool is exhausted because another thread just loaded the very page being read, `PinPage()` goes back to the lookup and pins that copy instead of failing.
 
 Batched policies buffer accesses in per-thread slots (`AccessBatcher`) and apply a full slot under the policy latch. Lock order is policy latch, then slot latch; recording never holds a slot latch while taking the policy latch. `RecordLoad()` and `Remove()` first apply the calling thread's own slot, so a thread's accesses and loads keep their program order; accesses from different threads have no order to preserve. `Victim()` applies every slot before choosing.
@@ -169,6 +174,8 @@ Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`,
 - A thread that holds an `ExclusiveBufferHandle` must not call `FlushAll()` or `FlushBuffer(file, block)` for that page: the blocking path would wait for the shared latch the thread blocks itself.
 - A thread must not hold two handles on the same page; `ReadBuffer` followed by `ReadBufferExclusive` on the same page in one thread deadlocks. Debug detection is not implemented yet.
 - There is no in-place upgrade: release the `SharedBufferHandle`, acquire an `ExclusiveBufferHandle`, and re-check.
-- Pin counts saturate at 32767 per frame; further pins yield until one is released.
+- Pin counts saturate at 32767 per frame; further pins yield until one is released. A page admits 255 shared latch holders; a further `ReadBuffer()` of it waits until one leaves, so one thread must not hold more than 255 shared handles on one page.
+- `Close()` does not wait for calls already under way on other threads; a change such a call makes after `Close()`'s `FlushAll()` is not written back. Stop other threads first.
+- A process that dies releases its observation-plane locks when the kernel closes its files, which can be some tens of milliseconds after `waitpid()` returns; another process takes over publishing at its next publish after that. Until then the dead process still counts as a user, so a last user leaving in that window does not remove the name.
 - Cross-process mode (`SharedMemoryOptions`) assumes every attached process stays alive while it holds a pin, latch, or `Loading` frame. A process that dies there leaves the frame pinned, latched, or loading for the others, and only removing the segment recovers; crash recovery is designed separately (phase 6e).
 - In cross-process mode a frame waits only on its control word, so a process may wait for a load or writeback another process started. Per-process state (I/O tokens, flush tasks, access batches, the cleaner) never crosses processes.
