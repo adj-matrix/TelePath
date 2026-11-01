@@ -13,6 +13,7 @@
 #include "kernel_region.h"
 #include "observation_publisher.h"
 #include "page_table.h"
+#include "segment_monitor.h"
 #include "shared_segment.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
@@ -66,6 +67,7 @@ BufferManager::BufferManager(
 }
 
 BufferManager::~BufferManager() {
+  segment_monitor_.reset();
   observation_.reset();
   if (cleaner_controller_ != nullptr) cleaner_controller_->Shutdown();
   if (flush_scheduler_ != nullptr) flush_scheduler_->Shutdown();
@@ -221,7 +223,7 @@ auto BufferManager::Close() -> Status {
     sync::FutexWait(prefetches_in_flight_, pending);
   }
   for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
-    if (IsLoadingTag(frame_id, LoadTag(descriptors_[frame_id]))) WaitForLoad(frame_id, LoadTag(descriptors_[frame_id]));
+    if (IsLoadingTag(frame_id, LoadTag(descriptors_[frame_id])) && !WaitForLoad(frame_id, LoadTag(descriptors_[frame_id]))) break;
   }
   if (segment_ == nullptr && HasPinnedFrame()) return InvalidArgument("pages are still pinned by handles or read operations");
   Status status = CheckUsable();

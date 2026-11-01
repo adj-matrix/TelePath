@@ -5,13 +5,22 @@
 
 namespace telepath {
 
-auto BufferManager::MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> SharedBufferHandle {
-  frame_control::AcquireShared(descriptors_[frame_id].control);
+auto BufferManager::CrashedSegmentError() -> std::unexpected<Error> { return Failed("a process attached to the shared cache died"); }
+
+auto BufferManager::MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> Result<SharedBufferHandle> {
+  if (!frame_control::AcquireShared(descriptors_[frame_id].control, fence_)) {
+    ReleaseFrame(frame_id);
+    return CrashedSegmentError();
+  }
   return SharedBufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
 }
 
-auto BufferManager::MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag, bool latched) -> ExclusiveBufferHandle {
-  if (!latched) frame_control::AcquireExclusive(descriptors_[frame_id].control);
+auto BufferManager::MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag, bool latched) -> Result<ExclusiveBufferHandle> {
+  if (!latched && !frame_control::AcquireExclusive(descriptors_[frame_id].control, fence_)) {
+    ReleaseFrame(frame_id);
+    return CrashedSegmentError();
+  }
+  descriptors_[frame_id].holder_slot.store(process_slot_, std::memory_order_relaxed);
   return ExclusiveBufferHandle(this, frame_id, tag, frame_pool_->GetFrameData(frame_id), geometry_.block_size());
 }
 
@@ -22,6 +31,7 @@ void BufferManager::ReleaseSharedHandle(FrameId frame_id) noexcept {
 
 void BufferManager::ReleaseExclusiveHandle(FrameId frame_id) noexcept {
   BufferDescriptor &descriptor = descriptors_[frame_id];
+  descriptor.holder_slot.store(0, std::memory_order_relaxed);
   frame_control::ReleaseExclusive(descriptor.control, descriptor.version);
   ReleaseFrame(frame_id);
 }

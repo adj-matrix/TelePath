@@ -20,7 +20,7 @@ namespace telepath {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3147455354504c54ULL;  // "TLPTSEG1"
-constexpr std::uint32_t kLayoutVersion = 1;
+constexpr std::uint32_t kLayoutVersion = 2;
 constexpr std::uint32_t kInitializing = 0;
 constexpr std::uint32_t kReady = 1;
 // Attached count of a segment whose last user is removing its name.
@@ -30,6 +30,11 @@ constexpr std::size_t kMaxNamespaces = 64;
 constexpr std::size_t kReplacerKindBytes = 96;
 constexpr std::size_t kPageSize = 4096;
 constexpr auto kAttachTimeout = std::chrono::seconds(10);
+// Byte of the segment object whose open-file-description write lock makes a
+// process the cleaner leader.
+constexpr off_t kCleanerLockByte = 0;
+// Process slot i is locked through byte kSlotLockBase + i while attached.
+constexpr off_t kSlotLockBase = 1;
 
 auto AlignUp(std::size_t value, std::size_t alignment) -> std::size_t { return (value + alignment - 1) & ~(alignment - 1); }
 
@@ -76,8 +81,12 @@ struct SharedSegment::Header {
   std::uint64_t replacer_offset{0};
   std::uint64_t kernel_offset{0};
   std::atomic<std::uint32_t> attached{0};
-  // Reserved for electing the process that runs background writeback.
+  // Pid of the process that runs the background cleaner, for diagnostics; the
+  // lock on kCleanerLockByte decides who leads.
   std::atomic<std::uint32_t> cleaner_leader{0};
+  // Nonzero once a process died attached; the segment is then abandoned.
+  std::atomic<std::uint32_t> crashed{0};
+  std::uint32_t crash_recovery{0};
   std::array<ProcessSlot, kMaxProcesses> processes{};
   std::array<NamespaceEntry, kMaxNamespaces> namespaces{};
   SharedWrittenFiles written_files{};
@@ -109,6 +118,8 @@ auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &sh
   }
   if (!created) {
     fd = shm_open(options.name.c_str(), O_RDWR, 0);
+    // The last user removed the name between our two opens; create it anew.
+    if (fd < 0 && errno == ENOENT && options.mode == SharedMemoryMode::kCreateOrAttach) return std::unique_ptr<SharedSegment>();
     if (fd < 0) return errno == ENOENT ? NotFound("shared memory segment does not exist") : IoError("shm_open failed", errno);
   }
 
@@ -135,14 +146,14 @@ auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &sh
   }
 
   void *address = mmap(nullptr, mapped_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  const int map_error = errno;
-  close(fd);
   if (address == MAP_FAILED) {
+    const int map_error = errno;
+    close(fd);
     if (created) shm_unlink(options.name.c_str());
     return IoError("failed to map shared memory segment", map_error);
   }
 
-  std::unique_ptr<SharedSegment> segment(new SharedSegment(options.name, options.remove_when_unused, static_cast<std::byte *>(address), mapped_bytes, created));
+  std::unique_ptr<SharedSegment> segment(new SharedSegment(options.name, options.remove_when_unused, fd, static_cast<std::byte *>(address), mapped_bytes, created));
   Header &header = segment->header();
   if (created) {
     std::construct_at(&header);
@@ -152,6 +163,7 @@ auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &sh
     header.stripe_count = shape.stripe_count;
     header.replacer_state_bytes = shape.replacer_state_bytes;
     header.kernel_bytes = shape.kernel_bytes;
+    header.crash_recovery = shape.crash_recovery;
     std::strncpy(header.replacer_kind.data(), shape.replacer_kind.c_str(), kReplacerKindBytes - 1);
     header.replacer_offset = replacer_offset;
     header.kernel_offset = kernel_offset;
@@ -167,8 +179,10 @@ auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &sh
     const bool same_shape = header.segment_bytes == total && header.segment_bytes == mapped_bytes
       && header.block_size == shape.block_size && header.pool_size == shape.pool_size
       && header.stripe_count == shape.stripe_count && header.replacer_state_bytes == shape.replacer_state_bytes
-      && header.kernel_bytes == shape.kernel_bytes && header.replacer_kind == kind;
+      && header.kernel_bytes == shape.kernel_bytes && header.replacer_kind == kind && header.crash_recovery == shape.crash_recovery;
     if (!same_shape) return InvalidArgument("shared memory segment was created with a different configuration");
+    // A crashed segment is losing its name; open whatever replaces it.
+    if (header.crashed.load(std::memory_order_acquire) != 0) return std::unique_ptr<SharedSegment>();
   }
   std::uint32_t attached = header.attached.load(std::memory_order_acquire);
   do {
@@ -186,22 +200,43 @@ auto SharedSegment::Remove(const std::string &name) -> Status {
   return IoError("shm_unlink failed", errno);
 }
 
-SharedSegment::SharedSegment(std::string name, bool remove_when_unused, std::byte *base, std::size_t bytes, bool created)
-  : name_(std::move(name)), remove_when_unused_(remove_when_unused), base_(base), bytes_(bytes), created_(created) {}
+SharedSegment::SharedSegment(std::string name, bool remove_when_unused, int fd, std::byte *base, std::size_t bytes, bool created)
+  : name_(std::move(name)), remove_when_unused_(remove_when_unused), fd_(fd), base_(base), bytes_(bytes), created_(created) {}
 
 SharedSegment::~SharedSegment() {
   Header &header = this->header();
   if (slot_ >= 0) header.processes[slot_].pid.store(0, std::memory_order_release);
+  if (leading_cleaner_) header.cleaner_leader.store(0, std::memory_order_release);
   const bool never_ready = created_ && header.state.load(std::memory_order_acquire) != kReady;
   bool remove = never_ready;
   if (counted_ && header.attached.fetch_sub(1, std::memory_order_acq_rel) == 1 && remove_when_unused_) {
     std::uint32_t expected = 0;
     remove = header.attached.compare_exchange_strong(expected, kRemoving, std::memory_order_acq_rel);
   }
+  // The name of a crashed segment may already belong to a fresh one.
+  if (header.crashed.load(std::memory_order_acquire) != 0) remove = false;
   // A creator that failed before finishing must not leave a segment that
   // attachers would wait on forever.
   if (remove) shm_unlink(name_.c_str());
   munmap(base_, bytes_);
+  close(fd_);
+}
+
+bool SharedSegment::LockByte(off_t byte, short type) const {
+  struct flock lock{};
+  lock.l_type = type;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = byte;
+  lock.l_len = 1;
+  return fcntl(fd_, F_OFD_SETLK, &lock) == 0;
+}
+
+bool SharedSegment::TryLeadCleaner() {
+  if (leading_cleaner_) return true;
+  if (!LockByte(kCleanerLockByte, F_WRLCK)) return false;
+  leading_cleaner_ = true;
+  header().cleaner_leader.store(static_cast<std::uint32_t>(getpid()), std::memory_order_release);
+  return true;
 }
 
 void SharedSegment::MarkReady() {
@@ -218,19 +253,58 @@ auto SharedSegment::replacer_state() const -> std::span<std::byte> {
 
 auto SharedSegment::written_files() const -> SharedWrittenFiles & { return header().written_files; }
 
+auto SharedSegment::crashed_word() const -> const std::atomic<std::uint32_t> * { return &header().crashed; }
+
 auto SharedSegment::header() const -> Header & { return *std::launder(reinterpret_cast<Header *>(base_)); }
 
+// The slot's lock is taken before its pid is published and released after
+// the pid is cleared, so CheckForCrash() never mistakes a process that is
+// claiming or leaving a slot for a dead one.
 auto SharedSegment::ClaimProcessSlot() -> Status {
   Header &header = this->header();
   const auto pid = static_cast<std::uint32_t>(getpid());
   for (std::size_t index = 0; index < kMaxProcesses; ++index) {
+    const auto byte = static_cast<off_t>(kSlotLockBase + index);
+    if (!LockByte(byte, F_WRLCK)) continue;
     std::uint32_t expected = 0;
-    if (!header.processes[index].pid.compare_exchange_strong(expected, pid, std::memory_order_acq_rel)) continue;
+    if (!header.processes[index].pid.compare_exchange_strong(expected, pid, std::memory_order_acq_rel)) {
+      LockByte(byte, F_UNLCK);
+      continue;
+    }
     header.processes[index].start_time = ProcessStartTime();
     slot_ = static_cast<int>(index);
     return Ok();
   }
   return ResourceExhausted("shared memory segment has no free process slot");
+}
+
+auto SharedSegment::CheckForCrash(std::uint64_t *dead_slots) -> CrashCheck {
+  Header &header = this->header();
+  if (header.crashed.load(std::memory_order_acquire) != 0) return CrashCheck::kObserved;
+  std::uint64_t dead = 0;
+  for (std::size_t index = 0; index < kMaxProcesses; ++index) {
+    if (static_cast<int>(index) == slot_ || header.processes[index].pid.load(std::memory_order_acquire) == 0) continue;
+    const auto byte = static_cast<off_t>(kSlotLockBase + index);
+    if (!LockByte(byte, F_WRLCK)) continue;
+    if (header.processes[index].pid.load(std::memory_order_acquire) != 0) dead |= std::uint64_t{1} << index;
+    LockByte(byte, F_UNLCK);
+  }
+  if (dead == 0) return CrashCheck::kNone;
+  std::uint32_t expected = 0;
+  if (!header.crashed.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) return CrashCheck::kObserved;
+  RemoveNameIfStillOurs();
+  if (dead_slots != nullptr) *dead_slots = dead;
+  return CrashCheck::kDetected;
+}
+
+void SharedSegment::RemoveNameIfStillOurs() const {
+  const int named = shm_open(name_.c_str(), O_RDONLY, 0);
+  if (named < 0) return;
+  struct stat ours{};
+  struct stat theirs{};
+  const bool same = fstat(fd_, &ours) == 0 && fstat(named, &theirs) == 0 && ours.st_dev == theirs.st_dev && ours.st_ino == theirs.st_ino;
+  close(named);
+  if (same) shm_unlink(name_.c_str());
 }
 
 }  // namespace telepath

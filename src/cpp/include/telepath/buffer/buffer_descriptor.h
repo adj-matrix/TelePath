@@ -35,8 +35,9 @@ struct alignas(kCacheLineSize) BufferDescriptor {
   std::atomic<Lsn> writeback_rec_lsn{kInvalidLsn};
   // Reserved for the multi-tenant policy module.
   std::uint16_t tenant_id{0};
-  // Reserved for cross-process pin ownership.
-  std::uint32_t holder_slot{0};
+  // Process slot plus one of the exclusive latch holder in cross-process mode,
+  // so crash recovery can tell pages a dead process was changing; 0 otherwise.
+  std::atomic<std::uint32_t> holder_slot{0};
 };
 
 static_assert(sizeof(BufferDescriptor) == kCacheLineSize, "BufferDescriptor must occupy exactly one cache line");

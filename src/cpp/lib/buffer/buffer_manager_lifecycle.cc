@@ -1,20 +1,37 @@
 #include "telepath/buffer/buffer_manager.h"
 
 #include <algorithm>
+#include <chrono>
+#include <vector>
+#include <tuple>
+#include <thread>
+#include <cstring>
 #include <typeinfo>
 
 #include "cleaner_controller.h"
+#include "frame_control.h"
 #include "frame_memory_pool.h"
 #include "io_engine.h"
 #include "flush_scheduler.h"
 #include "frame_free_list.h"
 #include "kernel_region.h"
 #include "page_table.h"
+#include "segment_monitor.h"
 #include "shared_segment.h"
 #include "telepath/io/disk_backend.h"
 #include "telepath/replacer/replacer.h"
 
 namespace telepath {
+
+namespace {
+
+// How often a cross-process manager checks its segment for dead processes.
+constexpr std::chrono::milliseconds kSegmentMonitorInterval{10};
+// How long crash recovery waits for a live process to release a page it holds
+// exclusively before giving the page up.
+constexpr std::chrono::milliseconds kSalvageHolderWait{1000};
+
+}  // namespace
 
 auto BufferManager::Initialize() -> Status {
   if (Status dependency_status = ValidateRuntimeDependencies(); !dependency_status.has_value()) return dependency_status;
@@ -44,6 +61,7 @@ auto BufferManager::Initialize() -> Status {
     StopFlushPipeline(Unavailable("failed to start the observation plane"));
     return observation_status;
   }
+  StartSegmentMonitor();
   return Ok();
 }
 
@@ -79,10 +97,12 @@ auto BufferManager::InitializeKernelMemory() -> Status {
     const std::size_t replacer_bytes = replacer_->SharedStateBytes();
     if (replacer_bytes == 0) return InvalidArgument("replacer does not support cross-process mode");
     const Replacer &replacer = *replacer_;
-    const SharedSegment::Shape shape{geometry_.block_size(), pool_size_, options_.page_table_stripe_count, replacer_bytes, typeid(replacer).name(), layout.bytes};
+    const SharedSegment::Shape shape{geometry_.block_size(), pool_size_, options_.page_table_stripe_count, replacer_bytes, typeid(replacer).name(), layout.bytes, static_cast<std::uint32_t>(options_.shared_memory.crash_recovery)};
     Result<std::unique_ptr<SharedSegment>> segment = SharedSegment::Open(options_.shared_memory, shape);
     if (!segment.has_value()) return PropagateError(segment);
     segment_ = std::move(segment.value());
+    process_slot_ = static_cast<std::uint32_t>(segment_->slot() + 1);
+    fence_ = segment_->crashed_word();
     initialize = segment_->created();
     if (Status bound = replacer_->BindSharedState(segment_->replacer_state(), initialize); !bound.has_value()) return bound;
     base = segment_->kernel_base();
@@ -215,6 +235,66 @@ auto BufferManager::SyncFiles(std::vector<FileId> files) -> Status {
     for (FileId file_id : files) NoteWrittenFile(file_id);
   }
   return status;
+}
+
+void BufferManager::StartSegmentMonitor() {
+  if (segment_ == nullptr) return;
+  segment_monitor_ = std::make_unique<SegmentMonitor>(kSegmentMonitorInterval, [this] {
+    std::uint64_t dead_slots = 0;
+    const SharedSegment::CrashCheck check = segment_->CheckForCrash(&dead_slots);
+    if (check == SharedSegment::CrashCheck::kNone) return true;
+    EnterFailedState(Error(ErrorCode::kFailed, "a process attached to the shared cache died"));
+    if (check == SharedSegment::CrashCheck::kDetected && options_.shared_memory.crash_recovery == CrashRecovery::kSalvage) std::ignore = SalvageDirtyPages(dead_slots);
+    return false;
+  });
+}
+
+auto BufferManager::SalvageDirtyPages(std::uint64_t dead_slots) -> bool {
+  bool complete = true;
+  std::vector<std::byte> page(geometry_.block_size());
+  std::vector<FileId> files;
+  for (FrameId frame_id = 0; frame_id < pool_size_; ++frame_id) {
+    BufferDescriptor &descriptor = descriptors_[frame_id];
+    // A live process holding the page exclusively is about to fail and let
+    // go; wait for it a little.
+    const auto deadline = std::chrono::steady_clock::now() + kSalvageHolderWait;
+    while (true) {
+      const std::uint32_t word = descriptor.control.load(std::memory_order_acquire);
+      if (!frame_control::IsResident(word) || !frame_control::IsDirty(word)) break;
+      if ((word & frame_control::kExclusive) != 0) {
+        const std::uint32_t holder = descriptor.holder_slot.load(std::memory_order_acquire);
+        const bool dead_holder = holder != 0 && ((dead_slots >> (holder - 1)) & 1) != 0;
+        if (dead_holder || std::chrono::steady_clock::now() > deadline) {
+          complete = false;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        continue;
+      }
+      const std::uint64_t version = descriptor.version.load(std::memory_order_acquire);
+      const BufferTag tag = LoadTag(descriptor);
+      std::memcpy(page.data(), frame_pool_->GetFrameData(frame_id), page.size());
+      std::atomic_thread_fence(std::memory_order_acquire);
+      const std::uint32_t after = descriptor.control.load(std::memory_order_acquire);
+      if ((after & frame_control::kExclusive) != 0 || descriptor.version.load(std::memory_order_acquire) != version || LoadTag(descriptor) != tag) continue;
+      if (options_.pre_write_hook && !options_.pre_write_hook(tag, page).has_value()) {
+        complete = false;
+        break;
+      }
+      IoWaiter waiter;
+      DiskRequest request;
+      request.token = reinterpret_cast<uint64_t>(static_cast<IoCompletion *>(&waiter));
+      request.operation = DiskOperation::kWrite;
+      request.tag = tag;
+      request.buffers[0] = page.data();
+      io_engine_->Submit(std::span<const DiskRequest>(&request, 1), DiskSubmitMode::kWait);
+      if (!io_engine_->Wait(waiter).has_value()) complete = false;
+      else if (std::find(files.begin(), files.end(), tag.file_id) == files.end()) files.push_back(tag.file_id);
+      break;
+    }
+  }
+  if (!SyncFiles(std::move(files)).has_value()) complete = false;
+  return complete;
 }
 
 auto BufferManager::StartIoEngine() -> Status {

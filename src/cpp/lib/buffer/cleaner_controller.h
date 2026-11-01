@@ -2,6 +2,7 @@
 #define TELEPATH_LIB_BUFFER_CLEANER_CONTROLLER_H_
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -21,12 +22,20 @@ class BufferManagerCleanerController {
  public:
   using SeedCallback = std::function<void()>;
   using ScheduleCallback = std::function<void(FrameId)>;
+  // Whether this process may clean now; asked before each round of cleaning.
+  using LeadCallback = std::function<bool()>;
 
+  // With a `lead` callback the controller cleans only while it returns true,
+  // and with a nonzero `poll_interval` it also rechecks the dirty-page count
+  // and its leadership that often, since another process can dirty pages or
+  // give up leadership without notifying it.
   BufferManagerCleanerController(
     std::size_t pool_size,
     std::atomic<std::size_t> *dirty_page_count,
     std::size_t dirty_page_high_watermark,
-    std::size_t dirty_page_low_watermark);
+    std::size_t dirty_page_low_watermark,
+    LeadCallback lead = {},
+    std::chrono::milliseconds poll_interval = std::chrono::milliseconds(0));
   ~BufferManagerCleanerController();
 
   auto Start(SeedCallback on_seed, ScheduleCallback on_schedule) -> Status;
@@ -47,6 +56,8 @@ class BufferManagerCleanerController {
   std::atomic<std::size_t> *dirty_page_count_{nullptr};
   std::size_t dirty_page_high_watermark_{0};
   std::size_t dirty_page_low_watermark_{0};
+  LeadCallback lead_{};
+  std::chrono::milliseconds poll_interval_{0};
   SeedCallback on_seed_{};
   ScheduleCallback on_schedule_{};
   std::mutex latch_;

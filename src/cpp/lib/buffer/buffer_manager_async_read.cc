@@ -189,13 +189,21 @@ void BufferManager::FinishReadBuffers(ReadBuffersOperation &operation, bool make
     state.slots[i] = ReadBuffersState::Slot::kPinned;
   }
 
-  const bool keep = result.has_value() && make_handles;
-  if (keep) operation.handles_.reserve(state.slots.size());
+  if (result.has_value() && make_handles) operation.handles_.reserve(state.slots.size());
   for (std::size_t i = 0; i < state.slots.size(); ++i) {
     const ReadBuffersState::Slot slot = state.slots[i];
     if (slot != ReadBuffersState::Slot::kPinned && slot != ReadBuffersState::Slot::kLoading) continue;
-    if (keep) operation.handles_.push_back(MakeSharedHandle(state.frames[i], state.tags[i]));
-    else ReleaseFrame(state.frames[i]);
+    if (!result.has_value() || !make_handles) {
+      ReleaseFrame(state.frames[i]);
+      continue;
+    }
+    Result<SharedBufferHandle> handle = MakeSharedHandle(state.frames[i], state.tags[i]);
+    if (handle.has_value()) {
+      operation.handles_.push_back(std::move(handle.value()));
+      continue;
+    }
+    result = PropagateError(handle);
+    operation.handles_.clear();
   }
   operation.state_.reset();
   *status = result;

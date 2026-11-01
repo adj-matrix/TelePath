@@ -30,6 +30,7 @@ class FrameMemoryPool;
 class KernelRegion;
 class ObservationPublisher;
 class SharedSegment;
+class SegmentMonitor;
 class Replacer;
 class TelemetrySink;
 class BufferManagerObserver;
@@ -276,7 +277,8 @@ class BufferManager {
   auto ProbeResident(const BufferTag &tag, bool record_access, FrameId *frame_id) -> ResidentProbe;
   bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access);
   bool IsLoadingTag(FrameId frame_id, const BufferTag &tag) const;
-  void WaitForLoad(FrameId frame_id, const BufferTag &tag);
+  // Returns false when a crash in cross-process mode ended the wait.
+  bool WaitForLoad(FrameId frame_id, const BufferTag &tag);
   bool IsLiveFor(FrameId frame_id, const BufferTag &tag) const;
   // Loads `tag` into a newly reserved frame and returns it pinned; nullopt
   // means another thread installed the tag first and the caller must retry.
@@ -396,8 +398,11 @@ class BufferManager {
   auto FlushVictimBeforeReuse(FrameId frame_id) -> Status;
 
   // buffer_manager_handle.cc
-  auto MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> SharedBufferHandle;
-  auto MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag, bool latched = false) -> ExclusiveBufferHandle;
+  static auto CrashedSegmentError() -> std::unexpected<Error>;
+  // Latch a pinned frame for a handle; on failure (a crash in cross-process
+  // mode ended the wait for the latch) the pin is released.
+  auto MakeSharedHandle(FrameId frame_id, const BufferTag &tag) -> Result<SharedBufferHandle>;
+  auto MakeExclusiveHandle(FrameId frame_id, const BufferTag &tag, bool latched = false) -> Result<ExclusiveBufferHandle>;
   void ReleaseSharedHandle(FrameId frame_id) noexcept;
   void ReleaseExclusiveHandle(FrameId frame_id) noexcept;
   void MarkHandleDirty(FrameId frame_id, Lsn lsn = kInvalidLsn) noexcept;
@@ -421,6 +426,10 @@ class BufferManager {
   void StopFlushPipeline(const Status &reason);
   auto StartIoEngine() -> Status;
   auto StartObservation() -> Status;
+  void StartSegmentMonitor();
+  // Writes back the dirty pages that a crashed process did not hold
+  // exclusively; returns whether every dirty page was written back.
+  auto SalvageDirtyPages(std::uint64_t dead_slots) -> bool;
   // Remembers that `file_id` has completed writes awaiting a sync. In
   // cross-process mode the list lives in the segment, so any process's
   // FlushAll() syncs it; RecordWrittenFile() returns false when that list is
@@ -454,6 +463,13 @@ class BufferManager {
 
   std::unique_ptr<FrameFreeList> free_list_;
   std::unique_ptr<ObservationPublisher> observation_;
+  std::unique_ptr<SegmentMonitor> segment_monitor_;
+  // This process's segment slot plus one, recorded as exclusive latch holder;
+  // 0 in private mode.
+  std::uint32_t process_slot_{0};
+  // The segment's crashed word, which ends waits that only a dead process
+  // could end; null in private mode.
+  const std::atomic<std::uint32_t> *fence_{nullptr};
   std::mutex written_files_latch_;
   std::vector<FileId> written_files_;
   std::atomic<std::size_t> *dirty_page_count_{nullptr};

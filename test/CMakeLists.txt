@@ -466,6 +466,22 @@ target_link_libraries(telepath_shared_memory_stress_test PRIVATE telepath)
 
 add_test(NAME telepath_shared_memory_stress_test COMMAND telepath_shared_memory_stress_test)
 
+add_executable(telepath_cleaner_election_test
+  cpp/buffer/cleaner_election_test.cc
+)
+
+target_link_libraries(telepath_cleaner_election_test PRIVATE telepath)
+
+add_test(NAME telepath_cleaner_election_test COMMAND telepath_cleaner_election_test)
+
+add_executable(telepath_crash_recovery_test
+  cpp/buffer/crash_recovery_test.cc
+)
+
+target_link_libraries(telepath_crash_recovery_test PRIVATE telepath)
+
+add_test(NAME telepath_crash_recovery_test COMMAND telepath_crash_recovery_test)
+
 add_executable(telepath_async_read_test
   cpp/buffer/async_read_test.cc
 )

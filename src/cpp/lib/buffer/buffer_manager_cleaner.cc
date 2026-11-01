@@ -1,10 +1,22 @@
 #include "telepath/buffer/buffer_manager.h"
 
+#include <chrono>
+#include <utility>
+
 #include "buffer_manager_observer.h"
 #include "cleaner_controller.h"
 #include "frame_control.h"
+#include "shared_segment.h"
 
 namespace telepath {
+
+namespace {
+
+// How often the cleaner of a cross-process cache rechecks the shared
+// dirty-page count and, in a follower, tries to take over leadership.
+constexpr std::chrono::milliseconds kSharedCleanerPollInterval{10};
+
+}  // namespace
 
 void BufferManager::ResetCleanerCandidate(FrameId frame_id) {
   if (cleaner_controller_ == nullptr || frame_id >= pool_size_) return;
@@ -28,7 +40,13 @@ void BufferManager::ScheduleCleanerFlush(FrameId frame_id) {
 auto BufferManager::StartCleanerController() -> Status {
   if (!options_.enable_background_cleaner) return Ok();
 
-  cleaner_controller_ = std::make_unique<BufferManagerCleanerController>(pool_size_, dirty_page_count_, options_.dirty_page_high_watermark, options_.dirty_page_low_watermark);
+  BufferManagerCleanerController::LeadCallback lead;
+  std::chrono::milliseconds poll_interval{0};
+  if (segment_ != nullptr) {
+    lead = [this]() { return segment_->TryLeadCleaner(); };
+    poll_interval = kSharedCleanerPollInterval;
+  }
+  cleaner_controller_ = std::make_unique<BufferManagerCleanerController>(pool_size_, dirty_page_count_, options_.dirty_page_high_watermark, options_.dirty_page_low_watermark, std::move(lead), poll_interval);
   return cleaner_controller_->Start(
     [this]() { SeedCleanerCandidates(); },
     [this](FrameId frame_id) { ScheduleCleanerFlush(frame_id); });

@@ -216,9 +216,9 @@ void ExpectAttachRacesWithRemoval() {
   telepath::buffer_test_support::TestRootGuard root("telepath_shm_churn");
   std::vector<std::thread> threads;
   std::atomic<int> failures{0};
-  for (int thread = 0; thread < 4; ++thread) {
+  for (int thread = 0; thread < 8; ++thread) {
     threads.emplace_back([&, thread] {
-      for (int round = 0; round < 100; ++round) {
+      for (int round = 0; round < 200; ++round) {
         auto manager = Open(Options(name, telepath::SharedMemoryMode::kCreateOrAttach), root.path().string());
         if (!manager.has_value()) {
           std::fprintf(stderr, "churn: open failed with %d: %s\n", static_cast<int>(manager.error().code()), manager.error().message());

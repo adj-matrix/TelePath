@@ -58,12 +58,34 @@ enum class SharedMemoryMode {
   kAttach,
 };
 
+// What the process that notices a crash does with the dirty pages of a
+// cross-process cache before the segment is abandoned.
+enum class CrashRecovery {
+  // Write back every dirty page except those the dead process held
+  // exclusively, whose contents may be half changed. For callers without a
+  // write-ahead log.
+  kSalvage = 0,
+  // Write back nothing, for callers that redo lost changes from their
+  // write-ahead log and must not let possibly inconsistent pages reach disk.
+  kDiscard,
+};
+
 // Cross-process mode: kernel metadata and frames live in a named POSIX
 // shared-memory segment that several processes map, so they share one cache.
 // Every process must use the same pool size, page size, page-table stripe
 // count, and replacer kind and capacity, which attaching validates, and the
-// replacer must support BindSharedState(). Each process keeps its own disk
-// backend, which must reach the same files. Linux only.
+// replacer must support BindSharedState(). One attached process at a time
+// runs the background cleaner for everyone; another takes over when it
+// detaches or dies. Each process keeps its own disk backend, which must reach
+// the same files. Linux only.
+//
+// When an attached process dies without detaching, its pins, latches, and
+// half-finished updates cannot be undone exactly, so the segment is abandoned,
+// as PostgreSQL resets shared memory after a backend crash: the first process
+// to notice (within tens of milliseconds) recovers dirty pages according to
+// `crash_recovery` and removes the segment's name, and every attached manager
+// enters the Failed state. Create a new manager to continue; it gets a fresh
+// segment.
 struct SharedMemoryOptions {
   // Segment name such as "/telepath_cache"; empty keeps the cache private to
   // this process.
@@ -72,6 +94,8 @@ struct SharedMemoryOptions {
   // Removes the segment's name when the last manager attached to it is
   // destroyed; otherwise the segment persists until RemoveSharedMemory().
   bool remove_when_unused{true};
+  // Must be the same in every attached process, which attaching validates.
+  CrashRecovery crash_recovery{CrashRecovery::kSalvage};
 };
 
 // Runtime configuration for BufferManager construction.

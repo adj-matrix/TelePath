@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <sys/types.h>
 #include <span>
 #include <string>
 
@@ -38,6 +39,7 @@ class SharedSegment {
     std::uint64_t replacer_state_bytes{0};
     std::string replacer_kind;
     std::uint64_t kernel_bytes{0};
+    std::uint32_t crash_recovery{0};
   };
 
   // Creates or attaches to the segment named in `options`. An attaching
@@ -59,23 +61,59 @@ class SharedSegment {
   auto replacer_state() const -> std::span<std::byte>;
   auto written_files() const -> SharedWrittenFiles &;
 
+  enum class CrashCheck {
+    kNone,
+    // This call found a process that died attached and marked the segment
+    // crashed; the caller recovers what it can.
+    kDetected,
+    // The segment was already marked crashed.
+    kObserved,
+  };
+
+  // Checks whether an attached process died without detaching. A process
+  // holds a lock on its slot's byte of the segment object while attached, and
+  // the kernel releases it when the process dies, so a slot with a pid whose
+  // lock is free belongs to a dead process. The process that marks the
+  // segment crashed also removes its name, so new managers create a fresh
+  // segment; a crashed segment never removes the name again.
+  // With kDetected, `dead_slots` receives one bit per dead process's slot.
+  auto CheckForCrash(std::uint64_t *dead_slots = nullptr) -> CrashCheck;
+
+  // Nonzero once the segment is marked crashed.
+  auto crashed_word() const -> const std::atomic<std::uint32_t> *;
+
+  // This process's slot; holder_slot in descriptors stores it plus one.
+  auto slot() const -> int { return slot_; }
+
+  // Whether this process runs the background cleaner for every attached
+  // process. The first caller to ask becomes the leader and stays it until it
+  // detaches or dies; the lock behind it is released by the kernel when the
+  // process exits, so a later caller then takes over.
+  bool TryLeadCleaner();
+
  private:
   struct Header;
 
-  SharedSegment(std::string name, bool remove_when_unused, std::byte *base, std::size_t bytes, bool created);
+  SharedSegment(std::string name, bool remove_when_unused, int fd, std::byte *base, std::size_t bytes, bool created);
 
-  // Returns null when the segment was being removed and opening must retry.
+  // Returns null when the segment was being removed, or vanished between
+  // the attempt to create it and the attempt to attach, and opening must retry.
   static auto OpenOnce(const SharedMemoryOptions &options, const Shape &shape) -> Result<std::unique_ptr<SharedSegment>>;
 
   auto header() const -> Header &;
   auto ClaimProcessSlot() -> Status;
+  bool LockByte(off_t byte, short type) const;
+  void RemoveNameIfStillOurs() const;
 
   std::string name_;
   bool remove_when_unused_;
+  // Kept open for the cleaner lock, which lives as long as this descriptor.
+  int fd_;
   std::byte *base_;
   std::size_t bytes_;
   bool created_;
   bool counted_{false};
+  bool leading_cleaner_{false};
   int slot_{-1};
 };
 

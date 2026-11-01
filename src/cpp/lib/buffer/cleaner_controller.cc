@@ -1,15 +1,21 @@
 #include "cleaner_controller.h"
 
+#include <utility>
+
 namespace telepath {
 
 BufferManagerCleanerController::BufferManagerCleanerController(
   std::size_t pool_size, std::atomic<std::size_t> *dirty_page_count,
   std::size_t dirty_page_high_watermark,
-  std::size_t dirty_page_low_watermark
+  std::size_t dirty_page_low_watermark,
+  LeadCallback lead,
+  std::chrono::milliseconds poll_interval
 ) : pool_size_(pool_size),
     dirty_page_count_(dirty_page_count),
     dirty_page_high_watermark_(dirty_page_high_watermark),
     dirty_page_low_watermark_(dirty_page_low_watermark),
+    lead_(std::move(lead)),
+    poll_interval_(poll_interval),
     candidate_enqueued_(pool_size, false),
     candidate_generations_(pool_size, 0) {}
 
@@ -96,12 +102,19 @@ auto BufferManagerCleanerController::TakeCandidate(FrameId *frame_id) -> bool {
 }
 
 void BufferManagerCleanerController::Run() {
+  // Leadership is claimed at once, so the first process to start leads.
+  if (lead_) lead_();
   while (true) {
     std::unique_lock<std::mutex> lock(latch_);
-    cv_.wait(lock, [&]() {
-      return shutdown_ || DirtyPageCount() >= dirty_page_high_watermark_;
-    });
+    const auto over_watermark = [&]() { return shutdown_ || DirtyPageCount() >= dirty_page_high_watermark_; };
+    if (poll_interval_.count() > 0) cv_.wait_for(lock, poll_interval_, over_watermark);
+    else cv_.wait(lock, over_watermark);
     if (shutdown_) return;
+    if (DirtyPageCount() < dirty_page_high_watermark_) continue;
+    if (lead_ && !lead_()) {
+      cv_.wait_for(lock, poll_interval_, [&]() { return shutdown_; });
+      continue;
+    }
 
     while (!shutdown_) {
       const std::size_t dirty_snapshot = DirtyPageCount();

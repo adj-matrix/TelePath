@@ -62,7 +62,7 @@ auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Stat
       const std::uint32_t word = descriptor.control.load(std::memory_order_acquire);
       if (frame_control::State(word) == BufferFrameState::kFree || tag.file_id != file_id || tag.block_id < first_block) break;
       if (frame_control::State(word) == BufferFrameState::kLoading) {
-        WaitForLoad(frame_id, tag);
+        if (!WaitForLoad(frame_id, tag)) return CrashedSegmentError();
         continue;
       }
       if (!TryPinResidentFrame(frame_id, tag, false)) continue;
@@ -71,12 +71,13 @@ auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Stat
       const frame_control::DiscardOutcome outcome = frame_control::TryDiscardPinned(descriptor.control, &previous);
       if (outcome == frame_control::DiscardOutcome::kWriteback) {
         ReleaseFrame(frame_id);
-        std::ignore = WaitForPendingFlush(&descriptor);
+        if (Status waited = WaitForPendingFlush(&descriptor); !waited.has_value() && waited.error().code() == ErrorCode::kFailed) return waited;
         continue;
       }
       if (outcome == frame_control::DiscardOutcome::kLatched) {
-        frame_control::WaitWhile(descriptor.control, [](std::uint32_t word) { return (word & frame_control::kLatchMask) != 0; });
+        const bool released = frame_control::WaitWhile(descriptor.control, [](std::uint32_t word) { return (word & frame_control::kLatchMask) != 0; }, fence_).has_value();
         ReleaseFrame(frame_id);
+        if (!released) return CrashedSegmentError();
         continue;
       }
       if (outcome == frame_control::DiscardOutcome::kBusy) {

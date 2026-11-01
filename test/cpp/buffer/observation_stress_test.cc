@@ -245,9 +245,16 @@ void ExpectPublisherFailover() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
+  // The killed child was attached to the shared cache, so the parent fences
+  // it and removes the crashed segment's name.
+  const auto fenced = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!manager.value()->failure().has_value()) {
+    assert(std::chrono::steady_clock::now() < fenced);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   manager->reset();
-  // The killed child never detached, so the segment name outlives it.
-  assert(telepath::BufferManager::RemoveSharedMemory(segment).has_value());
+  auto removed = telepath::BufferManager::RemoveSharedMemory(segment);
+  assert(!removed.has_value() && removed.error().code() == telepath::ErrorCode::kNotFound);
 }
 
 // Child of ExpectProcessRecordsRunOut: takes a process record and waits to be

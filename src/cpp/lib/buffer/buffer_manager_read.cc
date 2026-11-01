@@ -29,7 +29,7 @@ auto BufferManager::PinPage(const BufferTag &tag, BufferAccessStrategy *strategy
       return frame_id;
     }
     if (probe == ResidentProbe::kLoading) {
-      WaitForLoad(frame_id, tag);
+      if (!WaitForLoad(frame_id, tag)) return CrashedSegmentError();
       waited = true;
       continue;
     }
@@ -75,8 +75,8 @@ bool BufferManager::IsLoadingTag(FrameId frame_id, const BufferTag &tag) const {
   return frame_control::State(descriptor.control.load(std::memory_order_acquire)) == BufferFrameState::kLoading && LoadTag(descriptor) == tag;
 }
 
-void BufferManager::WaitForLoad(FrameId frame_id, const BufferTag &tag) {
-  frame_control::WaitWhile(descriptors_[frame_id].control, [&](std::uint32_t) { return IsLoadingTag(frame_id, tag); });
+bool BufferManager::WaitForLoad(FrameId frame_id, const BufferTag &tag) {
+  return frame_control::WaitWhile(descriptors_[frame_id].control, [&](std::uint32_t) { return IsLoadingTag(frame_id, tag); }, fence_).has_value();
 }
 
 bool BufferManager::IsLiveFor(FrameId frame_id, const BufferTag &tag) const {
@@ -121,6 +121,7 @@ auto BufferManager::AcquireVictimFrame(bool wait_for_frame) -> Result<Reservatio
   while (true) {
     Result<ReservationCandidate> frame = AcquireReservationFrame();
     if (frame.has_value() || frame.error().code() != ErrorCode::kResourceExhausted || !wait_for_frame || !HasTransientFrame()) return frame;
+    if (fence_ != nullptr && fence_->load(std::memory_order_acquire) != 0) return CrashedSegmentError();
     std::this_thread::yield();
   }
 }
@@ -143,7 +144,7 @@ auto BufferManager::CompleteReservation(const BufferTag &tag, const FrameReserva
   const FrameId frame_id = reservation.frame_id;
   if (mode == ReadBufferMode::kZeroAndLock) {
     std::memset(frame_pool_->GetFrameData(frame_id), 0, geometry_.block_size());
-    frame_control::AcquireExclusive(descriptors_[frame_id].control);
+    if (!frame_control::AcquireExclusive(descriptors_[frame_id].control, fence_)) return PropagateError(AbortLoadReservation(frame_id, tag, CrashedSegmentError()));
     *exclusive_latched = true;
     PublishLoadedFrame(tag, reservation, false);
     return frame_id;

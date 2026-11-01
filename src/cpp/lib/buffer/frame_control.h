@@ -61,6 +61,29 @@ auto WaitWhile(std::atomic<std::uint32_t> &control, Blocked blocked) -> std::uin
   return word;
 }
 
+// How often a fenced wait rechecks its fence.
+inline constexpr std::chrono::milliseconds kFenceCheckInterval{10};
+
+// Like WaitWhile(), but in cross-process mode, where `fence` points to the
+// segment's crashed word, gives up and returns nullopt once a process died:
+// what it waits for may never happen. A null `fence` waits as WaitWhile()
+// does.
+template <typename Blocked>
+auto WaitWhile(std::atomic<std::uint32_t> &control, Blocked blocked, const std::atomic<std::uint32_t> *fence) -> std::optional<std::uint32_t> {
+  if (fence == nullptr) return WaitWhile(control, blocked);
+  std::uint32_t word = control.load(std::memory_order_acquire);
+  while (blocked(word)) {
+    if (fence->load(std::memory_order_acquire) != 0) return std::nullopt;
+    if ((word & kWaiters) == 0) {
+      if (!control.compare_exchange_weak(word, word | kWaiters, std::memory_order_acquire, std::memory_order_acquire)) continue;
+      word |= kWaiters;
+    }
+    FutexWaitFor(control, word, kFenceCheckInterval);
+    word = control.load(std::memory_order_acquire);
+  }
+  return word;
+}
+
 // Applies `next(word)` with a CAS loop; clears the waiter bit and wakes
 // sleepers when `wakes(word, new_word)` holds. Returns the replaced word.
 template <typename Next, typename Wakes>
@@ -198,6 +221,14 @@ inline void AcquireShared(std::atomic<std::uint32_t> &control) {
   }
 }
 
+// Returns false, without the latch, when `fence` reports a crash.
+inline bool AcquireShared(std::atomic<std::uint32_t> &control, const std::atomic<std::uint32_t> *fence) {
+  while (!TryAcquireShared(control)) {
+    if (!WaitWhile(control, [](std::uint32_t word) { return (word & kExclusive) != 0 || SharedHolders(word) >= kMaxShared; }, fence)) return false;
+  }
+  return true;
+}
+
 inline void ReleaseShared(std::atomic<std::uint32_t> &control) {
   UpdateAndWake(
     control,
@@ -219,6 +250,14 @@ inline void AcquireExclusive(std::atomic<std::uint32_t> &control) {
   while (!TryAcquireExclusive(control)) {
     WaitWhile(control, [](std::uint32_t word) { return (word & kLatchMask) != 0; });
   }
+}
+
+// Returns false, without the latch, when `fence` reports a crash.
+inline bool AcquireExclusive(std::atomic<std::uint32_t> &control, const std::atomic<std::uint32_t> *fence) {
+  while (!TryAcquireExclusive(control)) {
+    if (!WaitWhile(control, [](std::uint32_t word) { return (word & kLatchMask) != 0; }, fence)) return false;
+  }
+  return true;
 }
 
 // Releases the exclusive latch after bumping the version. Releasing while a

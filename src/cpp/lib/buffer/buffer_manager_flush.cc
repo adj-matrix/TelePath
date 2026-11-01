@@ -123,7 +123,7 @@ auto BufferManager::PrepareFlushTask(FrameId frame_id, const std::byte *stable_d
   bool shared_latch_held = false;
   if (stable_data == nullptr) {
     if (!opportunistic) {
-      frame_control::AcquireShared(descriptor.control);
+      if (!frame_control::AcquireShared(descriptor.control, fence_)) return CrashedSegmentError();
     } else if (!frame_control::TryAcquireShared(descriptor.control)) {
       *was_busy = true;
       return false;
@@ -183,7 +183,7 @@ auto BufferManager::RollBackFlushTask(FrameId frame_id, bool cleaner_owned, cons
 }
 
 auto BufferManager::WaitForPendingFlush(BufferDescriptor *descriptor) -> Status {
-  frame_control::WaitWhile(descriptor->control, [](std::uint32_t word) { return frame_control::HasWriteback(word); });
+  if (!frame_control::WaitWhile(descriptor->control, [](std::uint32_t word) { return frame_control::HasWriteback(word); }, fence_)) return CrashedSegmentError();
   return frame_control::UnpackWritebackError(descriptor->last_writeback_error.load(std::memory_order_relaxed));
 }
 

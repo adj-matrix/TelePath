@@ -168,6 +168,12 @@ Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`,
 - The reaper sleeps on `demand_` while it is zero. `Submit(kAsync)` raises it per request before submitting, and a waiter raises it before its first futex sleep; the transition from zero wakes the reaper. Completions of asynchronous requests carry a tag bit in the token and lower `demand_` when delivered. A waiter sleeps on its own `pending_` with the value it observed, so a completion between the check and the sleep is not lost; the sleep is bounded (10 ms) only to notice an engine stop.
 - `WaitReadBuffers()` waits for every read of the operation before touching its frames. If the engine stops with reads in flight (fatal error or shutdown), the operation's state is leaked on purpose, because pending completions still reference it.
 
+## 7a. Cross-Process Crashes
+
+A process attached to a shared segment holds an open-file-description lock on its slot's byte of the segment object; it takes the lock before publishing its pid and clears the pid before releasing the lock, so "pid set, lock free" means the process died attached. Every cross-process manager's `SegmentMonitor` checks for that every 10 ms. The first to find it marks the segment crashed, removes the name if it still names this segment, and, with `CrashRecovery::kSalvage`, writes back dirty pages that no dead process holds exclusively (`holder_slot`); every manager enters the Failed state.
+
+The crashed word fences waits that only the dead process could end: latch acquisition, waiting for a load or writeback, a drop waiting out a latch, `Close()` waiting for loads, and the reservation retry while frames are `Loading`. In cross-process mode these wait in 10 ms slices and return `kFailed` once the word is set; in private mode they wait as before. Nothing is undone: the segment is abandoned, and callers create a new manager, which gets a fresh segment.
+
 ## 8. Known Limits
 
 - While no frame can be nominated but some frame is unpinned or `Loading`, `ReserveFrameForTag()` yields and retries instead of sleeping.
@@ -176,6 +182,7 @@ Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`,
 - There is no in-place upgrade: release the `SharedBufferHandle`, acquire an `ExclusiveBufferHandle`, and re-check.
 - Pin counts saturate at 32767 per frame; further pins yield until one is released. A page admits 255 shared latch holders; a further `ReadBuffer()` of it waits until one leaves, so one thread must not hold more than 255 shared handles on one page.
 - `Close()` does not wait for calls already under way on other threads; a change such a call makes after `Close()`'s `FlushAll()` is not written back. Stop other threads first.
+- A process that dies inside a replacer, page-table stripe, or written-files critical section leaves that lock held; survivors that need it stay blocked (7a covers every other wait).
 - A process that dies releases its observation-plane locks when the kernel closes its files, which can be some tens of milliseconds after `waitpid()` returns; another process takes over publishing at its next publish after that. Until then the dead process still counts as a user, so a last user leaving in that window does not remove the name.
 - Cross-process mode (`SharedMemoryOptions`) assumes every attached process stays alive while it holds a pin, latch, or `Loading` frame. A process that dies there leaves the frame pinned, latched, or loading for the others, and only removing the segment recovers; crash recovery is designed separately (phase 6e).
 - In cross-process mode a frame waits only on its control word, so a process may wait for a load or writeback another process started. Per-process state (I/O tokens, flush tasks, access batches, the cleaner) never crosses processes.
