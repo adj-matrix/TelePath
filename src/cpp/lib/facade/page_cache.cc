@@ -41,11 +41,19 @@ auto PageCache::Create(
   DiskBackend *raw_backend = backend.get();
   auto manager = BufferManager::Create(options.buffer, std::move(backend), std::move(replacer), std::move(telemetry_sink));
   if (!manager.has_value()) return PropagateError(manager);
-  return std::unique_ptr<PageCache>(new PageCache(std::move(options), raw_backend, std::move(manager.value())));
+  BufferManager *raw_manager = manager.value().get();
+  return std::unique_ptr<PageCache>(new PageCache(std::move(options), raw_backend, std::move(manager.value()), raw_manager, raw_manager->DefaultNamespace()));
 }
 
-PageCache::PageCache(PageCacheOptions options, DiskBackend *backend, std::unique_ptr<BufferManager> manager)
-  : options_(std::move(options)), block_size_(manager->page_size()), backend_(backend), manager_(std::move(manager)) {}
+auto PageCache::Create(PageCacheOptions options, BufferManager &manager, NamespaceOptions space) -> Result<std::unique_ptr<PageCache>> {
+  if (space.replacer == nullptr) space.replacer = MakeClockSweepReplacer(manager.pool_size());
+  Result<BufferNamespace> created = manager.CreateNamespace(std::move(space));
+  if (!created.has_value()) return PropagateError(created);
+  return std::unique_ptr<PageCache>(new PageCache(std::move(options), manager.disk_backend(), nullptr, &manager, created.value()));
+}
+
+PageCache::PageCache(PageCacheOptions options, DiskBackend *backend, std::unique_ptr<BufferManager> owned_manager, BufferManager *manager, BufferNamespace space)
+  : options_(std::move(options)), block_size_(manager->page_size()), backend_(backend), owned_manager_(std::move(owned_manager)), manager_(manager), space_(space) {}
 
 PageCache::~PageCache() = default;
 
@@ -63,7 +71,7 @@ auto PageCache::Read(FileId file_id, std::uint64_t offset, std::span<std::byte> 
     const std::uint64_t position = offset + copied;
     const std::size_t in_block = static_cast<std::size_t>(position % block_size_);
     const std::size_t chunk = std::min(block_size_ - in_block, length - copied);
-    Result<SharedBufferHandle> handle = manager_->ReadBuffer(file_id, position / block_size_);
+    Result<SharedBufferHandle> handle = space_.ReadBuffer(file_id, position / block_size_);
     if (!handle.has_value()) return PropagateError(handle);
     std::memcpy(out.data() + copied, handle->data().data() + in_block, chunk);
     copied += chunk;
@@ -92,7 +100,7 @@ auto PageCache::Write(FileId file_id, std::uint64_t offset, std::span<const std:
     // Only a whole-block overwrite may skip the read: a concurrent writer may
     // already have written, evicted, and persisted part of any other block.
     const ReadBufferMode mode = chunk == block_size_ ? ReadBufferMode::kZeroAndLock : ReadBufferMode::kNormal;
-    Result<ExclusiveBufferHandle> handle = manager_->ReadBufferExclusive(file_id, block, nullptr, mode);
+    Result<ExclusiveBufferHandle> handle = space_.ReadBufferExclusive(file_id, block, nullptr, mode);
     if (!handle.has_value()) {
       if (copied != 0) extend_to(offset + copied);
       return PropagateError(handle);
@@ -121,7 +129,7 @@ auto PageCache::Truncate(FileId file_id, std::uint64_t size) -> Status {
   if (size < file.size.load(std::memory_order_acquire)) {
     if (Status dropped = manager_->DropFileBuffers(file_id, (size + block_size_ - 1) / block_size_); !dropped.has_value()) return dropped;
     if (const std::size_t in_block = static_cast<std::size_t>(size % block_size_); in_block != 0) {
-      Result<ExclusiveBufferHandle> tail = manager_->ReadBufferExclusive(file_id, size / block_size_);
+      Result<ExclusiveBufferHandle> tail = space_.ReadBufferExclusive(file_id, size / block_size_);
       if (!tail.has_value()) return PropagateError(tail);
       std::memset(tail->mutable_data().data() + in_block, 0, block_size_ - in_block);
     }
@@ -154,7 +162,11 @@ auto PageCache::Close() -> Status {
   for (const auto &[file_id, state] : touched) {
     if (Status synced = SyncState(file_id, *state); !synced.has_value()) return synced;
   }
-  Status closed = manager_->Close();
+  if (owned_manager_ == nullptr) {
+    closed_.store(true, std::memory_order_release);
+    return Ok();
+  }
+  Status closed = owned_manager_->Close();
   if (!closed.has_value() && closed.error().code() != ErrorCode::kFailed) return closed;
   closed_.store(true, std::memory_order_release);
   return closed;
@@ -202,7 +214,7 @@ void PageCache::Readahead(FileId file_id, FileState &state, std::uint64_t offset
   const BlockId end = std::min<BlockId>(last_block + 1 + window, file_blocks);
   if (first >= end) return;
   state.prefetched_until.store(end, std::memory_order_relaxed);
-  std::ignore = manager_->PrefetchBuffer(file_id, first, end - first);
+  std::ignore = space_.PrefetchBuffer(file_id, first, end - first);
 }
 
 auto PageCache::SyncState(FileId file_id, FileState &state) -> Status {

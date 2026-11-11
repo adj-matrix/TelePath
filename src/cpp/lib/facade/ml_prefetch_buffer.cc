@@ -27,11 +27,22 @@ auto MLPrefetchBuffer::Create(
   PlanReplacer *raw_replacer = replacer.get();
   auto manager = BufferManager::Create(options.buffer, std::move(backend), std::move(replacer), std::move(telemetry_sink));
   if (!manager.has_value()) return PropagateError(manager);
-  return std::unique_ptr<MLPrefetchBuffer>(new MLPrefetchBuffer(std::move(options), raw_replacer, std::move(manager.value())));
+  BufferManager *raw_manager = manager.value().get();
+  return std::unique_ptr<MLPrefetchBuffer>(new MLPrefetchBuffer(std::move(options), raw_replacer, std::move(manager.value()), raw_manager, raw_manager->DefaultNamespace()));
 }
 
-MLPrefetchBuffer::MLPrefetchBuffer(MLPrefetchBufferOptions options, PlanReplacer *replacer, std::unique_ptr<BufferManager> manager)
-  : options_(std::move(options)), block_size_(manager->page_size()), replacer_(replacer), manager_(std::move(manager)) {}
+auto MLPrefetchBuffer::Create(MLPrefetchBufferOptions options, BufferManager &manager, NamespaceOptions space) -> Result<std::unique_ptr<MLPrefetchBuffer>> {
+  if (space.replacer != nullptr) return InvalidArgument("ml prefetch buffer installs its own plan replacer");
+  auto replacer = std::make_unique<PlanReplacer>(manager.pool_size());
+  PlanReplacer *raw_replacer = replacer.get();
+  space.replacer = std::move(replacer);
+  Result<BufferNamespace> created = manager.CreateNamespace(std::move(space));
+  if (!created.has_value()) return PropagateError(created);
+  return std::unique_ptr<MLPrefetchBuffer>(new MLPrefetchBuffer(std::move(options), raw_replacer, nullptr, &manager, created.value()));
+}
+
+MLPrefetchBuffer::MLPrefetchBuffer(MLPrefetchBufferOptions options, PlanReplacer *replacer, std::unique_ptr<BufferManager> owned_manager, BufferManager *manager, BufferNamespace space)
+  : options_(std::move(options)), block_size_(manager->page_size()), replacer_(replacer), owned_manager_(std::move(owned_manager)), manager_(manager), space_(space) {}
 
 MLPrefetchBuffer::~MLPrefetchBuffer() = default;
 
@@ -59,7 +70,7 @@ auto MLPrefetchBuffer::Fetch(std::size_t position) -> Result<SharedBufferHandle>
   Prefetch(position);
 
   const BufferTag &tag = plan_[position];
-  Result<SharedBufferHandle> handle = manager_->ReadBuffer(tag.file_id, tag.block_id);
+  Result<SharedBufferHandle> handle = space_.ReadBuffer(tag.file_id, tag.block_id);
   if (!handle.has_value()) return PropagateError(handle);
   replacer_->SetNextUse(handle->frame_id(), next_use_[position]);
   return handle;
@@ -76,7 +87,11 @@ auto MLPrefetchBuffer::Next() -> Result<std::optional<PlannedBlock>> {
 
 auto MLPrefetchBuffer::Close() -> Status {
   if (closed_.load(std::memory_order_acquire)) return Ok();
-  Status status = manager_->Close();
+  if (owned_manager_ == nullptr) {
+    closed_.store(true, std::memory_order_release);
+    return Ok();
+  }
+  Status status = owned_manager_->Close();
   if (status.has_value() || status.error().code() == ErrorCode::kFailed) closed_.store(true, std::memory_order_release);
   return status;
 }
@@ -92,7 +107,7 @@ void MLPrefetchBuffer::Prefetch(std::size_t position) {
   } while (!prefetched_until_.compare_exchange_weak(observed, end, std::memory_order_relaxed));
   for (std::size_t ahead = first; ahead < end; ++ahead) {
     const BufferTag &tag = plan_[ahead];
-    std::ignore = manager_->PrefetchBuffer(tag.file_id, tag.block_id, 1);
+    std::ignore = space_.PrefetchBuffer(tag.file_id, tag.block_id, 1);
   }
 }
 

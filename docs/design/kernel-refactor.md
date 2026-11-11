@@ -16,7 +16,7 @@ TelePath is a long-term open-source SDK. Its kernel is a **keyed, fixed-size blo
 
 Out of scope: network-stack buffer pools, compiler symbol interning, sample-level ML caches, mmap semantics. Shuffling, decoding, and batching stay outside TelePath.
 
-"Three facades on one kernel" means three kinds of products reuse one kernel implementation. An application normally uses one facade, and each facade creates and owns its kernel instance; any number of threads may use one facade instance concurrently. Sharing one cache between facades or between processes is a future plan (section 8), not part of the current design.
+"Three facades on one kernel" means three kinds of products reuse one kernel implementation. An application normally uses one facade, which creates and owns its kernel instance; any number of threads may use one facade instance concurrently. Since phase 7b a facade can instead run in a namespace of an existing kernel, so several facades share one cache (section 8.6), and since phase 6 one cache can be shared between processes.
 
 ## 2. Ground Rules
 
@@ -118,7 +118,7 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 
 ## 6. Phases
 
-**Progress:** phases 0, 1a–1e, 2, 3, 4, 5a, 5b, and 6a–6e are implemented; see section 7.
+**Progress:** phases 0, 1a–1e, 2, 3, 4, 5a, 5b, 6a–6e, 7a, and 7b are implemented; see sections 7 and 8.6.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
@@ -337,7 +337,7 @@ A second pass added `primitives_stress_test` (the lock-free free list with one t
 
 ## 8. Future Plan: Shared Namespaces and Observation
 
-**Status: planned for phases 6 and 7; nothing here is implemented.** Until then each facade owns its kernel instance (section 1). This section records the plan and the constraints that keep it possible.
+**Status: phase 6 done; phase 7 in progress (7a and 7b done, see 8.6).** This section records the plan, the constraints that keep it possible, and the phase 7 decisions.
 
 ### 8.1 Motivation
 
@@ -376,4 +376,25 @@ These keep phases 6 and 7 from forcing a rewrite and cost nothing today:
 - Telemetry counters keep their sharded layout so a namespace dimension can be added.
 - Frames stay fixed-size (option (c) is out).
 - Acceptance gate for phase 7: with a single namespace, hit-path throughput must match the phase 6 baseline.
+
+### 8.6 Phase 7 Decisions and Progress
+
+Decided 2026-11-02 by industry consensus, without new architecture constraints:
+
+| Topic | Decision |
+| --- | --- |
+| Page identity | A page stays `(file, block)`; the namespace is an attribute of the frame, not of the tag. Two namespaces reading one file share one coherent copy and lookups compare nothing more. File ids are one global space, which cross-process mode already requires. This revises the "namespace id in `BufferTag`" row of 8.2. |
+| Ownership | The namespace that loads a page owns it and is charged for its frame until eviction; hits from other namespaces keep it warm in the owner's replacer and never move it, so the hit path writes nothing new. |
+| Quotas | `min_frames` (others may not evict below it; all guarantees together fit the pool) and `max_frames` (at the cap a namespace evicts its own pages even with frames free; 0 = no cap). Victims: at the cap, its own pages; otherwise its own while above its guarantee, then the namespaces furthest above theirs, then its own below its guarantee; never another namespace's guaranteed frames. Quotas are soft under concurrency (counts are read without a lock). |
+| Policy and writeback | Each namespace has its own replacer (capacity covering the pool, since frame ids are shared) and pre-write hook; the default namespace keeps the manager's replacer and `BufferManagerOptions::pre_write_hook`. |
+| API | `BufferManager::CreateNamespace(NamespaceOptions)` returns a `BufferNamespace` handle with the read entry points (`ReadBuffer`, `ReadBufferExclusive`, `PrefetchBuffer`, `StartReadBuffers`); `BufferManager`'s own methods act for namespace 0 and are unchanged. Up to `kMaxNamespaces` (16). |
+| Block sizes | Only namespaces of one block size share a manager (option (a) of 8.2); different block sizes stay separate managers until a later "cache group" step. |
+| Naming | The reserved `BufferDescriptor::tenant_id` became `namespace_id` (atomic, `kNoNamespace` while the frame holds no page). |
+| Order | 7a in-process core, 7b facades on a namespace, 7c cross-process namespaces, 7d per-namespace observation and eviction events, 7e Web views. Acceptance gate: single-namespace hit-path throughput equal to phase 6. |
+
+**7a done.** Every read entry point carries the requesting namespace down the miss path (`PinPage`, `LoadPage`, `ReserveFrameForTag`, frame acquisition, ring frames, asynchronous loads, `WaitReadBuffers()` deferred pins). Accounting has two transitions: a successful reservation calls `AssignFrame()`, which moves the frame from its previous owner (removing it from that owner's replacer and count) to the requester; every return of a frame to the free list goes through `ForgetFrame()`. A frame is therefore tracked by exactly one replacer and counted by exactly one namespace while it holds a page, and by none while free. Hits dispatch `RecordAccess()` through the owner's replacer (`ReplacerOf()`, inline). Victim selection follows the quota rules above (`NominateVictim()`, sorting a snapshot of the counts, since sorting live counts broke the comparator's ordering and overran the array under load). The reservation retry now knows what the requester may use: a namespace at its cap does not wait for free frames or other namespaces' loads, which previously spun forever when its own frames were all pinned (found by the namespace chaos configuration, then reproduced deterministically). With only the default namespace every path takes the previous branches. `FrameSnapshot::namespace_id` and the observation frame record report the owner. Cross-process mode returns `kUnavailable` from `CreateNamespace()` until 7c.
+
+Tests: `namespace_test` (validation, sharing and ownership, guarantees surviving a scan, the cap, exhaustion instead of stealing, a capped namespace not waiting for free frames, per-namespace hooks, three namespaces under concurrent rewrites) and two `chaos_test` configurations with three namespaces. Parity gate: release, single thread pinned, 12 alternating runs against a834615: median −1.6 %, mean −1.2 %, standard deviation about 3.5 %, so within noise; an earlier layout that placed the 2 KB namespace table among the hot members measured −2 to −3 % and was moved to the end of the class.
+
+**7b done.** `PageCache::Create(options, manager, space)` and `MLPrefetchBuffer::Create(options, manager, space)` run a facade in a new namespace of an existing `BufferManager`; the original factories still create and own a kernel. Both modes read through a `BufferNamespace` handle (`BufferManager::DefaultNamespace()` for an owned kernel), and manager-wide operations (file flush, sync, drop) go to the manager. In attached mode the kernel configuration is the manager's: `options.buffer` and PageCache's `write_behind` are ignored, MLPrefetchBuffer's blocks are the manager's pages and its namespace's replacer is its own `PlanReplacer` (a caller-supplied replacer is refused), and PageCache takes file sizes from `BufferManager::disk_backend()`. `Close()` of an attached facade stops only that facade (PageCache syncs its files first); the manager stays open and must outlive its facades. A facade's namespace stays after the facade is destroyed, since namespaces cannot be removed yet. `PlanReplacer::SetNextUse()` on a page another namespace owns does nothing, so a dataset reading a page a file cache loaded leaves that page in the file cache's accounting. Test: `shared_kernel_test` (one coherent copy across facades without a disk read before writeback, a file cache's guarantee surviving a training pass over a dataset far larger than the pool, closing one facade leaving the manager and the other facade running, refused attachments, and a file cache writer with dataset readers running concurrently in a pool smaller than their data).
 

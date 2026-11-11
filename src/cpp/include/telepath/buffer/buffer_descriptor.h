@@ -33,8 +33,9 @@ struct alignas(kCacheLineSize) BufferDescriptor {
   std::atomic<Lsn> rec_lsn{kInvalidLsn};
   // rec_lsn as of the snapshot of the writeback in flight, or kInvalidLsn.
   std::atomic<Lsn> writeback_rec_lsn{kInvalidLsn};
-  // Reserved for the multi-tenant policy module.
-  std::uint16_t tenant_id{0};
+  // Namespace that loaded the page and accounts for the frame, or kNoNamespace
+  // while the frame holds no page.
+  std::atomic<NamespaceId> namespace_id{kNoNamespace};
   // Process slot plus one of the exclusive latch holder in cross-process mode,
   // so crash recovery can tell pages a dead process was changing; 0 otherwise.
   std::atomic<std::uint32_t> holder_slot{0};

@@ -418,6 +418,15 @@ target_link_libraries(telepath_page_cache_model_test PRIVATE telepath)
 
 add_test(NAME telepath_page_cache_model_test COMMAND telepath_page_cache_model_test)
 
+add_executable(telepath_shared_kernel_test
+  cpp/facade/shared_kernel_test.cc
+)
+
+target_include_directories(telepath_shared_kernel_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/buffer)
+target_link_libraries(telepath_shared_kernel_test PRIVATE telepath)
+
+add_test(NAME telepath_shared_kernel_test COMMAND telepath_shared_kernel_test)
+
 add_executable(telepath_foreground_writeback_test
   cpp/buffer/foreground_writeback_test.cc
 )
@@ -433,6 +442,14 @@ add_executable(telepath_durability_test
 target_link_libraries(telepath_durability_test PRIVATE telepath)
 
 add_test(NAME telepath_durability_test COMMAND telepath_durability_test)
+
+add_executable(telepath_namespace_test
+  cpp/buffer/namespace_test.cc
+)
+
+target_link_libraries(telepath_namespace_test PRIVATE telepath)
+
+add_test(NAME telepath_namespace_test COMMAND telepath_namespace_test)
 
 add_executable(telepath_rec_lsn_test
   cpp/buffer/rec_lsn_test.cc

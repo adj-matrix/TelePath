@@ -1,6 +1,9 @@
 #include "telepath/buffer/buffer_manager.h"
 
+#include <algorithm>
+#include <array>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "buffer_manager_observer.h"
@@ -32,7 +35,7 @@ class FrameEvictionProbe final : public EvictionProbe {
 
 auto BufferManager::AbortLoadReservation(FrameId frame_id, const BufferTag &tag, const Status &status) -> Status {
   page_table_->Remove(tag, frame_id);
-  replacer_->Remove(frame_id);
+  ForgetFrame(frame_id);
   StoreTag(&descriptors_[frame_id], BufferTag{});
   frame_control::ReleaseToFree(descriptors_[frame_id].control);
   ReleaseFreeFrame(frame_id);
@@ -44,12 +47,62 @@ void BufferManager::ReleaseFreeFrame(FrameId frame_id) {
   free_list_->Push(frame_id);
 }
 
-auto BufferManager::AcquireReservationFrame() -> Result<ReservationCandidate> {
-  if (std::optional<FrameId> free_frame = free_list_->Pop(); free_frame.has_value()) return ReservationCandidate{free_frame.value(), true};
+auto BufferManager::AcquireReservationFrame(NamespaceId space, std::uint32_t *eligible) -> Result<ReservationCandidate> {
+  if (namespace_count_.load(std::memory_order_acquire) == 1) {
+    *eligible = ~std::uint32_t{0};
+    if (std::optional<FrameId> free_frame = free_list_->Pop(); free_frame.has_value()) return ReservationCandidate{free_frame.value(), true};
+    FrameId frame_id = kInvalidFrameId;
+    if (replacer_->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return ReservationCandidate{frame_id, false};
+    return ResourceExhausted("no evictable frame available");
+  }
 
-  FrameId frame_id = kInvalidFrameId;
-  if (replacer_->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return ReservationCandidate{frame_id, false};
-  return ResourceExhausted("no evictable frame available");
+  const NamespaceState &self = namespaces_[space];
+  const bool at_max = self.max_frames != 0 && self.owned.load(std::memory_order_relaxed) >= self.max_frames;
+  if (!at_max) {
+    if (std::optional<FrameId> free_frame = free_list_->Pop(); free_frame.has_value()) return ReservationCandidate{free_frame.value(), true};
+  }
+  std::optional<FrameId> victim = NominateVictim(space, eligible);
+  if (!at_max) *eligible |= kFreeFramesEligible;
+  if (victim.has_value()) return ReservationCandidate{victim.value(), false};
+  return ResourceExhausted("no evictable frame available within the namespace quotas");
+}
+
+auto BufferManager::NominateVictim(NamespaceId space, std::uint32_t *eligible) -> std::optional<FrameId> {
+  const std::size_t count = namespace_count_.load(std::memory_order_acquire);
+  const NamespaceState &self = namespaces_[space];
+  const std::size_t self_owned = self.owned.load(std::memory_order_relaxed);
+  std::array<NamespaceId, kMaxNamespaces> order{};
+  std::size_t candidates = 0;
+  // A namespace at its maximum makes room among its own pages. Otherwise it
+  // evicts its own pages while above its guarantee, then takes from the
+  // namespaces furthest above theirs, and evicts below its own guarantee only
+  // last; nobody else's guarantee is touched.
+  if (self.max_frames != 0 && self_owned >= self.max_frames) {
+    order[candidates++] = space;
+  } else {
+    const bool self_first = self_owned > self.min_frames;
+    if (self_first) order[candidates++] = space;
+    // Counts keep changing under other threads, so sort a snapshot of them.
+    std::array<std::pair<std::size_t, NamespaceId>, kMaxNamespaces> others{};
+    std::size_t other_count = 0;
+    for (NamespaceId other = 0; other < count; ++other) {
+      if (other == space) continue;
+      const NamespaceState &state = namespaces_[other];
+      const std::size_t owned = state.owned.load(std::memory_order_relaxed);
+      if (owned > state.min_frames) others[other_count++] = {owned - state.min_frames, other};
+    }
+    std::sort(others.begin(), others.begin() + static_cast<std::ptrdiff_t>(other_count), [](const auto &a, const auto &b) { return a.first > b.first; });
+    for (std::size_t index = 0; index < other_count; ++index) order[candidates++] = others[index].second;
+    if (!self_first) order[candidates++] = space;
+  }
+
+  *eligible = 0;
+  for (std::size_t index = 0; index < candidates; ++index) *eligible |= std::uint32_t{1} << order[index];
+  for (std::size_t index = 0; index < candidates; ++index) {
+    FrameId frame_id = kInvalidFrameId;
+    if (replacers_[order[index]]->Victim(FrameEvictionProbe(descriptors_), &frame_id)) return frame_id;
+  }
+  return std::nullopt;
 }
 
 auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Status {
@@ -89,7 +142,7 @@ auto BufferManager::DropFileBuffers(FileId file_id, BlockId first_block) -> Stat
       descriptor.rec_lsn.store(kInvalidLsn, std::memory_order_release);
       descriptor.writeback_rec_lsn.store(kInvalidLsn, std::memory_order_release);
       page_table_->Remove(tag, frame_id);
-      replacer_->Remove(frame_id);
+      ForgetFrame(frame_id);
       StoreTag(&descriptor, BufferTag{});
       ReleaseFreeFrame(frame_id);
       break;
@@ -105,10 +158,18 @@ bool BufferManager::HasPinnedFrame() const {
   return false;
 }
 
-bool BufferManager::HasTransientFrame() const {
+bool BufferManager::HasTransientFrame(std::uint32_t eligible) const {
+  const bool free_eligible = (eligible & kFreeFramesEligible) != 0;
   for (const BufferDescriptor &descriptor : descriptors_) {
     const std::uint32_t word = descriptor.control.load(std::memory_order_acquire);
-    if (frame_control::Pins(word) == 0 || frame_control::State(word) == BufferFrameState::kLoading) return true;
+    const NamespaceId owner = descriptor.namespace_id.load(std::memory_order_relaxed);
+    const bool owner_eligible = owner < kMaxNamespaces && ((eligible >> owner) & 1) != 0;
+    if (frame_control::State(word) == BufferFrameState::kLoading) {
+      if (free_eligible || owner_eligible) return true;
+      continue;
+    }
+    if (frame_control::Pins(word) != 0) continue;
+    if (!frame_control::IsResident(word) ? free_eligible : owner_eligible) return true;
   }
   return false;
 }
@@ -118,7 +179,7 @@ auto BufferManager::InstallReservationEntry(const BufferTag &tag, const FrameRes
   return page_table_->ReplaceUnlessLive(evicted_tag, tag, reservation.frame_id, [&](FrameId other) { return IsLiveFor(other, tag); });
 }
 
-auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag, bool allow_victim_flush, bool from_free_list, FrameReservation *reservation) -> FrameReservationOutcome {
+auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag, bool allow_victim_flush, bool from_free_list, FrameReservation *reservation, NamespaceId space) -> FrameReservationOutcome {
   BufferDescriptor &descriptor = descriptors_[frame_id];
   std::uint32_t observed = 0;
   const frame_control::ReserveOutcome outcome = frame_control::TryReserve(descriptor.control, &observed, from_free_list);
@@ -134,12 +195,13 @@ auto BufferManager::TryReserveFrameForTag(FrameId frame_id, const BufferTag &tag
   if (InstallReservationEntry(tag, *reservation).has_value()) {
     // Another frame won the tag; this frame lost its old page and goes back
     // to the free list.
-    replacer_->Remove(frame_id);
+    ForgetFrame(frame_id);
     StoreTag(&descriptor, BufferTag{});
     frame_control::ReleaseToFree(descriptor.control);
     ReleaseFreeFrame(frame_id);
     return FrameReservationOutcome::kTagExists;
   }
+  AssignFrame(frame_id, space);
   ResetCleanerCandidate(frame_id);
   return FrameReservationOutcome::kReserved;
 }

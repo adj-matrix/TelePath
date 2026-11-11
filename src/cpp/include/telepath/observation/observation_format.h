@@ -109,7 +109,8 @@ struct ObservationFrameRecord {
   std::uint16_t pins;
   // Tag of the page; meaningful only while the state is not kFrameFree.
   std::uint32_t file_id;
-  // Reserved for shared namespaces; always 0.
+  // Namespace the page belongs to (BufferNamespace); 0 for the default
+  // namespace and for free frames.
   std::uint32_t namespace_id;
   std::uint64_t block_id;
   std::uint64_t version;

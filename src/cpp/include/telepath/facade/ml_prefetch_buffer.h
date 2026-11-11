@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "telepath/buffer/buffer_handle.h"
+#include "telepath/buffer/buffer_namespace.h"
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
 #include "telepath/io/disk_backend.h"
@@ -57,6 +58,12 @@ class MLPrefetchBuffer {
     MLPrefetchBufferOptions options,
     std::unique_ptr<DiskBackend> backend,
     std::shared_ptr<TelemetrySink> telemetry_sink = nullptr) -> Result<std::unique_ptr<MLPrefetchBuffer>>;
+  // Creates a cache that runs in a new namespace of an existing manager,
+  // sharing its frames, threads, and pages with the manager's other users
+  // (see NamespaceOptions); `manager` must outlive the cache. Blocks are the
+  // manager's page size and `options.buffer` is ignored. The namespace's
+  // replacer is the cache's PlanReplacer, so `space.replacer` must be null.
+  static auto Create(MLPrefetchBufferOptions options, BufferManager &manager, NamespaceOptions space) -> Result<std::unique_ptr<MLPrefetchBuffer>>;
 
   MLPrefetchBuffer(const MLPrefetchBuffer &) = delete;
   MLPrefetchBuffer &operator=(const MLPrefetchBuffer &) = delete;
@@ -74,21 +81,26 @@ class MLPrefetchBuffer {
   // returns nullopt once every position has been handed out.
   auto Next() -> Result<std::optional<PlannedBlock>>;
   // Closes the cache; afterwards every call returns ErrorCode::kUnavailable.
-  // Fails with kInvalidArgument while handles are still alive.
+  // Fails with kInvalidArgument while handles are still alive. A cache on an
+  // existing manager leaves the manager open, and handles it returned stay
+  // valid while the manager lives.
   auto Close() -> Status;
 
   auto plan_size() const -> std::size_t { return plan_.size(); }
   auto block_size() const -> std::size_t { return block_size_; }
 
  private:
-  MLPrefetchBuffer(MLPrefetchBufferOptions options, PlanReplacer *replacer, std::unique_ptr<BufferManager> manager);
+  MLPrefetchBuffer(MLPrefetchBufferOptions options, PlanReplacer *replacer, std::unique_ptr<BufferManager> owned_manager, BufferManager *manager, BufferNamespace space);
 
   void Prefetch(std::size_t position);
 
   MLPrefetchBufferOptions options_;
   std::size_t block_size_;
   PlanReplacer *replacer_;
-  std::unique_ptr<BufferManager> manager_;
+  // Set when the cache created its own kernel.
+  std::unique_ptr<BufferManager> owned_manager_;
+  BufferManager *manager_;
+  BufferNamespace space_;
   std::atomic<bool> closed_{false};
   std::vector<BufferTag> plan_;
   // For each position, the next position of the same block, or

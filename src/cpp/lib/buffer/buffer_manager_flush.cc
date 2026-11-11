@@ -110,8 +110,8 @@ auto BufferManager::CreateFlushTask(FrameId frame_id, const std::byte *stable_da
   task->clear_dirty_on_success = true;
   task->cleaner_owned = cleaner_owned;
   task->snapshot = std::move(snapshot);
-  if (options_.pre_write_hook) {
-    Status hook_status = options_.pre_write_hook(task->tag, std::span<const std::byte>(task->snapshot));
+  if (const PreWriteHook &hook = PreWriteHookOf(frame_id); hook) {
+    Status hook_status = hook(task->tag, std::span<const std::byte>(task->snapshot));
     if (!hook_status.has_value()) return PropagateError(RollBackFlushTask(frame_id, cleaner_owned, hook_status));
   }
   return task;

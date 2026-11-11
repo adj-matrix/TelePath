@@ -1,6 +1,7 @@
 #ifndef TELEPATH_BUFFER_BUFFER_MANAGER_H_
 #define TELEPATH_BUFFER_BUFFER_MANAGER_H_
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include "telepath/buffer/buffer_access_strategy.h"
 #include "telepath/buffer/buffer_descriptor.h"
 #include "telepath/buffer/buffer_handle.h"
+#include "telepath/buffer/buffer_namespace.h"
 #include "telepath/buffer/read_buffers_operation.h"
 #include "telepath/common/block_geometry.h"
 #include "telepath/common/status.h"
@@ -90,6 +92,8 @@ struct FrameSnapshot {
   bool flush_in_flight{false};
   // See BufferManager::MinRecLsn(); kInvalidLsn when the page has none.
   Lsn rec_lsn{kInvalidLsn};
+  // Namespace the page belongs to; kNoNamespace for a frame without a page.
+  NamespaceId namespace_id{kNoNamespace};
 };
 
 struct BufferPoolSnapshot {
@@ -128,6 +132,19 @@ class BufferManager {
   BufferManager(const BufferManager &) = delete;
   BufferManager &operator=(const BufferManager &) = delete;
   ~BufferManager();
+
+  // Adds a namespace (see NamespaceOptions) and returns the handle that reads
+  // pages for it. Returns kInvalidArgument for an empty, duplicate, or
+  // "default" name, a null replacer, a minimum above the maximum, or
+  // guarantees that would exceed the pool; kResourceExhausted beyond
+  // kMaxNamespaces; and kUnavailable in cross-process mode, which does not
+  // support namespaces yet.
+  auto CreateNamespace(NamespaceOptions options) -> Result<BufferNamespace>;
+  // The handle of the namespace this manager's own read methods act for.
+  auto DefaultNamespace() -> BufferNamespace { return BufferNamespace(this, kDefaultNamespace); }
+  // The backend this manager reads and writes through, for facades that also
+  // need file sizes. Writing through it bypasses the cache.
+  auto disk_backend() const -> DiskBackend * { return disk_backend_.get(); }
 
   // Returns the fatal error that moved this instance into the Failed state, or
   // nullopt while it is healthy. Once failed, every operation returns
@@ -268,11 +285,19 @@ class BufferManager {
     std::unique_ptr<Replacer> replacer,
     std::shared_ptr<TelemetrySink> telemetry_sink);
 
+  friend class BufferNamespace;
+
+  // The public read entry points, acting for namespace `space`.
+  auto ReadBufferIn(NamespaceId space, FileId file_id, BlockId block_id, BufferAccessStrategy *strategy) -> Result<SharedBufferHandle>;
+  auto ReadBufferExclusiveIn(NamespaceId space, FileId file_id, BlockId block_id, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<ExclusiveBufferHandle>;
+  auto PrefetchBufferIn(NamespaceId space, FileId file_id, BlockId block_id, std::size_t block_count) -> Status;
+  auto StartReadBuffersIn(NamespaceId space, ReadBuffersOperation &operation, FileId file_id, BlockId block_id, std::size_t block_count, BufferAccessStrategy *strategy) -> Status;
+
   // buffer_manager_read.cc
   // Returns the page pinned. A kZeroAndLock page that had to be zero-filled
   // also comes with the exclusive latch held, reported in `exclusive_latched`,
   // so that no other thread sees the zeros.
-  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode = ReadBufferMode::kNormal, bool *exclusive_latched = nullptr) -> Result<FrameId>;
+  auto PinPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode = ReadBufferMode::kNormal, bool *exclusive_latched = nullptr, NamespaceId space = kDefaultNamespace) -> Result<FrameId>;
   auto TryReadResidentHit(const BufferTag &tag, bool record_access) -> std::optional<FrameId>;
   auto ProbeResident(const BufferTag &tag, bool record_access, FrameId *frame_id) -> ResidentProbe;
   bool TryPinResidentFrame(FrameId frame_id, const BufferTag &tag, bool record_access);
@@ -282,16 +307,17 @@ class BufferManager {
   bool IsLiveFor(FrameId frame_id, const BufferTag &tag) const;
   // Loads `tag` into a newly reserved frame and returns it pinned; nullopt
   // means another thread installed the tag first and the caller must retry.
-  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode, bool *exclusive_latched) -> Result<std::optional<FrameId>>;
+  auto LoadPage(const BufferTag &tag, BufferAccessStrategy *strategy, ReadBufferMode mode, bool *exclusive_latched, NamespaceId space) -> Result<std::optional<FrameId>>;
   // Reserves a frame for `tag`; nullopt means another frame already holds or
   // is loading the tag. With `wait_for_frame` it keeps retrying while some
   // frame may still become free; without it, it returns kResourceExhausted at
   // once, which a caller holding reservations whose reads it has not yet
   // submitted needs, since those reservations would keep it waiting forever.
-  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy, bool wait_for_frame = true) -> Result<std::optional<FrameReservation>>;
-  auto AcquireVictimFrame(bool wait_for_frame) -> Result<ReservationCandidate>;
-  auto ReserveVictim(const ReservationCandidate &candidate, const BufferTag &tag, FrameReservation *reservation) -> Result<FrameReservationOutcome>;
-  auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy, FrameReservation *reservation) -> FrameReservationOutcome;
+  // The frame goes to namespace `space`.
+  auto ReserveFrameForTag(const BufferTag &tag, BufferAccessStrategy *strategy, bool wait_for_frame = true, NamespaceId space = kDefaultNamespace) -> Result<std::optional<FrameReservation>>;
+  auto AcquireVictimFrame(bool wait_for_frame, NamespaceId space) -> Result<ReservationCandidate>;
+  auto ReserveVictim(const ReservationCandidate &candidate, const BufferTag &tag, FrameReservation *reservation, NamespaceId space) -> Result<FrameReservationOutcome>;
+  auto TryReserveRingFrame(const BufferTag &tag, BufferAccessStrategy *strategy, FrameReservation *reservation, NamespaceId space) -> FrameReservationOutcome;
   auto CompleteReservation(
     const BufferTag &tag,
     const FrameReservation &reservation,
@@ -382,7 +408,10 @@ class BufferManager {
     const Status &status
   ) -> Status;
   void ReleaseFreeFrame(FrameId frame_id);
-  auto AcquireReservationFrame() -> Result<ReservationCandidate>;
+  // A free frame or a victim for `space`, within the namespaces' quotas;
+  // `eligible` receives the namespaces whose frames it may evict.
+  auto AcquireReservationFrame(NamespaceId space, std::uint32_t *eligible) -> Result<ReservationCandidate>;
+  auto NominateVictim(NamespaceId space, std::uint32_t *eligible) -> std::optional<FrameId>;
   auto InstallReservationEntry(
     const BufferTag &tag,
     const FrameReservation &reservation) -> std::optional<FrameId>;
@@ -391,9 +420,26 @@ class BufferManager {
     const BufferTag &tag,
     bool allow_victim_flush,
     bool from_free_list,
-    FrameReservation *reservation
+    FrameReservation *reservation,
+    NamespaceId space
   ) -> FrameReservationOutcome;
-  bool HasTransientFrame() const;
+  // Moves a reserved frame's accounting to `space`, from its previous owner.
+  void AssignFrame(FrameId frame_id, NamespaceId space);
+  // Ends a frame's accounting before it returns to the free list.
+  void ForgetFrame(FrameId frame_id);
+  // Inline: the hit path calls it on every access.
+  auto ReplacerOf(FrameId frame_id) const -> Replacer * {
+    const NamespaceId owner = descriptors_[frame_id].namespace_id.load(std::memory_order_relaxed);
+    return owner < kMaxNamespaces ? replacers_[owner] : replacer_.get();
+  }
+  auto PreWriteHookOf(FrameId frame_id) const -> const PreWriteHook &;
+  // Bit of an `eligible` set saying the requester may take free frames; the
+  // other bits name the namespaces whose frames it may evict.
+  static constexpr std::uint32_t kFreeFramesEligible = std::uint32_t{1} << 31;
+  // Whether a frame the requester could use may still become available: an
+  // unpinned frame of an eligible namespace, or, when free frames are
+  // eligible, one that is free or loading (a failed load frees its frame).
+  bool HasTransientFrame(std::uint32_t eligible) const;
   bool HasPinnedFrame() const;
   auto FlushVictimBeforeReuse(FrameId frame_id) -> Status;
 
@@ -447,6 +493,8 @@ class BufferManager {
   std::unique_ptr<SharedSegment> segment_;
   std::unique_ptr<DiskBackend> disk_backend_;
   std::unique_ptr<Replacer> replacer_;
+  // Replacer of each namespace by id; entry 0 is replacer_.
+  std::array<Replacer *, kMaxNamespaces> replacers_{};
   std::unique_ptr<BufferManagerObserver> observer_;
   std::atomic<bool> failed_{false};
   std::atomic<bool> closed_{false};
@@ -475,6 +523,22 @@ class BufferManager {
   std::atomic<std::size_t> *dirty_page_count_{nullptr};
   // PrefetchBuffer() reads this process submitted and has not finished.
   std::atomic<std::uint32_t> prefetches_in_flight_{0};
+
+  // Cold namespace state, kept apart from the members the page paths use.
+  struct NamespaceState {
+    std::string name;
+    std::unique_ptr<Replacer> replacer;
+    std::size_t min_frames{0};
+    std::size_t max_frames{0};
+    PreWriteHook pre_write_hook;
+    std::atomic<std::size_t> owned{0};
+  };
+  // Entry 0 is the default namespace, whose replacer is replacer_ and whose
+  // hook is options_.pre_write_hook. Entries below namespace_count_ are
+  // immutable except their `owned` counts.
+  std::array<NamespaceState, kMaxNamespaces> namespaces_;
+  std::atomic<std::size_t> namespace_count_{1};
+  std::mutex namespace_latch_;
 };
 
 }  // namespace telepath

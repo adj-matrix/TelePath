@@ -19,6 +19,7 @@ struct ReadBuffersState {
   };
 
   BufferAccessStrategy *strategy{nullptr};
+  NamespaceId space{kDefaultNamespace};
   std::vector<BufferTag> tags;
   std::vector<FrameId> frames;
   std::vector<Slot> slots;
@@ -51,6 +52,10 @@ ReadBuffersOperation::~ReadBuffersOperation() {
 }
 
 auto BufferManager::PrefetchBuffer(FileId file_id, BlockId block_id, std::size_t block_count) -> Status {
+  return PrefetchBufferIn(kDefaultNamespace, file_id, block_id, block_count);
+}
+
+auto BufferManager::PrefetchBufferIn(NamespaceId space, FileId file_id, BlockId block_id, std::size_t block_count) -> Status {
   if (Status usable = CheckUsable(); !usable.has_value()) return usable;
 
   std::vector<std::unique_ptr<AsyncLoad>> loads;
@@ -58,7 +63,7 @@ auto BufferManager::PrefetchBuffer(FileId file_id, BlockId block_id, std::size_t
   for (std::size_t i = 0; i < block_count; ++i) {
     const BufferTag tag{file_id, block_id + i};
     if (IsResidentTag(tag)) continue;
-    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, nullptr, false);
+    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, nullptr, false, space);
     if (!reservation.has_value()) {
       if (reservation.error().code() != ErrorCode::kResourceExhausted) status = PropagateError(reservation);
       break;
@@ -71,12 +76,17 @@ auto BufferManager::PrefetchBuffer(FileId file_id, BlockId block_id, std::size_t
 }
 
 auto BufferManager::StartReadBuffers(ReadBuffersOperation &operation, FileId file_id, BlockId block_id, std::size_t block_count, BufferAccessStrategy *strategy) -> Status {
+  return StartReadBuffersIn(kDefaultNamespace, operation, file_id, block_id, block_count, strategy);
+}
+
+auto BufferManager::StartReadBuffersIn(NamespaceId space, ReadBuffersOperation &operation, FileId file_id, BlockId block_id, std::size_t block_count, BufferAccessStrategy *strategy) -> Status {
   if (Status usable = CheckUsable(); !usable.has_value()) return usable;
   if (operation.in_progress()) return InvalidArgument("read buffers operation is still in progress");
 
   operation.handles_.clear();
   auto state = std::make_unique<ReadBuffersState>();
   state->strategy = strategy;
+  state->space = space;
   state->tags.resize(block_count);
   state->frames.assign(block_count, kInvalidFrameId);
   state->slots.assign(block_count, ReadBuffersState::Slot::kDeferred);
@@ -93,7 +103,7 @@ auto BufferManager::StartReadBuffers(ReadBuffersOperation &operation, FileId fil
     }
 
     if (IsResidentTag(tag)) continue;
-    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, strategy, false);
+    Result<std::optional<FrameReservation>> reservation = ReserveFrameForTag(tag, strategy, false, space);
     if (!reservation.has_value() || !reservation->has_value()) continue;
     observer_->RecordReadMiss(tag);
     state->frames[i] = reservation->value().frame_id;
@@ -180,7 +190,7 @@ void BufferManager::FinishReadBuffers(ReadBuffersOperation &operation, bool make
   Status result = io_status;
   for (std::size_t i = 0; result.has_value() && make_handles && i < state.slots.size(); ++i) {
     if (state.slots[i] != ReadBuffersState::Slot::kDeferred) continue;
-    Result<FrameId> frame = PinPage(state.tags[i], state.strategy);
+    Result<FrameId> frame = PinPage(state.tags[i], state.strategy, ReadBufferMode::kNormal, nullptr, state.space);
     if (!frame.has_value()) {
       result = PropagateError(frame);
       break;

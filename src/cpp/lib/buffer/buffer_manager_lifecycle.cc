@@ -277,7 +277,7 @@ auto BufferManager::SalvageDirtyPages(std::uint64_t dead_slots) -> bool {
       std::atomic_thread_fence(std::memory_order_acquire);
       const std::uint32_t after = descriptor.control.load(std::memory_order_acquire);
       if ((after & frame_control::kExclusive) != 0 || descriptor.version.load(std::memory_order_acquire) != version || LoadTag(descriptor) != tag) continue;
-      if (options_.pre_write_hook && !options_.pre_write_hook(tag, page).has_value()) {
+      if (const PreWriteHook &hook = PreWriteHookOf(frame_id); hook && !hook(tag, page).has_value()) {
         complete = false;
         break;
       }

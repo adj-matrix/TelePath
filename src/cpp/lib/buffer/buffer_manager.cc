@@ -64,6 +64,8 @@ BufferManager::BufferManager(
     io_engine_(std::make_unique<IoEngine>(disk_backend_.get())),
     page_table_(nullptr) {
   options_.page_table_stripe_count = options.ResolvePageTableStripeCount();
+  namespaces_[kDefaultNamespace].name = "default";
+  replacers_[kDefaultNamespace] = replacer_.get();
 }
 
 BufferManager::~BufferManager() {
@@ -81,16 +83,24 @@ BufferManager::~BufferManager() {
 }
 
 auto BufferManager::ReadBuffer(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy) -> Result<SharedBufferHandle> {
+  return ReadBufferIn(kDefaultNamespace, file_id, block_id, strategy);
+}
+
+auto BufferManager::ReadBufferIn(NamespaceId space, FileId file_id, BlockId block_id, BufferAccessStrategy *strategy) -> Result<SharedBufferHandle> {
   const BufferTag tag{file_id, block_id};
-  Result<FrameId> frame = PinPage(tag, strategy);
+  Result<FrameId> frame = PinPage(tag, strategy, ReadBufferMode::kNormal, nullptr, space);
   if (!frame.has_value()) return PropagateError(frame);
   return MakeSharedHandle(frame.value(), tag);
 }
 
 auto BufferManager::ReadBufferExclusive(FileId file_id, BlockId block_id, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<ExclusiveBufferHandle> {
+  return ReadBufferExclusiveIn(kDefaultNamespace, file_id, block_id, strategy, mode);
+}
+
+auto BufferManager::ReadBufferExclusiveIn(NamespaceId space, FileId file_id, BlockId block_id, BufferAccessStrategy *strategy, ReadBufferMode mode) -> Result<ExclusiveBufferHandle> {
   const BufferTag tag{file_id, block_id};
   bool latched = false;
-  Result<FrameId> frame = PinPage(tag, strategy, mode, &latched);
+  Result<FrameId> frame = PinPage(tag, strategy, mode, &latched, space);
   if (!frame.has_value()) return PropagateError(frame);
   return MakeExclusiveHandle(frame.value(), tag, latched);
 }
@@ -263,6 +273,7 @@ auto BufferManager::ExportSnapshot() const -> BufferPoolSnapshot{
       flush_queued,
       flush_in_flight,
       FrameRecLsn(descriptor),
+      descriptor.namespace_id.load(std::memory_order_relaxed),
     });
   }
 
@@ -296,7 +307,8 @@ auto BufferManager::StartObservation() -> Status {
         if ((word & frame_control::kWritebackActive) != 0) record.flags |= observation::kFrameWritebackActive;
         record.pins = static_cast<std::uint16_t>(frame_control::Pins(word));
         record.file_id = tag.file_id;
-        record.namespace_id = 0;
+        const NamespaceId owner = descriptor.namespace_id.load(std::memory_order_relaxed);
+        record.namespace_id = owner == kNoNamespace ? 0 : owner;
         record.block_id = tag.block_id;
         record.version = descriptor.version.load(std::memory_order_relaxed);
         switch (frame_control::State(word)) {

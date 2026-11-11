@@ -69,6 +69,29 @@ struct Config {
   // Run on io_uring instead of the POSIX backend; skipped where io_uring is
   // unavailable unless TELEPATH_REQUIRE_IO_URING_SUCCESS is set.
   bool io_uring{false};
+  // Spread the workers over this many namespaces with quotas (0: only the
+  // default namespace).
+  std::size_t namespaces{0};
+};
+
+// Reads through a namespace when the worker has one, else through the
+// manager's default namespace.
+struct Reader {
+  telepath::BufferManager *manager;
+  std::optional<telepath::BufferNamespace> space;
+
+  auto ReadBuffer(telepath::FileId file, telepath::BlockId block, telepath::BufferAccessStrategy *strategy = nullptr) {
+    return space ? space->ReadBuffer(file, block, strategy) : manager->ReadBuffer(file, block, strategy);
+  }
+  auto ReadBufferExclusive(telepath::FileId file, telepath::BlockId block, telepath::BufferAccessStrategy *strategy = nullptr, telepath::ReadBufferMode mode = telepath::ReadBufferMode::kNormal) {
+    return space ? space->ReadBufferExclusive(file, block, strategy, mode) : manager->ReadBufferExclusive(file, block, strategy, mode);
+  }
+  auto StartReadBuffers(telepath::ReadBuffersOperation &operation, telepath::FileId file, telepath::BlockId block, std::size_t count) {
+    return space ? space->StartReadBuffers(operation, file, block, count) : manager->StartReadBuffers(operation, file, block, count);
+  }
+  auto PrefetchBuffer(telepath::FileId file, telepath::BlockId block, std::size_t count) {
+    return space ? space->PrefetchBuffer(file, block, count) : manager->PrefetchBuffer(file, block, count);
+  }
 };
 
 auto MakeBackend(const std::filesystem::path &root, bool io_uring) -> std::unique_ptr<telepath::DiskBackend> {
@@ -199,7 +222,8 @@ void CheckCounter(std::span<const std::byte> page, Model &model, telepath::FileI
   std::abort();
 }
 
-void RunWorker(telepath::BufferManager *manager, Model *model, const Config &config, std::uint64_t seed) {
+void RunWorker(telepath::BufferManager *manager, std::optional<telepath::BufferNamespace> space, Model *model, const Config &config, std::uint64_t seed) {
+  Reader reader{manager, space};
   std::mt19937_64 rng(seed);
   auto pick = [&rng](std::uint64_t bound) { return std::uniform_int_distribution<std::uint64_t>(0, bound - 1)(rng); };
   telepath::BufferAccessStrategy bulk(telepath::BufferAccessStrategyType::kBulkRead, 2);
@@ -214,7 +238,7 @@ void RunWorker(telepath::BufferManager *manager, Model *model, const Config &con
     if (Skipped(name)) continue;
     if (kind < 300) {
       telepath::BufferAccessStrategy *strategy = kind < 60 ? &bulk : nullptr;
-      auto handle = manager->ReadBuffer(file, block, strategy);
+      auto handle = reader.ReadBuffer(file, block, strategy);
       if (!handle.has_value()) {
         Require(std::unexpected(handle.error()), config, "ReadBuffer");
         continue;
@@ -222,7 +246,7 @@ void RunWorker(telepath::BufferManager *manager, Model *model, const Config &con
       CheckCounter(handle->data(), *model, file, block, config);
     } else if (kind < 550) {
       const bool overwrite = kind < 330;
-      auto handle = manager->ReadBufferExclusive(file, block, nullptr, overwrite ? telepath::ReadBufferMode::kZeroAndLock : telepath::ReadBufferMode::kNormal);
+      auto handle = reader.ReadBufferExclusive(file, block, nullptr, overwrite ? telepath::ReadBufferMode::kZeroAndLock : telepath::ReadBufferMode::kNormal);
       if (!handle.has_value()) {
         Require(std::unexpected(handle.error()), config, "ReadBufferExclusive");
         continue;
@@ -238,7 +262,7 @@ void RunWorker(telepath::BufferManager *manager, Model *model, const Config &con
       const telepath::BlockId first = pick(kBlocksPerFile);
       const std::size_t clamped = std::min<std::size_t>(count, kBlocksPerFile - first);
       telepath::ReadBuffersOperation operation;
-      telepath::Status started = manager->StartReadBuffers(operation, file, first, clamped);
+      telepath::Status started = reader.StartReadBuffers(operation, file, first, clamped);
       Require(started, config, "StartReadBuffers");
       if (!started.has_value()) continue;
       telepath::Status waited = manager->WaitReadBuffers(operation);
@@ -251,7 +275,7 @@ void RunWorker(telepath::BufferManager *manager, Model *model, const Config &con
       for (std::size_t i = 0; i < clamped; ++i) CheckCounter(operation.handles()[i].data(), *model, file, first + i, config);
     } else if (kind < 720) {
       const telepath::BlockId first = pick(kBlocksPerFile);
-      Require(manager->PrefetchBuffer(file, first, 1 + pick(kBlocksPerFile - first)), config, "PrefetchBuffer");
+      Require(reader.PrefetchBuffer(file, first, 1 + pick(kBlocksPerFile - first)), config, "PrefetchBuffer");
     } else if (kind < 800) {
       Require(manager->FlushBuffer(file, block), config, "FlushBuffer");
     } else if (kind < 830) {
@@ -265,14 +289,14 @@ void RunWorker(telepath::BufferManager *manager, Model *model, const Config &con
     } else if (kind < 960) {
       const telepath::BlockId scratch = pick(kScratchBlocks);
       if (kind < 920) {
-        auto handle = manager->ReadBufferExclusive(kScratchFile, scratch);
+        auto handle = reader.ReadBufferExclusive(kScratchFile, scratch);
         if (!handle.has_value()) {
           Require(std::unexpected(handle.error()), config, "scratch write");
           continue;
         }
         WritePattern(handle->mutable_data(), CheckPattern(handle->data(), config.name) + 1);
       } else {
-        auto handle = manager->ReadBuffer(kScratchFile, scratch);
+        auto handle = reader.ReadBuffer(kScratchFile, scratch);
         if (!handle.has_value()) {
           Require(std::unexpected(handle.error()), config, "scratch read");
           continue;
@@ -311,9 +335,23 @@ void EnableFaults(telepath::test_support::FaultInjectionBackend *faults, const C
 }
 
 void RunWorkers(telepath::BufferManager *manager, Model *model, const Config &config, std::uint64_t seed) {
+  // Namespaces with a guarantee, a cap, and neither, over the default one.
+  std::vector<telepath::BufferNamespace> spaces;
+  for (std::size_t index = 0; index < config.namespaces; ++index) {
+    telepath::NamespaceOptions options;
+    options.name = "space" + std::to_string(index);
+    options.replacer = MakeReplacer(index % 2 == 0 ? "lru" : "sieve", config.pool_size);
+    options.min_frames = index == 0 ? config.pool_size / 4 : 0;
+    options.max_frames = index == 1 ? config.pool_size / 2 : 0;
+    auto created = manager->CreateNamespace(std::move(options));
+    assert(created.has_value());
+    spaces.push_back(created.value());
+  }
   std::vector<std::thread> workers;
   for (std::size_t worker = 0; worker < config.threads; ++worker) {
-    workers.emplace_back(RunWorker, manager, model, std::cref(config), seed * 7919 + worker);
+    std::optional<telepath::BufferNamespace> space;
+    if (!spaces.empty() && worker % (spaces.size() + 1) != 0) space = spaces[worker % (spaces.size() + 1) - 1];
+    workers.emplace_back(RunWorker, manager, space, model, std::cref(config), seed * 7919 + worker);
   }
   for (auto &worker : workers) worker.join();
 }
@@ -450,6 +488,8 @@ int main(int argc, char **argv) {
     {"cross_process_lru_k", "lru_k", 6, 4, 1500, ForegroundWriteback::kQueued, true, 20, 30, 50, true},
     {"io_uring_faults", "sieve", 6, 6, 1500, ForegroundWriteback::kQueued, true, 20, 30, 50, false, true},
     {"io_uring_cross_process", "clock_sweep", 8, 4, 1500, ForegroundWriteback::kDirect, true, 20, 30, 50, true, true},
+    {"namespaces_faults", "clock_sweep", 12, 8, 1500, ForegroundWriteback::kDirect, true, 20, 30, 50, false, false, 3},
+    {"namespaces_tight", "lru_k", 4, 6, 1200, ForegroundWriteback::kQueued, true, 0, 30, 0, false, false, 3},
   };
   if (argc == 7 && std::string(argv[1]) == "chaos-child") {
     for (const Config &config : configs) {

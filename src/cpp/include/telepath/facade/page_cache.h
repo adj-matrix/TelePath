@@ -9,6 +9,7 @@
 #include <span>
 #include <unordered_map>
 
+#include "telepath/buffer/buffer_namespace.h"
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
 #include "telepath/io/disk_backend.h"
@@ -50,6 +51,14 @@ class PageCache {
     std::unique_ptr<DiskBackend> backend,
     std::unique_ptr<Replacer> replacer = nullptr,
     std::shared_ptr<TelemetrySink> telemetry_sink = nullptr) -> Result<std::unique_ptr<PageCache>>;
+  // Creates a cache that runs in a new namespace of an existing manager,
+  // sharing its frames, threads, and pages with the manager's other users
+  // (see NamespaceOptions); `manager` must outlive the cache. The kernel's
+  // configuration is the manager's, so `options.buffer` and
+  // `options.write_behind` are ignored; the manager's backend must implement
+  // GetFileSize() and SetFileSize(). A null `space.replacer` selects
+  // clock-sweep. File ids are shared with the manager's other users.
+  static auto Create(PageCacheOptions options, BufferManager &manager, NamespaceOptions space) -> Result<std::unique_ptr<PageCache>>;
 
   PageCache(const PageCache &) = delete;
   PageCache &operator=(const PageCache &) = delete;
@@ -73,6 +82,7 @@ class PageCache {
   // Syncs every file this cache has changed and closes it; afterwards every
   // call returns ErrorCode::kUnavailable. When a sync fails, returns its error
   // without closing, so the caller can retry. Stop other threads' calls first.
+  // A cache on an existing manager leaves the manager open.
   auto Close() -> Status;
 
   auto block_size() const -> std::size_t { return block_size_; }
@@ -80,7 +90,7 @@ class PageCache {
  private:
   struct FileState;
 
-  PageCache(PageCacheOptions options, DiskBackend *backend, std::unique_ptr<BufferManager> manager);
+  PageCache(PageCacheOptions options, DiskBackend *backend, std::unique_ptr<BufferManager> owned_manager, BufferManager *manager, BufferNamespace space);
 
   auto State(FileId file_id) -> Result<FileState *>;
   void Readahead(FileId file_id, FileState &state, std::uint64_t offset, std::size_t length, std::uint64_t file_size);
@@ -90,7 +100,10 @@ class PageCache {
   std::size_t block_size_;
   std::atomic<bool> closed_{false};
   DiskBackend *backend_;
-  std::unique_ptr<BufferManager> manager_;
+  // Set when the cache created its own kernel.
+  std::unique_ptr<BufferManager> owned_manager_;
+  BufferManager *manager_;
+  BufferNamespace space_;
   std::shared_mutex files_latch_;
   std::unordered_map<FileId, std::unique_ptr<FileState>> files_;
 };

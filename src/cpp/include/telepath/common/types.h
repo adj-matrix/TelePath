@@ -13,11 +13,17 @@ using FrameId = uint32_t;
 // Log sequence number of the caller's write-ahead log; the kernel only
 // compares them. kInvalidLsn means "no LSN".
 using Lsn = uint64_t;
+// Policy and accounting domain inside one cache; see BufferNamespace.
+using NamespaceId = uint16_t;
 
 constexpr std::size_t kDefaultPageSize = 4096;
 constexpr std::size_t kCacheLineSize = 64;
 constexpr FrameId kInvalidFrameId = static_cast<FrameId>(-1);
 constexpr Lsn kInvalidLsn = 0;
+// The namespace of BufferManager's own methods.
+constexpr NamespaceId kDefaultNamespace = 0;
+// Owner of a frame that holds no page.
+constexpr NamespaceId kNoNamespace = UINT16_MAX;
 
 struct BufferTag {
   FileId file_id{0};

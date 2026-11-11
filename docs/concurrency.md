@@ -168,6 +168,12 @@ Hits through a `BufferAccessStrategy` of type `kBulkRead` skip `RecordAccess()`,
 - The reaper sleeps on `demand_` while it is zero. `Submit(kAsync)` raises it per request before submitting, and a waiter raises it before its first futex sleep; the transition from zero wakes the reaper. Completions of asynchronous requests carry a tag bit in the token and lower `demand_` when delivered. A waiter sleeps on its own `pending_` with the value it observed, so a completion between the check and the sleep is not lost; the sleep is bounded (10 ms) only to notice an engine stop.
 - `WaitReadBuffers()` waits for every read of the operation before touching its frames. If the engine stops with reads in flight (fatal error or shutdown), the operation's state is leaked on purpose, because pending completions still reference it.
 
+## 6a. Namespaces
+
+A frame that holds a page belongs to exactly one namespace (`BufferDescriptor::namespace_id`): it is tracked by that namespace's replacer and counted in its `owned` total; a free frame belongs to none (`kNoNamespace`). Ownership changes only in two places, both while the caller owns the frame exclusively: a successful reservation (`AssignFrame()`, which first removes the frame from the previous owner's replacer and count) and the return to the free list (`ForgetFrame()`). A pinned resident frame's owner is therefore stable, so the hit path reads it to pick the replacer without synchronization beyond the pin. Batched accesses still pending in the previous owner's replacer are ignored there, since the frame is no longer tracked.
+
+Quota counts are read without a lock, so caps and guarantees can be overshot by the number of concurrent reservations; victim selection sorts a snapshot of them. A requester waits for frames only when one it may use can still appear: free or loading frames when it is below its cap, unpinned frames of namespaces it may evict otherwise.
+
 ## 7a. Cross-Process Crashes
 
 A process attached to a shared segment holds an open-file-description lock on its slot's byte of the segment object; it takes the lock before publishing its pid and clears the pid before releasing the lock, so "pid set, lock free" means the process died attached. Every cross-process manager's `SegmentMonitor` checks for that every 10 ms. The first to find it marks the segment crashed, removes the name if it still names this segment, and, with `CrashRecovery::kSalvage`, writes back dirty pages that no dead process holds exclusively (`holder_slot`); every manager enters the Failed state.
