@@ -25,7 +25,8 @@ auto BufferManager::Create(
   const BufferManagerOptions &options,
   std::unique_ptr<DiskBackend> disk_backend,
   std::unique_ptr<Replacer> replacer,
-  std::shared_ptr<TelemetrySink> telemetry_sink) -> Result<std::unique_ptr<BufferManager>> {
+  std::shared_ptr<TelemetrySink> telemetry_sink,
+  std::vector<NamespaceOptions> namespaces) -> Result<std::unique_ptr<BufferManager>> {
   auto geometry = BlockGeometry::Create(options.page_size);
   if (!geometry.has_value()) return PropagateError(geometry);
   if (disk_backend != nullptr) {
@@ -34,9 +35,17 @@ auto BufferManager::Create(
   }
 
   std::unique_ptr<BufferManager> manager(new BufferManager(options, geometry.value(), std::move(disk_backend), std::move(replacer), std::move(telemetry_sink)));
-  Status init_status = manager->Initialize();
+  Status init_status = manager->Initialize(std::move(namespaces));
   if (!init_status.has_value()) return PropagateError(init_status);
   return manager;
+}
+
+auto BufferManager::Create(
+  const BufferManagerOptions &options,
+  std::unique_ptr<DiskBackend> disk_backend,
+  std::unique_ptr<Replacer> replacer,
+  std::shared_ptr<TelemetrySink> telemetry_sink) -> Result<std::unique_ptr<BufferManager>> {
+  return Create(options, std::move(disk_backend), std::move(replacer), std::move(telemetry_sink), {});
 }
 
 auto BufferManager::RemoveSharedMemory(const std::string &name) -> Status { return SharedSegment::Remove(name); }

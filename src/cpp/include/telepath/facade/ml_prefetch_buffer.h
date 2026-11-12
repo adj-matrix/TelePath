@@ -63,6 +63,8 @@ class MLPrefetchBuffer {
   // (see NamespaceOptions); `manager` must outlive the cache. Blocks are the
   // manager's page size and `options.buffer` is ignored. The namespace's
   // replacer is the cache's PlanReplacer, so `space.replacer` must be null.
+  // A cross-process manager returns kUnavailable, since its namespaces are
+  // declared when it is created.
   static auto Create(MLPrefetchBufferOptions options, BufferManager &manager, NamespaceOptions space) -> Result<std::unique_ptr<MLPrefetchBuffer>>;
 
   MLPrefetchBuffer(const MLPrefetchBuffer &) = delete;

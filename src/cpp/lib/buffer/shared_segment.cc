@@ -20,13 +20,12 @@ namespace telepath {
 namespace {
 
 constexpr std::uint64_t kMagic = 0x3147455354504c54ULL;  // "TLPTSEG1"
-constexpr std::uint32_t kLayoutVersion = 2;
+constexpr std::uint32_t kLayoutVersion = 3;
 constexpr std::uint32_t kInitializing = 0;
 constexpr std::uint32_t kReady = 1;
 // Attached count of a segment whose last user is removing its name.
 constexpr std::uint32_t kRemoving = UINT32_MAX;
 constexpr std::size_t kMaxProcesses = 64;
-constexpr std::size_t kMaxNamespaces = 64;
 constexpr std::size_t kReplacerKindBytes = 96;
 constexpr std::size_t kPageSize = 4096;
 constexpr auto kAttachTimeout = std::chrono::seconds(10);
@@ -37,6 +36,13 @@ constexpr off_t kCleanerLockByte = 0;
 constexpr off_t kSlotLockBase = 1;
 
 auto AlignUp(std::size_t value, std::size_t alignment) -> std::size_t { return (value + alignment - 1) & ~(alignment - 1); }
+
+template <std::size_t N>
+auto FixedString(const std::string &text) -> std::array<char, N> {
+  std::array<char, N> fixed{};
+  std::strncpy(fixed.data(), text.c_str(), N - 1);
+  return fixed;
+}
 
 // Start time of this process in clock ticks since boot, which tells a reused
 // pid apart from the original process.
@@ -63,9 +69,16 @@ struct SharedSegment::Header {
     std::uint64_t start_time{0};
   };
 
-  // Reserved for shared namespaces (kernel-refactor.md, section 8).
+  // One namespace's declaration, the place of its replacer state, and the
+  // frames it holds.
   struct NamespaceEntry {
-    std::array<std::byte, 64> reserved{};
+    std::array<char, kNamespaceNameBytes> name{};
+    std::array<char, kReplacerKindBytes> replacer_kind{};
+    std::uint64_t replacer_state_bytes{0};
+    std::uint64_t replacer_offset{0};
+    std::uint64_t min_frames{0};
+    std::uint64_t max_frames{0};
+    alignas(kCacheLineSize) std::atomic<std::size_t> owned_frames{0};
   };
 
   std::uint64_t magic{kMagic};
@@ -75,11 +88,9 @@ struct SharedSegment::Header {
   std::uint64_t block_size{0};
   std::uint64_t pool_size{0};
   std::uint64_t stripe_count{0};
-  std::uint64_t replacer_state_bytes{0};
   std::uint64_t kernel_bytes{0};
-  std::array<char, kReplacerKindBytes> replacer_kind{};
-  std::uint64_t replacer_offset{0};
   std::uint64_t kernel_offset{0};
+  std::uint64_t namespace_count{0};
   std::atomic<std::uint32_t> attached{0};
   // Pid of the process that runs the background cleaner, for diagnostics; the
   // lock on kCleanerLockByte decides who leads.
@@ -90,10 +101,24 @@ struct SharedSegment::Header {
   std::array<ProcessSlot, kMaxProcesses> processes{};
   std::array<NamespaceEntry, kMaxNamespaces> namespaces{};
   SharedWrittenFiles written_files{};
+
+  bool Matches(const Shape &shape) const {
+    if (namespace_count != shape.namespaces.size()) return false;
+    for (std::size_t index = 0; index < shape.namespaces.size(); ++index) {
+      const NamespaceEntry &entry = namespaces[index];
+      const NamespaceShape &space = shape.namespaces[index];
+      const bool same = entry.name == FixedString<kNamespaceNameBytes>(space.name) && entry.replacer_kind == FixedString<kReplacerKindBytes>(space.replacer_kind)
+        && entry.replacer_state_bytes == space.replacer_state_bytes && entry.min_frames == space.min_frames && entry.max_frames == space.max_frames;
+      if (!same) return false;
+    }
+    return block_size == shape.block_size && pool_size == shape.pool_size && stripe_count == shape.stripe_count && kernel_bytes == shape.kernel_bytes
+      && crash_recovery == shape.crash_recovery;
+  }
 };
 
 auto SharedSegment::Open(const SharedMemoryOptions &options, const Shape &shape) -> Result<std::unique_ptr<SharedSegment>> {
   if (options.name.empty()) return InvalidArgument("shared memory name must not be empty");
+  if (shape.namespaces.empty() || shape.namespaces.size() > kMaxNamespaces) return InvalidArgument("shared memory segment needs one to kMaxNamespaces namespaces");
   const auto deadline = std::chrono::steady_clock::now() + kAttachTimeout;
   while (true) {
     Result<std::unique_ptr<SharedSegment>> segment = OpenOnce(options, shape);
@@ -104,8 +129,13 @@ auto SharedSegment::Open(const SharedMemoryOptions &options, const Shape &shape)
 }
 
 auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &shape) -> Result<std::unique_ptr<SharedSegment>> {
-  const std::size_t replacer_offset = AlignUp(sizeof(Header), kCacheLineSize);
-  const std::size_t kernel_offset = AlignUp(replacer_offset + shape.replacer_state_bytes, kPageSize);
+  std::vector<std::size_t> replacer_offsets;
+  std::size_t end = sizeof(Header);
+  for (const NamespaceShape &space : shape.namespaces) {
+    replacer_offsets.push_back(AlignUp(end, kCacheLineSize));
+    end = replacer_offsets.back() + space.replacer_state_bytes;
+  }
+  const std::size_t kernel_offset = AlignUp(end, kPageSize);
   const std::size_t total = kernel_offset + shape.kernel_bytes;
 
   bool created = false;
@@ -161,12 +191,20 @@ auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &sh
     header.block_size = shape.block_size;
     header.pool_size = shape.pool_size;
     header.stripe_count = shape.stripe_count;
-    header.replacer_state_bytes = shape.replacer_state_bytes;
     header.kernel_bytes = shape.kernel_bytes;
     header.crash_recovery = shape.crash_recovery;
-    std::strncpy(header.replacer_kind.data(), shape.replacer_kind.c_str(), kReplacerKindBytes - 1);
-    header.replacer_offset = replacer_offset;
     header.kernel_offset = kernel_offset;
+    header.namespace_count = shape.namespaces.size();
+    for (std::size_t index = 0; index < shape.namespaces.size(); ++index) {
+      Header::NamespaceEntry &entry = header.namespaces[index];
+      const NamespaceShape &space = shape.namespaces[index];
+      entry.name = FixedString<kNamespaceNameBytes>(space.name);
+      entry.replacer_kind = FixedString<kReplacerKindBytes>(space.replacer_kind);
+      entry.replacer_state_bytes = space.replacer_state_bytes;
+      entry.replacer_offset = replacer_offsets[index];
+      entry.min_frames = space.min_frames;
+      entry.max_frames = space.max_frames;
+    }
   } else {
     const auto deadline = std::chrono::steady_clock::now() + kAttachTimeout;
     while (header.state.load(std::memory_order_acquire) != kReady) {
@@ -174,12 +212,7 @@ auto SharedSegment::OpenOnce(const SharedMemoryOptions &options, const Shape &sh
       sync::FutexWaitFor(header.state, kInitializing, std::chrono::milliseconds(10));
     }
     if (header.magic != kMagic || header.layout_version != kLayoutVersion) return InvalidArgument("shared memory segment has an unknown layout");
-    std::array<char, kReplacerKindBytes> kind{};
-    std::strncpy(kind.data(), shape.replacer_kind.c_str(), kReplacerKindBytes - 1);
-    const bool same_shape = header.segment_bytes == total && header.segment_bytes == mapped_bytes
-      && header.block_size == shape.block_size && header.pool_size == shape.pool_size
-      && header.stripe_count == shape.stripe_count && header.replacer_state_bytes == shape.replacer_state_bytes
-      && header.kernel_bytes == shape.kernel_bytes && header.replacer_kind == kind && header.crash_recovery == shape.crash_recovery;
+    const bool same_shape = header.segment_bytes == total && header.segment_bytes == mapped_bytes && header.Matches(shape);
     if (!same_shape) return InvalidArgument("shared memory segment was created with a different configuration");
     // A crashed segment is losing its name; open whatever replaces it.
     if (header.crashed.load(std::memory_order_acquire) != 0) return std::unique_ptr<SharedSegment>();
@@ -247,9 +280,12 @@ void SharedSegment::MarkReady() {
 
 auto SharedSegment::kernel_base() const -> std::byte * { return base_ + header().kernel_offset; }
 
-auto SharedSegment::replacer_state() const -> std::span<std::byte> {
-  return std::span<std::byte>(base_ + header().replacer_offset, header().replacer_state_bytes);
+auto SharedSegment::replacer_state(std::size_t space) const -> std::span<std::byte> {
+  const Header::NamespaceEntry &entry = header().namespaces[space];
+  return std::span<std::byte>(base_ + entry.replacer_offset, entry.replacer_state_bytes);
 }
+
+auto SharedSegment::owned_frames(std::size_t space) const -> std::atomic<std::size_t> & { return header().namespaces[space].owned_frames; }
 
 auto SharedSegment::written_files() const -> SharedWrittenFiles & { return header().written_files; }
 

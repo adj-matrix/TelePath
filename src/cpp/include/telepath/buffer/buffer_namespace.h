@@ -28,8 +28,14 @@ inline constexpr std::size_t kMaxNamespaces = 16;
 // namespaces reading one file share one copy; it belongs to the namespace
 // that loaded it, whose replacer and quota account for it until it is
 // evicted.
+//
+// A private manager adds namespaces at creation (BufferManager::Create()) or
+// later (BufferManager::CreateNamespace()); a cross-process cache declares
+// all of them at creation, identically in every process, and shares their
+// frame counts and replacer state between processes.
 struct NamespaceOptions {
-  // Unique within the manager; "default" names the default namespace.
+  // Unique within the manager; "default" names the default namespace. At
+  // most 63 bytes in cross-process mode.
   std::string name;
   // Tracks this namespace's frames; its capacity must cover the whole pool,
   // since frame ids are shared by all namespaces.
@@ -38,10 +44,14 @@ struct NamespaceOptions {
   // namespaces together may not exceed the pool.
   std::size_t min_frames{0};
   // Most frames this namespace may hold; at the limit it evicts its own pages,
-  // even when other frames are free. 0 means no limit.
+  // even when other frames are free. 0 means no limit. Both quotas are read
+  // without a lock, so loads running at the same moment can overshoot them
+  // by one frame per load beyond the first.
   std::size_t max_frames{0};
   // Runs before this namespace's pages are written back; see
   // BufferManagerOptions::pre_write_hook, which serves the default namespace.
+  // In cross-process mode each process has its own, and the process writing
+  // a page back runs its hook, so the hooks should agree.
   PreWriteHook pre_write_hook;
 };
 

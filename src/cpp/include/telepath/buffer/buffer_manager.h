@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -113,6 +114,23 @@ class BufferManager {
   // `options.page_size`, missing dependencies, or a background component that
   // failed to start. A null telemetry sink selects
   // the no-op sink.
+  //
+  // `namespaces` declares namespaces at creation, with ids 1, 2, ... in
+  // order, under the rules of CreateNamespace(). A cross-process cache can
+  // only get namespaces this way: every process declares the same names in
+  // the same order with the same quotas and replacer kinds, which attaching
+  // validates (kInvalidArgument on a mismatch); names are then limited to 63
+  // bytes and every replacer must support BindSharedState(). Frame counts and
+  // replacer state live in the segment, so quotas and eviction order cover
+  // every process. Pre-write hooks stay per process; the process that writes
+  // a page back runs its own hook for the page's namespace.
+  static auto Create(
+    const BufferManagerOptions &options,
+    std::unique_ptr<DiskBackend> disk_backend,
+    std::unique_ptr<Replacer> replacer,
+    std::shared_ptr<TelemetrySink> telemetry_sink,
+    std::vector<NamespaceOptions> namespaces) -> Result<std::unique_ptr<BufferManager>>;
+  // Creates a manager with only the default namespace.
   static auto Create(
     const BufferManagerOptions &options,
     std::unique_ptr<DiskBackend> disk_backend,
@@ -137,9 +155,12 @@ class BufferManager {
   // pages for it. Returns kInvalidArgument for an empty, duplicate, or
   // "default" name, a null replacer, a minimum above the maximum, or
   // guarantees that would exceed the pool; kResourceExhausted beyond
-  // kMaxNamespaces; and kUnavailable in cross-process mode, which does not
-  // support namespaces yet.
+  // kMaxNamespaces; and kUnavailable in cross-process mode, whose namespaces
+  // are declared in Create().
   auto CreateNamespace(NamespaceOptions options) -> Result<BufferNamespace>;
+  // The handle of the namespace named `name` ("default" for the default
+  // namespace), or kNotFound.
+  auto GetNamespace(std::string_view name) -> Result<BufferNamespace>;
   // The handle of the namespace this manager's own read methods act for.
   auto DefaultNamespace() -> BufferNamespace { return BufferNamespace(this, kDefaultNamespace); }
   // The backend this manager reads and writes through, for facades that also
@@ -454,8 +475,11 @@ class BufferManager {
   void MarkHandleDirty(FrameId frame_id, Lsn lsn = kInvalidLsn) noexcept;
   void ReleaseFrame(FrameId frame_id) noexcept;
 
+  // buffer_manager_namespace.cc
+  auto AddNamespace(NamespaceOptions options) -> Result<BufferNamespace>;
+
   // buffer_manager_lifecycle.cc
-  auto Initialize() -> Status;
+  auto Initialize(std::vector<NamespaceOptions> namespaces) -> Status;
   auto CheckUsable() const -> Status;
   void EnterFailedState(const Error &cause);
   auto InitializeKernelMemory() -> Status;
@@ -531,7 +555,10 @@ class BufferManager {
     std::size_t min_frames{0};
     std::size_t max_frames{0};
     PreWriteHook pre_write_hook;
-    std::atomic<std::size_t> owned{0};
+    // Frames the namespace holds: `local_owned` in private mode, a count in
+    // the segment in cross-process mode.
+    std::atomic<std::size_t> local_owned{0};
+    std::atomic<std::size_t> *owned{&local_owned};
   };
   // Entry 0 is the default namespace, whose replacer is replacer_ and whose
   // hook is options_.pre_write_hook. Entries below namespace_count_ are

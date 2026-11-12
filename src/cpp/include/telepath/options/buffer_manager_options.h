@@ -73,8 +73,9 @@ enum class CrashRecovery {
 // Cross-process mode: kernel metadata and frames live in a named POSIX
 // shared-memory segment that several processes map, so they share one cache.
 // Every process must use the same pool size, page size, page-table stripe
-// count, and replacer kind and capacity, which attaching validates, and the
-// replacer must support BindSharedState(). One attached process at a time
+// count, replacer kind and capacity, and namespace declarations (see
+// BufferManager::Create()), which attaching validates, and every replacer
+// must support BindSharedState(). One attached process at a time
 // runs the background cleaner for everyone; another takes over when it
 // detaches or dies. Each process keeps its own disk backend, which must reach
 // the same files. Linux only.

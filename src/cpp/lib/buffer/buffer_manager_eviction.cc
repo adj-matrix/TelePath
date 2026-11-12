@@ -57,7 +57,7 @@ auto BufferManager::AcquireReservationFrame(NamespaceId space, std::uint32_t *el
   }
 
   const NamespaceState &self = namespaces_[space];
-  const bool at_max = self.max_frames != 0 && self.owned.load(std::memory_order_relaxed) >= self.max_frames;
+  const bool at_max = self.max_frames != 0 && self.owned->load(std::memory_order_relaxed) >= self.max_frames;
   if (!at_max) {
     if (std::optional<FrameId> free_frame = free_list_->Pop(); free_frame.has_value()) return ReservationCandidate{free_frame.value(), true};
   }
@@ -70,7 +70,7 @@ auto BufferManager::AcquireReservationFrame(NamespaceId space, std::uint32_t *el
 auto BufferManager::NominateVictim(NamespaceId space, std::uint32_t *eligible) -> std::optional<FrameId> {
   const std::size_t count = namespace_count_.load(std::memory_order_acquire);
   const NamespaceState &self = namespaces_[space];
-  const std::size_t self_owned = self.owned.load(std::memory_order_relaxed);
+  const std::size_t self_owned = self.owned->load(std::memory_order_relaxed);
   std::array<NamespaceId, kMaxNamespaces> order{};
   std::size_t candidates = 0;
   // A namespace at its maximum makes room among its own pages. Otherwise it
@@ -88,7 +88,7 @@ auto BufferManager::NominateVictim(NamespaceId space, std::uint32_t *eligible) -
     for (NamespaceId other = 0; other < count; ++other) {
       if (other == space) continue;
       const NamespaceState &state = namespaces_[other];
-      const std::size_t owned = state.owned.load(std::memory_order_relaxed);
+      const std::size_t owned = state.owned->load(std::memory_order_relaxed);
       if (owned > state.min_frames) others[other_count++] = {owned - state.min_frames, other};
     }
     std::sort(others.begin(), others.begin() + static_cast<std::ptrdiff_t>(other_count), [](const auto &a, const auto &b) { return a.first > b.first; });

@@ -10,6 +10,9 @@
 #include <span>
 #include <string>
 
+#include <vector>
+
+#include "telepath/buffer/buffer_namespace.h"
 #include "telepath/common/status.h"
 #include "telepath/common/types.h"
 #include "telepath/options/buffer_manager_options.h"
@@ -27,19 +30,31 @@ struct SharedWrittenFiles {
   std::array<FileId, kCapacity> files{};
 };
 
-// A POSIX shared-memory segment holding a header, the replacer state, and the
-// kernel region, mapped by every process attached to one cache.
+// A POSIX shared-memory segment holding a header with the namespace table,
+// the state of every namespace's replacer, and the kernel region, mapped by
+// every process attached to one cache.
 class SharedSegment {
  public:
-  // What every attached process must agree on.
+  // Longest namespace name the table holds, including its terminator.
+  static constexpr std::size_t kNamespaceNameBytes = 64;
+
+  struct NamespaceShape {
+    std::string name;
+    std::string replacer_kind;
+    std::uint64_t replacer_state_bytes{0};
+    std::uint64_t min_frames{0};
+    std::uint64_t max_frames{0};
+  };
+
+  // What every attached process must agree on. `namespaces` starts with the
+  // default namespace.
   struct Shape {
     std::uint64_t block_size{0};
     std::uint64_t pool_size{0};
     std::uint64_t stripe_count{0};
-    std::uint64_t replacer_state_bytes{0};
-    std::string replacer_kind;
     std::uint64_t kernel_bytes{0};
     std::uint32_t crash_recovery{0};
+    std::vector<NamespaceShape> namespaces;
   };
 
   // Creates or attaches to the segment named in `options`. An attaching
@@ -58,7 +73,9 @@ class SharedSegment {
   void MarkReady();
 
   auto kernel_base() const -> std::byte *;
-  auto replacer_state() const -> std::span<std::byte>;
+  auto replacer_state(std::size_t space) const -> std::span<std::byte>;
+  // Frames namespace `space` holds, counted for every process.
+  auto owned_frames(std::size_t space) const -> std::atomic<std::size_t> &;
   auto written_files() const -> SharedWrittenFiles &;
 
   enum class CrashCheck {

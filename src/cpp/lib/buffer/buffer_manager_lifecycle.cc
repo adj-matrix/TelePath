@@ -33,8 +33,11 @@ constexpr std::chrono::milliseconds kSalvageHolderWait{1000};
 
 }  // namespace
 
-auto BufferManager::Initialize() -> Status {
+auto BufferManager::Initialize(std::vector<NamespaceOptions> namespaces) -> Status {
   if (Status dependency_status = ValidateRuntimeDependencies(); !dependency_status.has_value()) return dependency_status;
+  for (NamespaceOptions &space : namespaces) {
+    if (auto added = AddNamespace(std::move(space)); !added.has_value()) return PropagateError(added);
+  }
   if (Status memory_status = InitializeKernelMemory(); !memory_status.has_value()) return memory_status;
 
   if (segment_ == nullptr || segment_->created()) SeedFreeFrames();
@@ -94,17 +97,26 @@ auto BufferManager::InitializeKernelMemory() -> Status {
     if (region_->base() == nullptr) return ResourceExhausted("failed to allocate kernel memory");
     base = region_->base();
   } else {
-    const std::size_t replacer_bytes = replacer_->SharedStateBytes();
-    if (replacer_bytes == 0) return InvalidArgument("replacer does not support cross-process mode");
-    const Replacer &replacer = *replacer_;
-    const SharedSegment::Shape shape{geometry_.block_size(), pool_size_, options_.page_table_stripe_count, replacer_bytes, typeid(replacer).name(), layout.bytes, static_cast<std::uint32_t>(options_.shared_memory.crash_recovery)};
+    SharedSegment::Shape shape{geometry_.block_size(), pool_size_, options_.page_table_stripe_count, layout.bytes, static_cast<std::uint32_t>(options_.shared_memory.crash_recovery), {}};
+    const std::size_t count = namespace_count_.load(std::memory_order_acquire);
+    for (std::size_t id = 0; id < count; ++id) {
+      const Replacer &replacer = *replacers_[id];
+      const NamespaceState &state = namespaces_[id];
+      const std::size_t replacer_bytes = replacer.SharedStateBytes();
+      if (replacer_bytes == 0) return InvalidArgument(id == kDefaultNamespace ? "replacer does not support cross-process mode" : "namespace replacer does not support cross-process mode");
+      if (state.name.size() >= SharedSegment::kNamespaceNameBytes) return InvalidArgument("namespace name is too long for cross-process mode");
+      shape.namespaces.push_back({state.name, typeid(replacer).name(), replacer_bytes, state.min_frames, state.max_frames});
+    }
     Result<std::unique_ptr<SharedSegment>> segment = SharedSegment::Open(options_.shared_memory, shape);
     if (!segment.has_value()) return PropagateError(segment);
     segment_ = std::move(segment.value());
     process_slot_ = static_cast<std::uint32_t>(segment_->slot() + 1);
     fence_ = segment_->crashed_word();
     initialize = segment_->created();
-    if (Status bound = replacer_->BindSharedState(segment_->replacer_state(), initialize); !bound.has_value()) return bound;
+    for (std::size_t id = 0; id < count; ++id) {
+      if (Status bound = replacers_[id]->BindSharedState(segment_->replacer_state(id), initialize); !bound.has_value()) return bound;
+      namespaces_[id].owned = &segment_->owned_frames(id);
+    }
     base = segment_->kernel_base();
   }
 

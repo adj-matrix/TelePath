@@ -57,7 +57,9 @@ class PageCache {
   // configuration is the manager's, so `options.buffer` and
   // `options.write_behind` are ignored; the manager's backend must implement
   // GetFileSize() and SetFileSize(). A null `space.replacer` selects
-  // clock-sweep. File ids are shared with the manager's other users.
+  // clock-sweep. File ids are shared with the manager's other users. A
+  // cross-process manager returns kUnavailable, since its namespaces are
+  // declared when it is created.
   static auto Create(PageCacheOptions options, BufferManager &manager, NamespaceOptions space) -> Result<std::unique_ptr<PageCache>>;
 
   PageCache(const PageCache &) = delete;

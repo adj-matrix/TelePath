@@ -310,6 +310,21 @@ void RunWorker(telepath::BufferManager *manager, std::optional<telepath::BufferN
   }
 }
 
+// Namespaces with a guarantee, a cap, and neither, over the default one;
+// declared at creation, as a cross-process cache requires.
+auto Declarations(const Config &config) -> std::vector<telepath::NamespaceOptions> {
+  std::vector<telepath::NamespaceOptions> spaces;
+  for (std::size_t index = 0; index < config.namespaces; ++index) {
+    telepath::NamespaceOptions options;
+    options.name = "space" + std::to_string(index);
+    options.replacer = MakeReplacer(index % 2 == 0 ? "lru" : "sieve", config.pool_size);
+    options.min_frames = index == 0 ? config.pool_size / 4 : 0;
+    options.max_frames = index == 1 ? config.pool_size / 2 : 0;
+    spaces.push_back(std::move(options));
+  }
+  return spaces;
+}
+
 auto Open(const std::filesystem::path &root, const Config &config, telepath::test_support::FaultInjectionBackend **faults, std::uint64_t seed, const std::string &segment = {}, telepath::SharedMemoryMode mode = telepath::SharedMemoryMode::kCreate) -> std::unique_ptr<telepath::BufferManager> {
   telepath::BufferManagerOptions options;
   options.pool_size = config.pool_size;
@@ -322,7 +337,7 @@ auto Open(const std::filesystem::path &root, const Config &config, telepath::tes
   assert(inner != nullptr);
   auto backend = std::make_unique<telepath::test_support::FaultInjectionBackend>(std::move(inner), seed);
   if (faults != nullptr) *faults = backend.get();
-  auto manager = telepath::BufferManager::Create(options, std::move(backend), MakeReplacer(config.replacer, config.pool_size), telepath::MakeNoOpTelemetrySink());
+  auto manager = telepath::BufferManager::Create(options, std::move(backend), MakeReplacer(config.replacer, config.pool_size), telepath::MakeNoOpTelemetrySink(), Declarations(config));
   assert(manager.has_value());
   return std::move(manager.value());
 }
@@ -335,17 +350,11 @@ void EnableFaults(telepath::test_support::FaultInjectionBackend *faults, const C
 }
 
 void RunWorkers(telepath::BufferManager *manager, Model *model, const Config &config, std::uint64_t seed) {
-  // Namespaces with a guarantee, a cap, and neither, over the default one.
   std::vector<telepath::BufferNamespace> spaces;
   for (std::size_t index = 0; index < config.namespaces; ++index) {
-    telepath::NamespaceOptions options;
-    options.name = "space" + std::to_string(index);
-    options.replacer = MakeReplacer(index % 2 == 0 ? "lru" : "sieve", config.pool_size);
-    options.min_frames = index == 0 ? config.pool_size / 4 : 0;
-    options.max_frames = index == 1 ? config.pool_size / 2 : 0;
-    auto created = manager->CreateNamespace(std::move(options));
-    assert(created.has_value());
-    spaces.push_back(created.value());
+    auto found = manager->GetNamespace("space" + std::to_string(index));
+    assert(found.has_value() && found->id() == index + 1);
+    spaces.push_back(found.value());
   }
   std::vector<std::thread> workers;
   for (std::size_t worker = 0; worker < config.threads; ++worker) {
@@ -490,6 +499,7 @@ int main(int argc, char **argv) {
     {"io_uring_cross_process", "clock_sweep", 8, 4, 1500, ForegroundWriteback::kDirect, true, 20, 30, 50, true, true},
     {"namespaces_faults", "clock_sweep", 12, 8, 1500, ForegroundWriteback::kDirect, true, 20, 30, 50, false, false, 3},
     {"namespaces_tight", "lru_k", 4, 6, 1200, ForegroundWriteback::kQueued, true, 0, 30, 0, false, false, 3},
+    {"cross_process_namespaces", "clock_sweep", 12, 4, 1500, ForegroundWriteback::kDirect, true, 20, 30, 50, true, false, 3},
   };
   if (argc == 7 && std::string(argv[1]) == "chaos-child") {
     for (const Config &config : configs) {

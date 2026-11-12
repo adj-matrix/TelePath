@@ -16,7 +16,7 @@ TelePath is a long-term open-source SDK. Its kernel is a **keyed, fixed-size blo
 
 Out of scope: network-stack buffer pools, compiler symbol interning, sample-level ML caches, mmap semantics. Shuffling, decoding, and batching stay outside TelePath.
 
-"Three facades on one kernel" means three kinds of products reuse one kernel implementation. An application normally uses one facade, which creates and owns its kernel instance; any number of threads may use one facade instance concurrently. Since phase 7b a facade can instead run in a namespace of an existing kernel, so several facades share one cache (section 8.6), and since phase 6 one cache can be shared between processes.
+"Three facades on one kernel" means three kinds of products reuse one kernel implementation. An application normally uses one facade, which creates and owns its kernel instance; any number of threads may use one facade instance concurrently. Since phase 7b a facade can instead run in a namespace of an existing kernel, so several facades share one cache (section 8.6), and since phase 6 one cache can be shared between processes, with namespaces since 7c.
 
 ## 2. Ground Rules
 
@@ -118,7 +118,7 @@ cold metadata              tag (atomic file id / block id), packed last writebac
 
 ## 6. Phases
 
-**Progress:** phases 0, 1a–1e, 2, 3, 4, 5a, 5b, 6a–6e, 7a, and 7b are implemented; see sections 7 and 8.6.
+**Progress:** phases 0, 1a–1e, 2, 3, 4, 5a, 5b, 6a–6e, and 7a–7c are implemented; see sections 7 and 8.6.
 
 | Phase | Content | Depends on |
 | --- | --- | --- |
@@ -337,7 +337,7 @@ A second pass added `primitives_stress_test` (the lock-free free list with one t
 
 ## 8. Future Plan: Shared Namespaces and Observation
 
-**Status: phase 6 done; phase 7 in progress (7a and 7b done, see 8.6).** This section records the plan, the constraints that keep it possible, and the phase 7 decisions.
+**Status: phase 6 done; phase 7 in progress (7a–7c done, see 8.6).** This section records the plan, the constraints that keep it possible, and the phase 7 decisions.
 
 ### 8.1 Motivation
 
@@ -398,3 +398,4 @@ Tests: `namespace_test` (validation, sharing and ownership, guarantees surviving
 
 **7b done.** `PageCache::Create(options, manager, space)` and `MLPrefetchBuffer::Create(options, manager, space)` run a facade in a new namespace of an existing `BufferManager`; the original factories still create and own a kernel. Both modes read through a `BufferNamespace` handle (`BufferManager::DefaultNamespace()` for an owned kernel), and manager-wide operations (file flush, sync, drop) go to the manager. In attached mode the kernel configuration is the manager's: `options.buffer` and PageCache's `write_behind` are ignored, MLPrefetchBuffer's blocks are the manager's pages and its namespace's replacer is its own `PlanReplacer` (a caller-supplied replacer is refused), and PageCache takes file sizes from `BufferManager::disk_backend()`. `Close()` of an attached facade stops only that facade (PageCache syncs its files first); the manager stays open and must outlive its facades. A facade's namespace stays after the facade is destroyed, since namespaces cannot be removed yet. `PlanReplacer::SetNextUse()` on a page another namespace owns does nothing, so a dataset reading a page a file cache loaded leaves that page in the file cache's accounting. Test: `shared_kernel_test` (one coherent copy across facades without a disk read before writeback, a file cache's guarantee surviving a training pass over a dataset far larger than the pool, closing one facade leaving the manager and the other facade running, refused attachments, and a file cache writer with dataset readers running concurrently in a pool smaller than their data).
 
+**7c done.** A cross-process cache declares its namespaces at creation: `BufferManager::Create()` takes `std::vector<NamespaceOptions>`, added in order as ids 1, 2, ... under the `CreateNamespace()` rules (a private manager accepts them too and can still add more later), and `BufferManager::GetNamespace(name)` returns a handle by name (`kNotFound` otherwise; "default" is id 0). Every process declares the same namespaces, since each one needs its own replacer object for every namespace: hits dispatch to the owner's replacer in whichever process hits. The segment header (layout version 3) replaces the 64 reserved 64-byte entries with a table of `kMaxNamespaces` entries holding the name (at most 63 bytes), replacer kind and state size, state offset, quotas, and the namespace's frame count; the replacer states follow the header one after another, the default namespace's first. Attaching compares the whole table (names, order, quotas, replacer kinds and sizes) and returns `kInvalidArgument` on any difference; declarations are checked before the segment is opened, so an invalid one leaves nothing behind. Each namespace's replacer binds to its state in the segment, and `NamespaceState::owned` points at the shared count, so caps, guarantees, and eviction order cover every process. Pre-write hooks stay per process: the process writing a page back runs its own hook for the page owner's namespace. `CreateNamespace()` in cross-process mode returns `kUnavailable`, and so do the attached facade factories, whose namespace would exist in one process only; cross-process facades are left for later, since PageCache keeps logical file sizes per process. Test: `shared_namespace_test`, and a `chaos_test` configuration with three namespaces across two processes. Keeping the counts per process fails the quota test and leaving namespace replacer state on the heap fails the SIEVE test. Also corrected: `namespace_test` asserted exact caps after a concurrent run, which soft quotas do not promise (it failed once in the matrix and once in about 140 ASAN runs on pinned CPUs); it now asserts the bound concurrent reservations allow, one frame per concurrent thread beyond the first, since only a reservation that read the count below the cap can add a frame.

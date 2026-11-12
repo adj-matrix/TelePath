@@ -1,4 +1,4 @@
-# TelePath: An Observable Buffer Pool SDK for Modern Storage
+# TelePath: A Shared, Observable Cache Kernel SDK for Buffering, Page Caching, and ML Prefetching
 
 <!-- # TelePath: A High-Performance, Observable Kernel (e.g., Cache) SDK for Heterogeneous Storage -->
 
@@ -10,71 +10,60 @@
   English | <a href="./localization/README.zh-CN.md">简体中文</a>
 </p>
 
-**TelePath** (Telepathy, Telemetry + Path) is a research-oriented C++17 SDK for building an observable buffer pool and page cache engine for modern storage environments.
+**TelePath** (Telepathy, Telemetry + Path) is a C++23 SDK built around one **cache kernel**: a keyed, fixed-size block cache over a backing store. Three products sit on that kernel:
 
-It is not intended to be a full DBMS. The project is scoped as a reusable systems library with:
+| Facade | What it is | Access |
+| --- | --- | --- |
+| `BufferManager` | a database buffer pool in the style of PostgreSQL's bufmgr | pin pages in place under shared or exclusive latches; writeback, pre-write hook, recLSN, checkpoints |
+| `PageCache` | a byte-addressed file cache | `Read`/`Write` byte ranges with readahead and write-behind; logical file sizes; `Sync` |
+| `MLPrefetchBuffer` | a read-only dataset cache for ML training | a known read order (the plan) drives prefetching and Belady eviction |
 
-- a concurrent buffer pool core,
-- pluggable replacement policies,
-- a stable POSIX fallback backend,
-- a native `io_uring` backend path for supported Linux environments,
-- a low-overhead telemetry interface designed to stay off the hot path.
+The facades do not need separate caches. Several of them can run in **namespaces** of one kernel, each with its own replacement policy, frame quotas, and pre-write hook. They share one coherent copy of every page, one set of I/O and writeback threads, and one memory budget. The kernel can also live in **POSIX shared memory**, so several processes share one cache.
 
-TelePath is being developed with a deliberate split between the data plane and the observation plane so that instrumentation remains part of the architecture rather than an afterthought.
+Everything the cache does can be **observed from outside**. A versioned shared-memory observation area publishes frame states and counters, and a Python reader or the Web console can read it without touching the engine's hot path.
 
-## Motivation
+TelePath is not a DBMS. It has no SQL, query execution, indexes, transactions, or write-ahead log of its own. It provides the buffer layer those systems need, packaged as a reusable library.
 
-Modern storage devices can expose far more concurrency than traditional teaching-oriented buffer managers were designed to exploit. At the same time, many systems prototypes remain difficult to observe internally without resorting to invasive logging or heavyweight tracing.
+## Why
 
-TelePath exists to provide a smaller and more auditable experimental base for studying questions such as:
+Buffer pools, OS-style page caches, and training-data caches solve the same problem: keeping hot blocks of slow storage in a fixed amount of memory. They are usually separate implementations, though. A machine that runs a database next to a training job therefore splits its memory statically, runs duplicate background threads, and caches a shared file twice without coherence.
 
-- how a buffer pool scales under increasing thread counts,
-- how replacement policy behavior changes under skewed workloads,
-- how much observability can be added before it disturbs the data path,
-- how an async-ready design should be staged under realistic development constraints such as WSL2.
+TelePath explores what one shared kernel can do instead:
 
-## Current Scope
+- **Share without losing isolation.** Namespaces get guaranteed (`min_frames`) and capped (`max_frames`) shares of one pool. A full scan by one namespace cannot evict another namespace's guaranteed pages.
+- **Share across processes.** Metadata, frames, replacer state, and quota counts live in a shared segment. When a process crashes, every attached process is fenced and the dirty pages are salvaged or discarded, the way PostgreSQL resets shared memory after a backend crash.
+- **Observe without perturbing.** The observation plane copies state on a background thread, so page hits do no extra work. External tools see frame ownership, dirty and writeback state, pins, and per-process counters.
 
-TelePath currently targets the following system boundary:
+## Features
 
-- It is a C++ library.
-- It manages page-sized blocks in memory and coordinates persistence through a storage backend.
-- It exposes observability through telemetry sinks.
-- It is designed as a foundation for benchmarking and future experimentation.
+**Kernel**
 
-TelePath does **not** currently aim to include:
+- PostgreSQL-style buffer access: `ReadBuffer` / `ReadBufferExclusive` return RAII `SharedBufferHandle` / `ExclusiveBufferHandle`, and writing through an exclusive handle marks the page dirty.
+- A 32-bit frame control word (state, dirty, writeback, latch, pin count) on futexes, a fixed-size open-addressing page table, and a lock-free free list.
+- Asynchronous I/O through an I/O engine with POSIX and native `io_uring` backends: multi-block reads, `PrefetchBuffer`, `StartReadBuffers` / `WaitReadBuffers`, and access strategies such as ring buffers for scans.
+- Writeback: a flush scheduler with separate foreground and background queues, a background cleaner driven by dirty-page watermarks, and a defined durability contract for `FlushAll()` and `Close()`.
+- Write-ahead-log support, without a log: a pre-write hook (flush the WAL up to a page's LSN before it is written), per-page recLSN through `MarkDirty(lsn)`, `MinRecLsn()`, and `CheckpointBuffers(lsn)`.
+- Replacement policies: Clock, clock-sweep (PostgreSQL), SIEVE, LRU, LRU-K, 2Q, and a plan-driven Belady policy (`PlanReplacer`). Every policy can place its state in shared memory.
+- `std::expected`-based errors (`Result<T>`, `Status`) with a Failed state for unrecoverable errors.
 
-- SQL parsing,
-- query execution,
-- B+Tree indexes,
-- MVCC or transaction management,
-- WAL or crash recovery,
-- production-grade monitoring integrations in the first milestone.
+**Sharing**
 
-## State 4 Status
+- Namespaces (up to 16 per kernel). Each has its own replacer, `min_frames` / `max_frames`, and pre-write hook. A page belongs to the namespace that loaded it; hits from other namespaces never move it.
+- Facades attach to an existing kernel: `PageCache::Create(options, manager, space)` and `MLPrefetchBuffer::Create(options, manager, space)`.
+- Cross-process mode (`BufferManagerOptions::shared_memory`):
+  - Any process may create the segment or attach to it, and attaching validates the configuration.
+  - Namespaces are declared identically by every process, and their quotas and eviction order hold across processes.
+  - Background writeback runs in one elected cleaner process.
+  - A crashed process is detected within tens of milliseconds and the segment is fenced.
 
-The current implementation has moved beyond the original State 1/2 skeleton and now includes a State 4 prototype built on a usable writeback core:
+**Observation**
 
-- `BufferManager`, `SharedBufferHandle`/`ExclusiveBufferHandle`, and `BufferDescriptor`
-- contiguous frame memory allocation
-- `DiskBackend`, `PosixDiskBackend`, `IoUringDiskBackend`, and `DiskBackendFactory`
-- miss coordination for concurrent same-page faults
-- centralized completion dispatch for submitted disk requests
-- asynchronous flush scheduling with worker threads
-- foreground/background flush queue separation with configurable batching
-- cleaner-backed dirty-page writeback with watermark-driven activation
-- `ClockReplacer`, `LruReplacer`, and `LruKReplacer`
-- counter-based and no-op telemetry sinks
-- JSONL and POSIX shared-memory telemetry snapshot export
-- benchmark and CI paths for fallback and native validation
-
-This means TelePath now supports not only the basic buffer lifecycle, but also:
-
-1. synchronous external page access on top of internal async-style disk orchestration,
-2. explicit same-page miss ownership instead of duplicate load work,
-3. a real writeback path with completion routing and task waiting,
-4. cleaner-assisted dirty-page management,
-5. stronger regression coverage around flush correctness, failure handling, and scheduler behavior.
+- An observation area (`ObservationOptions`) in shared memory, in the published binary format of `telepath/observation/observation_format.h`:
+  - a summary;
+  - per-process telemetry counters;
+  - one record per frame (state, flags, pins, page, owning namespace).
+- `web/backend/observation.py` parses it directly. The Web console serves it at `GET /api/observation`.
+- Pluggable `TelemetrySink` counters, plus benchmark tooling with latency percentiles and sampled snapshots.
 
 ## Architecture
 
@@ -82,128 +71,169 @@ This means TelePath now supports not only the basic buffer lifecycle, but also:
   <img src="https://raw.githubusercontent.com/adj-matrix/adjmatrix-assets/main/TelePath/Architecture.png" width="80%">
 </p>
 
+## Quick Look
+
+A buffer pool for a storage engine:
+
+```cpp
+#include "telepath/buffer/buffer_manager.h"
+#include "telepath/io/disk_backend_factory.h"
+#include "telepath/replacer/replacer.h"
+#include "telepath/telemetry/telemetry_sink.h"
+
+telepath::BufferManagerOptions options;
+options.pool_size = 4096;   // frames
+options.page_size = 8192;   // bytes, a power of two in [4 KiB, 4 MiB]
+options.pre_write_hook = [&](const telepath::BufferTag &tag, std::span<const std::byte> page) {
+  return wal.FlushUpTo(PageLsn(page));  // the WAL rule
+};
+auto manager = telepath::BufferManager::Create(
+    options, telepath::CreateDiskBackend("/data", options.page_size).value(),
+    telepath::MakeClockSweepReplacer(options.pool_size), telepath::MakeNoOpTelemetrySink()).value();
+
+{
+  auto page = manager->ReadBufferExclusive(/*file_id=*/1, /*block_id=*/42).value();
+  std::span<std::byte> bytes = page.mutable_data();  // marks the page dirty
+  // ... modify bytes, append a log record at lsn ...
+  page.MarkDirty(lsn);                               // records the page's recLSN
+}
+manager->CheckpointBuffers(redo_lsn);                // everything logged below redo_lsn is durable
+manager->Close();
+```
+
+A file cache and a training dataset sharing one kernel:
+
+```cpp
+telepath::NamespaceOptions files;
+files.name = "files";
+files.min_frames = 1024;           // a training pass cannot evict these
+auto cache = telepath::PageCache::Create({}, *manager, std::move(files)).value();
+
+telepath::NamespaceOptions training;
+training.name = "training";
+training.max_frames = 2048;        // the dataset never takes more
+auto dataset = telepath::MLPrefetchBuffer::Create({}, *manager, std::move(training)).value();
+
+cache->Write(/*file_id=*/7, /*offset=*/0, bytes);
+dataset->SetPlan(epoch_order);     // std::vector<telepath::BufferTag>
+while (auto next = dataset->Next().value()) Consume(next->handle.data());
+```
+
+One cache shared by several processes. Every process runs the same code:
+
+```cpp
+options.shared_memory.name = "/telepath_cache";  // create or attach
+std::vector<telepath::NamespaceOptions> spaces;
+spaces.push_back({.name = "oltp", .replacer = telepath::MakeLruKReplacer(options.pool_size, /*k=*/2), .min_frames = 1024});
+spaces.push_back({.name = "scan", .replacer = telepath::MakeSieveReplacer(options.pool_size), .max_frames = 256});
+auto shared = telepath::BufferManager::Create(
+  options,
+  std::move(backend),
+  telepath::MakeClockSweepReplacer(options.pool_size),
+  telepath::MakeNoOpTelemetrySink(), std::move(spaces)
+).value();
+telepath::BufferNamespace scan = shared->GetNamespace("scan").value();
+auto page = scan.ReadBuffer(/*file_id=*/3, /*block_id=*/0).value();
+```
+
+Reading the observation plane from Python:
+
+```python
+from web.backend.observation import read_observation  # run from the repository root
+snapshot = read_observation("/telepath_observation")
+print(snapshot["summary"], len(snapshot["frames"]), snapshot["counters"])
+```
+
+The public headers under `src/cpp/include/telepath` document every call precisely, including thread safety, error codes, and durability.
+
+## Status
+
+TelePath is developed in phases recorded in [`docs/design/kernel-refactor.md`](./docs/design/kernel-refactor.md):
+
+| Phase | Content | State |
+| --- | --- | --- |
+| 0–4 | C++23 toolchain, error model, frame control word, handles, page table, policy layer, asynchronous I/O, writeback and durability | done |
+| 5 | Facades: `PageCache`, `MLPrefetchBuffer` with `PlanReplacer` | done |
+| 6 | Cross-process mode, observation plane, recLSN and checkpoints, cleaner election, crash detection and recovery | done |
+| 7a–7c | Namespaces with quotas; facades sharing one kernel; namespaces across processes | done |
+| 7d–7e | Per-namespace statistics and an eviction event stream; Web namespace views | next |
+| later | Cache groups for different block sizes; an optional generic log module | planned |
+
+Correctness work goes with each phase:
+
+- **Randomized chaos tests** run most of the API concurrently, against a model of every page, with injected I/O faults. They run in one process and across two, and on io_uring.
+- **Model-checked replacer tests** check victims against reference LRU, LRU-K, and Belady models.
+- **Torn-read tests** check the observation plane.
+- **Crash tests** kill attached processes.
+- **Sanitizers and compilers:** the whole suite runs under ASAN and TSAN, with GCC 14 and Clang 19.
+
+[`docs/test.md`](./docs/test.md) lists the suites.
+
 ## Build
 
-TelePath keeps environment bootstrap scripts under `support/` and day-to-day project entry scripts under `scripts/`.
-
-### Minimal Build Dependencies
-
-TelePath is written in C++23 and requires GCC 14 or Clang 19. The script installs both (adding the toolchain PPA and apt.llvm.org on Ubuntu 22.04):
+TelePath keeps environment bootstrap scripts under `support/` and day-to-day entry scripts under `scripts/`. It is written in C++23 and requires **GCC 14 or Clang 19** on Linux.
 
 ```bash
-sudo ./support/install_build_deps.sh
+sudo ./support/install_build_deps.sh   # GCC 14 and Clang 19 (adds the toolchain PPA and apt.llvm.org on Ubuntu 22.04)
+sudo ./support/install_dev_tools.sh    # optional: clang-format, clang-tidy, lldb, valgrind
 ```
 
-### Recommended Development Tools
+Build and test with the presets:
 
 ```bash
-sudo ./support/install_dev_tools.sh
-```
-
-This installs tools such as `clang`, `clang-format`, `clang-tidy`, `lldb`, and `valgrind`. These are recommended for development, but they are not required for the minimal build path.
-
-### Debug Build
-
-```bash
-./scripts/build/debug.sh
-./scripts/test/debug.sh
-```
-
-### ASAN Build
-
-```bash
-./scripts/build/asan.sh
-./scripts/test/asan.sh
-```
-
-### TSAN and Release Builds
-
-```bash
-./scripts/build/tsan.sh && ./scripts/test/tsan.sh
+./scripts/build/debug.sh   && ./scripts/test/debug.sh
+./scripts/build/asan.sh    && ./scripts/test/asan.sh
+./scripts/build/tsan.sh    && ./scripts/test/tsan.sh
 ./scripts/build/release.sh && ctest --preset release
 ```
 
-Benchmarks and the Web console use the release build.
-
-### Native `io_uring` Validation
-
-On supported native Linux kernels, the dedicated `io_uring` path can be built and tested separately:
+On native Linux kernels with `io_uring`, the dedicated path is built and tested separately:
 
 ```bash
 ./scripts/build/io_uring_debug.sh
 ./scripts/test/io_uring_native.sh
 ```
 
-### LSAN Notes
+`./scripts/build/lsan.sh` prepares a LeakSanitizer build. LSAN may fail in ptrace-restricted environments such as some WSL setups; that is an environment limit, not a known TelePath defect.
 
-`LeakSanitizer` support is prepared through:
+Benchmarks (`scripts/bench/`) and the Web console use the release build.
 
-```bash
-./scripts/build/lsan.sh
-```
-
-However, LSAN execution may fail in ptrace-constrained or restricted WSL-style environments. That limitation is environmental rather than a known TelePath correctness issue.
-
-### Web Console
-
-TelePath also includes a browser-based console for running workloads and inspecting recent results from the engine.
-
-Run it with:
+## Web Console
 
 ```bash
 ./scripts/web/serve.sh
 ```
 
-This starts a single local HTTP service that:
+This starts one local HTTP service that:
 
-- serves the browser UI,
-- supports runtime language switching between English and Simplified Chinese,
-- runs single benchmark passes,
-- runs thread-sweep experiments,
-- displays selectable final and sampled runtime buffer-pool snapshots,
-- retains recent run and sweep history in the server session,
-- and exposes all of that through a thin API backed by the existing TelePath debug build.
+- serves the browser UI, in English and Simplified Chinese;
+- runs single benchmark passes and thread sweeps;
+- shows final and sampled buffer-pool snapshots as a frame map;
+- keeps recent run history for the session;
+- serves a live observation area at `/api/observation?name=/name`.
 
-Frontend localization resources live under `localization/web-console/`.
+Frontend localization resources live under `localization/web-console/`. Namespace views are planned for phase 7e.
 
 ## Repository Layout
 
-The repository structure and ownership rules are documented here:
+- `src/cpp/include/telepath`: public headers (buffer, facade, io, replacer, observation, telemetry, options)
+- `src/cpp/lib`: implementation
+- `test/cpp`: unit, stress, chaos, model, and multi-process tests
+- `web/backend`, `web/frontend`: Web console and the Python observation reader
+- `scripts`, `support`: build, test, benchmark, and environment scripts
 
-- [Repository Tree Guide](./docs/tree.md)
-
-The main implementation currently lives under:
-
-- `src/cpp/include/telepath`
-- `src/cpp/lib`
-- `test/cpp`
-- `web/frontend`
-- `web/backend`
-- `gui`
-- `support`
-- `scripts`
-
-## Roadmap
-
-- Phase 1: establish a stable, testable buffer pool skeleton
-- Phase 2: strengthen concurrent lifecycle semantics, async-ready I/O boundaries, and benchmark scaffolding
-- Phase 3: deliver centralized completion ownership, async writeback scheduling, and cleaner-backed dirty-page management
-- Phase 4: continue toward live shared-memory event transport, deeper native backend optimization, and larger-scale experimentation
-
-The current implementation is still early-stage. The main focus is architectural correctness, stable interfaces, and controlled extensibility rather than premature performance claims.
+Ownership rules are in the [Repository Tree Guide](./docs/tree.md).
 
 ## Documentation
 
-Public project documentation lives under `docs/`.
-
-Recommended entry points:
-
-- [State Summary](./docs/state.md)
-- [CI Guide](./docs/ci.md)
-- [Test Guide](./docs/test.md)
+- [Kernel Design and Roadmap](./docs/design/kernel-refactor.md)
 - [Concurrency Invariants](./docs/concurrency.md)
+- [Test Guide](./docs/test.md)
+- [CI Guide](./docs/ci.md)
+- [Experiment Guide](./docs/experiment.md)
 - [Repository Tree Guide](./docs/tree.md)
 - [Architecture Mermaid](./docs/mermaid/architecture.mmd)
+- [State 4 Summary (historical)](./docs/state.md)
 
 > 📜 **License**
 >

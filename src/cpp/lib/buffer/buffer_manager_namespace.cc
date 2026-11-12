@@ -9,7 +9,19 @@ namespace telepath {
 
 auto BufferManager::CreateNamespace(NamespaceOptions options) -> Result<BufferNamespace> {
   if (Status usable = CheckUsable(); !usable.has_value()) return PropagateError(usable);
-  if (segment_ != nullptr) return Unavailable("namespaces are not supported in cross-process mode yet");
+  if (segment_ != nullptr) return Unavailable("namespaces of a cross-process cache are declared in BufferManager::Create()");
+  return AddNamespace(std::move(options));
+}
+
+auto BufferManager::GetNamespace(std::string_view name) -> Result<BufferNamespace> {
+  const std::size_t count = namespace_count_.load(std::memory_order_acquire);
+  for (std::size_t index = 0; index < count; ++index) {
+    if (namespaces_[index].name == name) return BufferNamespace(this, static_cast<NamespaceId>(index));
+  }
+  return NotFound("no namespace has this name");
+}
+
+auto BufferManager::AddNamespace(NamespaceOptions options) -> Result<BufferNamespace> {
   if (options.name.empty()) return InvalidArgument("namespace name must not be empty");
   if (options.replacer == nullptr) return InvalidArgument("namespace replacer must not be null");
   if (options.max_frames != 0 && options.min_frames > options.max_frames) return InvalidArgument("namespace minimum exceeds its maximum");
@@ -40,11 +52,11 @@ void BufferManager::AssignFrame(FrameId frame_id, NamespaceId space) {
   const NamespaceId previous = owner.load(std::memory_order_relaxed);
   if (previous == space) return;
   if (previous != kNoNamespace) {
-    namespaces_[previous].owned.fetch_sub(1, std::memory_order_relaxed);
+    namespaces_[previous].owned->fetch_sub(1, std::memory_order_relaxed);
     replacers_[previous]->Remove(frame_id);
   }
   owner.store(space, std::memory_order_relaxed);
-  namespaces_[space].owned.fetch_add(1, std::memory_order_relaxed);
+  namespaces_[space].owned->fetch_add(1, std::memory_order_relaxed);
 }
 
 void BufferManager::ForgetFrame(FrameId frame_id) {
@@ -52,7 +64,7 @@ void BufferManager::ForgetFrame(FrameId frame_id) {
   const NamespaceId previous = owner.exchange(kNoNamespace, std::memory_order_relaxed);
   if (previous == kNoNamespace) return;
   replacers_[previous]->Remove(frame_id);
-  namespaces_[previous].owned.fetch_sub(1, std::memory_order_relaxed);
+  namespaces_[previous].owned->fetch_sub(1, std::memory_order_relaxed);
 }
 
 auto BufferManager::PreWriteHookOf(FrameId frame_id) const -> const PreWriteHook & {

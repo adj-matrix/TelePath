@@ -451,6 +451,14 @@ target_link_libraries(telepath_namespace_test PRIVATE telepath)
 
 add_test(NAME telepath_namespace_test COMMAND telepath_namespace_test)
 
+add_executable(telepath_shared_namespace_test
+  cpp/buffer/shared_namespace_test.cc
+)
+
+target_link_libraries(telepath_shared_namespace_test PRIVATE telepath)
+
+add_test(NAME telepath_shared_namespace_test COMMAND telepath_shared_namespace_test)
+
 add_executable(telepath_rec_lsn_test
   cpp/buffer/rec_lsn_test.cc
 )
